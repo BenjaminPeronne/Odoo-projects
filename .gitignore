@@ -1,0 +1,16 @@
+# Ce depot contient uniquement le gestionnaire. Les projets Odoo voisins restent locaux.
+/*
+
+!/.gitignore
+!/.github/
+!/docs/
+!/odoo-manager-next/
+!/odoo_manager_core/
+!/scripts/
+!/tests/
+!/README_next_odoo_manager.md
+!/README_odoo_manager.md
+!/odoo_gui.sh
+!/odoo_manager.sh
+!/odoo_manager_web.py
+!/odoo_next_gui.sh

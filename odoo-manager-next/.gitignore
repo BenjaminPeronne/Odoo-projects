@@ -1,0 +1,9 @@
+.next/
+node_modules/
+out/
+src-tauri/target/
+src-tauri/binaries/*
+!src-tauri/binaries/README.md
+tsconfig.tsbuildinfo
+*.log
+.DS_Store
