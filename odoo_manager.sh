@@ -4,6 +4,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WORKSPACE="${ODOO_WORKSPACE:-$SCRIPT_DIR}"
 TRAEFIK_DIR="${TRAEFIK_DIR:-$HOME/docker-local-tools/traefik}"
+TRAEFIK_REPO="${TRAEFIK_REPO:-ssh://git@gitlab.sudokeys.com:10022/devops/docker-local-tools.git}"
 VENV_DIR="${VENV_DIR:-$HOME/venv_3.12}"
 FAILURE_DIR="$WORKSPACE/.odoo_manager_failures"
 DOCKER_BIN="${ODOO_MANAGER_DOCKER:-docker}"
@@ -130,6 +131,46 @@ list_projects() {
 require_docker() {
   has_cmd "$DOCKER_BIN" || die "Docker est introuvable dans ce terminal: $DOCKER_BIN"
   docker info >/dev/null 2>&1 || die "Docker ne repond pas. Demarre Docker Desktop ou le service Docker."
+}
+
+install_traefik() {
+  local tools_dir
+  local parent_dir
+
+  require_docker
+  has_cmd git || die "Git est introuvable. Installe Git avant d'installer Traefik."
+
+  if [ -f "$TRAEFIK_DIR/docker-compose.yml" ] || [ -f "$TRAEFIK_DIR/docker-compose.yaml" ] || [ -f "$TRAEFIK_DIR/compose.yml" ] || [ -f "$TRAEFIK_DIR/compose.yaml" ]; then
+    echo "Traefik deja present: $TRAEFIK_DIR"
+    start_traefik
+    return
+  fi
+
+  tools_dir="$(dirname "$TRAEFIK_DIR")"
+  parent_dir="$(dirname "$tools_dir")"
+
+  if [ "$(basename "$TRAEFIK_DIR")" != "traefik" ] || [ "$(basename "$tools_dir")" != "docker-local-tools" ]; then
+    die "Dossier Traefik non standard: $TRAEFIK_DIR. Renseigne un chemin .../docker-local-tools/traefik ou installe le depot manuellement."
+  fi
+
+  if [ -e "$tools_dir" ] && [ ! -d "$tools_dir/.git" ]; then
+    die "Le dossier $tools_dir existe deja mais n'est pas un clone Git exploitable."
+  fi
+
+  mkdir -p "$parent_dir"
+  if [ ! -d "$tools_dir/.git" ]; then
+    echo "Installation de docker-local-tools..."
+    git clone "$TRAEFIK_REPO" "$tools_dir"
+  else
+    echo "Mise a jour de docker-local-tools..."
+    (
+      cd "$tools_dir"
+      git pull --ff-only
+    )
+  fi
+
+  [ -d "$TRAEFIK_DIR" ] || die "Le dossier Traefik reste introuvable apres installation: $TRAEFIK_DIR"
+  start_traefik
 }
 
 container_status() {
@@ -971,6 +1012,7 @@ usage() {
   echo "  ./odoo_manager.sh --update PROJET"
   echo "  ./odoo_manager.sh --update-all"
   echo "  ./odoo_manager.sh --create-project"
+  echo "  ./odoo_manager.sh --install-traefik"
   echo "  ./odoo_manager.sh --logs PROJET"
   echo "  ./odoo_manager.sh --shell PROJET"
 }
@@ -1035,6 +1077,9 @@ main() {
       ;;
     --create-project)
       create_project
+      ;;
+    --install-traefik)
+      install_traefik
       ;;
     --logs)
       [ -n "${2:-}" ] || die "Nom de projet manquant."

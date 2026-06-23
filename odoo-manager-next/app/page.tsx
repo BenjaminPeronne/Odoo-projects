@@ -63,16 +63,31 @@ type DockerStatus = {
   execution_mode: string;
   can_start: boolean;
   version?: string;
-  install_guide?: {
-    title: string;
-    download_url: string;
-    install_url: string;
-    steps: string[];
-  };
+  install_guide?: InstallGuide;
+};
+
+type InstallGuide = {
+  title: string;
+  download_url: string;
+  install_url: string;
+  steps: string[];
+};
+
+type TraefikStatus = {
+  state: "missing" | "invalid" | "stopped" | "running" | string;
+  path: string;
+  installed: boolean;
+  running: boolean;
+  message: string;
+  repo?: string;
+  requires_docker: boolean;
+  can_install: boolean;
+  can_start: boolean;
 };
 
 type SystemStatus = {
   docker: DockerStatus;
+  traefik?: TraefikStatus;
   workspace: string;
   workspace_exists: boolean;
 };
@@ -146,18 +161,103 @@ type ProjectDiagnostics = {
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_ODOO_MANAGER_API?.replace(/\/$/, "") || "";
+const TAURI_API_RETRY_DELAYS_MS = [0, 250, 750, 1500, 2500];
+
+class ApiUnavailableError extends Error {
+  constructor(message = "Service local Odoo Manager indisponible. L'application n'arrive pas à joindre l'API locale sur 127.0.0.1:8765.") {
+    super(message);
+    this.name = "ApiUnavailableError";
+  }
+}
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
-    ...init,
-    headers: init?.body instanceof FormData ? init.headers : { "Content-Type": "application/json", ...init?.headers },
-  });
+  let response: Response | undefined;
+  const retryDelays = isTauriRuntime() ? TAURI_API_RETRY_DELAYS_MS : [0];
+  let lastNetworkError: unknown;
+  try {
+    for (const [index, delay] of retryDelays.entries()) {
+      if (delay) await new Promise((resolve) => window.setTimeout(resolve, delay));
+      try {
+        response = await fetch(`${API_BASE}${path}`, {
+          ...init,
+          headers: init?.body instanceof FormData ? init.headers : { "Content-Type": "application/json", ...init?.headers },
+        });
+        break;
+      } catch (error) {
+        lastNetworkError = error;
+        if (index === retryDelays.length - 1) throw error;
+      }
+    }
+  } catch {
+    throw new ApiUnavailableError(lastNetworkError instanceof Error ? `${lastNetworkError.message}. API locale indisponible.` : undefined);
+  }
+  if (!response) throw new ApiUnavailableError();
   const text = await response.text();
   const payload = text ? JSON.parse(text) : {};
   if (!response.ok) {
     throw new Error(payload.error || response.statusText);
   }
   return payload as T;
+}
+
+function isTauriRuntime() {
+  return typeof window !== "undefined" && Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
+}
+
+async function invokeDesktop<T>(command: string, args?: Record<string, unknown>) {
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<T>(command, args);
+}
+
+async function openExternalUrl(url?: string) {
+  if (!url || url === "#") return false;
+  if (!isTauriRuntime()) {
+    return Boolean(window.open(url, "_blank", "noopener,noreferrer"));
+  }
+  await invokeDesktop<void>("open_external_url", { url });
+  return true;
+}
+
+async function openDockerDesktopNative() {
+  await invokeDesktop<void>("open_docker_desktop");
+}
+
+function offlineDockerGuide(): InstallGuide {
+  const platform = typeof navigator === "undefined" ? "" : navigator.userAgent.toLowerCase();
+  if (platform.includes("windows")) {
+    return {
+      title: "Installer Docker Desktop pour Windows",
+      download_url: "https://www.docker.com/products/docker-desktop/",
+      install_url: "https://docs.docker.com/desktop/setup/install/windows-install/",
+      steps: [
+        "Télécharge Docker Desktop pour Windows depuis le site officiel Docker.",
+        "Installe Docker Desktop avec le backend WSL 2 activé.",
+        "Redémarre Windows si demandé, lance Docker Desktop, puis clique sur Actualiser.",
+      ],
+    };
+  }
+  if (platform.includes("mac")) {
+    return {
+      title: "Installer Docker Desktop pour Mac",
+      download_url: "https://www.docker.com/products/docker-desktop/",
+      install_url: "https://docs.docker.com/desktop/setup/install/mac-install/",
+      steps: [
+        "Télécharge Docker Desktop pour Mac depuis le site officiel Docker.",
+        "Ouvre le fichier .dmg, place Docker dans Applications, puis lance Docker Desktop.",
+        "Attends que Docker soit démarré, puis clique sur Actualiser.",
+      ],
+    };
+  }
+  return {
+    title: "Installer Docker",
+    download_url: "https://www.docker.com/products/docker-desktop/",
+    install_url: "https://docs.docker.com/desktop/setup/install/linux/",
+    steps: [
+      "Installe Docker Desktop ou Docker Engine selon ta distribution.",
+      "Lance Docker et vérifie que la commande docker info répond.",
+      "Reviens dans le gestionnaire puis clique sur Actualiser.",
+    ],
+  };
 }
 
 function formatDiagnostics(payload: ProjectDiagnostics) {
@@ -247,6 +347,8 @@ export default function Home() {
   const [externalLogView, setExternalLogView] = useState<{ title: string; content: string } | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [apiUnavailable, setApiUnavailable] = useState(false);
+  const [desktopRuntime, setDesktopRuntime] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [zipDialogOpen, setZipDialogOpen] = useState(false);
   const [createDbOpen, setCreateDbOpen] = useState(false);
@@ -292,6 +394,7 @@ export default function Home() {
   );
   const allFilteredModulesSelected = filteredModuleNames.length > 0 && selectedFilteredModuleCount === filteredModuleNames.length;
   const someFilteredModulesSelected = selectedFilteredModuleCount > 0 && !allFilteredModulesSelected;
+  const fallbackDockerGuide = useMemo(() => offlineDockerGuide(), []);
 
   const pushToast = useCallback((kind: Toast["kind"], message: string) => {
     const id = toastId.current++;
@@ -303,6 +406,7 @@ export default function Home() {
     try {
       const payload = await api<Overview>("/api/overview");
       setOverview(payload);
+      setApiUnavailable(false);
       setError("");
       const current = payload.projects.find((project) => project.name === selectedProjectName) || payload.projects[0];
       if (current && current.name !== selectedProjectName) {
@@ -310,6 +414,7 @@ export default function Home() {
         setSelectedDb(firstOdooDatabase(current));
       }
     } catch (err) {
+      setApiUnavailable(err instanceof ApiUnavailableError);
       setError(err instanceof Error ? err.message : "Impossible de charger l'overview.");
     }
   }, [selectedProjectName]);
@@ -318,6 +423,7 @@ export default function Home() {
     try {
       const payload = await api<SystemStatus>("/api/system/status");
       setSystemStatus(payload);
+      setApiUnavailable(false);
       const previous = lastDockerState.current;
       if (previous && previous !== payload.docker.state) {
         if (payload.docker.running) pushToast("success", "Docker est maintenant disponible.");
@@ -326,6 +432,7 @@ export default function Home() {
       lastDockerState.current = payload.docker.state;
     } catch (err) {
       setSystemStatus(null);
+      setApiUnavailable(err instanceof ApiUnavailableError);
       if (lastDockerState.current !== "api-error") {
         pushToast("error", err instanceof Error ? err.message : "État système indisponible.");
         lastDockerState.current = "api-error";
@@ -338,8 +445,11 @@ export default function Home() {
       const payload = await api<{ settings: ManagerSettings }>("/api/settings");
       setSettings(payload.settings);
       setSettingsDraft(payload.settings);
+      setApiUnavailable(false);
     } catch (err) {
-      pushToast("error", err instanceof Error ? err.message : "Paramètres indisponibles.");
+      if (!(err instanceof ApiUnavailableError)) {
+        pushToast("error", err instanceof Error ? err.message : "Paramètres indisponibles.");
+      }
     }
   }, [pushToast]);
 
@@ -347,8 +457,10 @@ export default function Home() {
     try {
       const payload = await api<{ jobs: Job[] }>("/api/jobs");
       setJobs(payload.jobs);
+      setApiUnavailable(false);
       if (!selectedJobId && payload.jobs[0]) setSelectedJobId(payload.jobs[0].id);
-    } catch {
+    } catch (err) {
+      if (err instanceof ApiUnavailableError) setApiUnavailable(true);
       // Jobs polling should not break the whole screen.
     }
   }, [selectedJobId]);
@@ -370,6 +482,7 @@ export default function Home() {
   }, [pushToast, selectedDb, selectedProject]);
 
   useEffect(() => {
+    setDesktopRuntime(isTauriRuntime());
     refreshOverview();
     refreshJobs();
     refreshSystemStatus();
@@ -425,9 +538,41 @@ export default function Home() {
       window.setTimeout(refreshSystemStatus, 1500);
       window.setTimeout(refreshSystemStatus, 5000);
     } catch (err) {
+      if (err instanceof ApiUnavailableError && isTauriRuntime()) {
+        try {
+          await openDockerDesktopNative();
+          pushToast("info", "Ouverture de Docker Desktop demandée.");
+          window.setTimeout(refreshSystemStatus, 3000);
+          return;
+        } catch (nativeError) {
+          pushToast("error", nativeError instanceof Error ? nativeError.message : "Impossible d'ouvrir Docker Desktop.");
+          return;
+        }
+      }
       pushToast("error", err instanceof Error ? err.message : "Impossible de démarrer Docker.");
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function openUrl(url?: string) {
+    try {
+      const opened = await openExternalUrl(url);
+      if (!opened) pushToast("error", "Lien impossible à ouvrir depuis l'application.");
+    } catch (err) {
+      pushToast("error", err instanceof Error ? err.message : "Lien impossible à ouvrir depuis l'application.");
+    }
+  }
+
+  async function requestTraefikInstall() {
+    if (!systemStatus?.docker.running) {
+      pushToast("error", "Installe et démarre Docker avant d'installer Traefik.");
+      return;
+    }
+    const job = await createJob("install_traefik");
+    if (job) {
+      window.setTimeout(refreshSystemStatus, 2500);
+      window.setTimeout(refreshOverview, 4000);
     }
   }
 
@@ -491,19 +636,27 @@ export default function Home() {
   }
 
   async function clearJobs() {
-    await fetch("/api/jobs", { method: "DELETE" });
-    setSelectedJobId(null);
-    setExternalLogView(null);
-    await refreshJobs();
+    try {
+      await api<{ ok: boolean }>("/api/jobs", { method: "DELETE" });
+      setSelectedJobId(null);
+      setExternalLogView(null);
+      await refreshJobs();
+    } catch (err) {
+      pushToast("error", err instanceof Error ? err.message : "Suppression de l'historique impossible.");
+    }
   }
 
   async function deleteJob(jobId: number) {
-    await fetch(`/api/jobs/${jobId}`, { method: "DELETE" });
-    if (selectedJobId === jobId) {
-      setSelectedJobId(null);
-      setExternalLogView(null);
+    try {
+      await api<{ ok: boolean }>(`/api/jobs/${jobId}`, { method: "DELETE" });
+      if (selectedJobId === jobId) {
+        setSelectedJobId(null);
+        setExternalLogView(null);
+      }
+      await refreshJobs();
+    } catch (err) {
+      pushToast("error", err instanceof Error ? err.message : "Suppression de l'entrée impossible.");
     }
-    await refreshJobs();
   }
 
   function selectJob(jobId: number) {
@@ -759,11 +912,9 @@ export default function Home() {
                   MAJ complète Odoo (-u all)
                 </Button>
                 {selectedProject && (
-                  <Button className="w-full sm:w-auto" variant="outline" asChild>
-                    <a href={selectedOdooUrl} target="_blank" rel="noreferrer">
-                      <ExternalLink className="h-4 w-4" />
-                      Odoo
-                    </a>
+                  <Button className="w-full sm:w-auto" variant="outline" onClick={() => openUrl(selectedOdooUrl)}>
+                    <ExternalLink className="h-4 w-4" />
+                    Ouvrir Odoo
                   </Button>
                 )}
               </div>
@@ -771,6 +922,46 @@ export default function Home() {
           </header>
 
           <div className="mx-auto max-w-[1500px] px-4 py-4">
+            {apiUnavailable && (
+              <div className="mb-4 flex flex-col gap-3 border-y border-red-300 bg-red-50 px-4 py-3 text-sm text-red-950 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex min-w-0 items-start gap-3">
+                  <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-red-600" />
+                  <div className="min-w-0">
+                    <div className="font-semibold">Service local indisponible</div>
+                    <div className="mt-0.5 break-words text-red-800">
+                      L'application n'arrive pas à joindre son API locale. Attends quelques secondes puis actualise. Si Docker n'est pas encore installé,
+                      installe Docker Desktop avant de lancer les projets Odoo.
+                    </div>
+                    <div className="mt-3 rounded-md border border-red-200 bg-white/70 p-3">
+                      <div className="font-medium">{fallbackDockerGuide.title}</div>
+                      <ol className="mt-2 list-decimal space-y-1 pl-4 text-xs leading-5 text-red-900">
+                        {fallbackDockerGuide.steps.map((step) => (
+                          <li key={step}>{step}</li>
+                        ))}
+                      </ol>
+                    </div>
+                  </div>
+                </div>
+                <div className="flex shrink-0 flex-col gap-2 sm:flex-row">
+                  <Button className="w-full sm:w-auto" size="sm" onClick={() => Promise.all([refreshOverview(), refreshSystemStatus(), loadSettings()])}>
+                    <RefreshCcw className="h-4 w-4" />
+                    Réessayer
+                  </Button>
+                  <Button className="w-full sm:w-auto" size="sm" variant="outline" onClick={() => openUrl(fallbackDockerGuide.download_url)}>
+                    <CloudDownload className="h-4 w-4" />
+                    Télécharger Docker
+                  </Button>
+                  <Button className="w-full sm:w-auto" size="sm" variant="outline" onClick={() => openUrl(fallbackDockerGuide.install_url)}>
+                    <ExternalLink className="h-4 w-4" />
+                    Guide Docker
+                  </Button>
+                  <Button className="w-full sm:w-auto" size="sm" variant="outline" disabled={!desktopRuntime} onClick={requestDockerStart}>
+                    <Play className="h-4 w-4" />
+                    Ouvrir Docker
+                  </Button>
+                </div>
+              </div>
+            )}
             {systemStatus && !systemStatus.docker.running && (
               <div className="mb-4 flex flex-col gap-3 border-y border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950 sm:flex-row sm:items-center sm:justify-between">
                 <div className="flex min-w-0 items-start gap-3">
@@ -792,11 +983,9 @@ export default function Home() {
                 </div>
                 <div className="flex shrink-0 flex-col gap-2 sm:flex-row">
                   {systemStatus.docker.state === "missing" && systemStatus.docker.install_guide?.download_url && (
-                    <Button className="w-full sm:w-auto" size="sm" asChild>
-                      <a href={systemStatus.docker.install_guide.download_url} target="_blank" rel="noreferrer">
-                        <CloudDownload className="h-4 w-4" />
-                        Télécharger Docker
-                      </a>
+                    <Button className="w-full sm:w-auto" size="sm" onClick={() => openUrl(systemStatus.docker.install_guide?.download_url)}>
+                      <CloudDownload className="h-4 w-4" />
+                      Télécharger Docker
                     </Button>
                   )}
                   {systemStatus.docker.can_start && (
@@ -806,11 +995,9 @@ export default function Home() {
                     </Button>
                   )}
                   {systemStatus.docker.install_guide?.install_url && (
-                    <Button className="w-full sm:w-auto" size="sm" variant="outline" asChild>
-                      <a href={systemStatus.docker.install_guide.install_url} target="_blank" rel="noreferrer">
-                        <ExternalLink className="h-4 w-4" />
-                        Guide Docker
-                      </a>
+                    <Button className="w-full sm:w-auto" size="sm" variant="outline" onClick={() => openUrl(systemStatus.docker.install_guide?.install_url)}>
+                      <ExternalLink className="h-4 w-4" />
+                      Guide Docker
                     </Button>
                   )}
                   <Button
@@ -822,6 +1009,36 @@ export default function Home() {
                       setSettingsOpen(true);
                     }}
                   >
+                    <Settings className="h-4 w-4" />
+                    Paramètres
+                  </Button>
+                </div>
+              </div>
+            )}
+            {systemStatus?.traefik && !systemStatus.traefik.running && (
+              <div className="mb-4 flex flex-col gap-3 border-y border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-950 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex min-w-0 items-start gap-3">
+                  <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-sky-700" />
+                  <div className="min-w-0">
+                    <div className="font-semibold">Traefik n'est pas prêt</div>
+                    <div className="mt-0.5 break-words text-sky-800">
+                      {systemStatus.traefik.message}
+                      {systemStatus.traefik.requires_docker ? " Docker doit être installé et démarré avant cette étape." : ""}
+                    </div>
+                    <div className="mt-1 break-all text-xs text-sky-700">Dossier attendu : {systemStatus.traefik.path}</div>
+                  </div>
+                </div>
+                <div className="flex shrink-0 flex-col gap-2 sm:flex-row">
+                  <Button
+                    className="w-full sm:w-auto"
+                    size="sm"
+                    disabled={!systemStatus.docker.running || loading}
+                    onClick={requestTraefikInstall}
+                  >
+                    {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                    {systemStatus.traefik.installed ? "Démarrer Traefik" : "Installer Traefik"}
+                  </Button>
+                  <Button className="w-full sm:w-auto" size="sm" variant="outline" onClick={() => setSettingsOpen(true)}>
                     <Settings className="h-4 w-4" />
                     Paramètres
                   </Button>
@@ -896,11 +1113,9 @@ export default function Home() {
                         Créer une base
                       </Button>
                       {selectedProject && (
-                        <Button className="w-full" variant="outline" asChild>
-                          <a href={selectedProject.database_manager_url} target="_blank">
-                            <ExternalLink className="h-4 w-4" />
-                            Gestionnaire Odoo natif
-                          </a>
+                        <Button className="w-full" variant="outline" onClick={() => openUrl(selectedProject.database_manager_url)}>
+                          <ExternalLink className="h-4 w-4" />
+                          Gestionnaire Odoo natif
                         </Button>
                       )}
                     </CardContent>

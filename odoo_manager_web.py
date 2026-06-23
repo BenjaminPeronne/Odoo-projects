@@ -18,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from odoo_manager_core import ManagerSettings, SettingsStore, docker_status, open_terminal, start_docker
-from odoo_manager_core.platform import executable_search_path, execution_path
+from odoo_manager_core.platform import command_prefix, executable_search_path, execution_path
 from odoo_manager_core.system import docker_command, shell_command
 
 
@@ -41,6 +41,7 @@ DELETED_PROJECTS = WORKSPACE / ".odoo_manager_deleted"
 DELETED_MODULES = WORKSPACE / ".odoo_manager_deleted_modules"
 HOST = os.environ.get("ODOO_GUI_HOST", "127.0.0.1")
 PORT = int(os.environ.get("ODOO_GUI_PORT", "8765"))
+TRAEFIK_REPO = "ssh://git@gitlab.sudokeys.com:10022/devops/docker-local-tools.git"
 
 SAFE_PROJECT_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 SAFE_DB_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -222,6 +223,79 @@ def run_capture(args, cwd=None, timeout=12):
 def docker_available():
     status = docker_status(SETTINGS)
     return status["running"], status["message"]
+
+
+def default_traefik_directory():
+    return Path.home() / "docker-local-tools" / "traefik"
+
+
+def traefik_directory_label():
+    if SETTINGS.traefik_directory:
+        return str(Path(SETTINGS.traefik_directory).expanduser())
+    if SETTINGS.execution_mode == "wsl":
+        return "$HOME/docker-local-tools/traefik"
+    return str(default_traefik_directory())
+
+
+def local_traefik_directory():
+    if SETTINGS.traefik_directory:
+        return Path(SETTINGS.traefik_directory).expanduser()
+    if SETTINGS.execution_mode == "wsl":
+        return None
+    return default_traefik_directory()
+
+
+def traefik_compose_probe():
+    if SETTINGS.execution_mode == "wsl" and not SETTINGS.traefik_directory:
+        script = (
+            'dir="$HOME/docker-local-tools/traefik"; '
+            'if [ ! -d "$dir" ]; then echo missing; exit 2; fi; '
+            'if [ -f "$dir/docker-compose.yml" ] || [ -f "$dir/docker-compose.yaml" ] || '
+            '[ -f "$dir/compose.yml" ] || [ -f "$dir/compose.yaml" ]; then echo ready; exit 0; fi; '
+            'echo invalid; exit 3'
+        )
+        code, output = run_capture([*command_prefix(SETTINGS), "sh", "-lc", script], timeout=6)
+        state = (output.splitlines()[-1] if output else "").strip()
+        return code == 0, state != "missing", state == "ready"
+
+    directory = local_traefik_directory()
+    if not directory or not directory.exists():
+        return False, False, False
+    has_compose = any((directory / name).exists() for name in ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"))
+    return has_compose, True, has_compose
+
+
+def traefik_status():
+    docker = docker_status(SETTINGS)
+    has_compose, exists, valid = traefik_compose_probe()
+    running = False
+    if docker["running"]:
+        running = container_status("traefik") == "running"
+
+    if running:
+        state = "running"
+        message = "Traefik est opérationnel."
+    elif not exists:
+        state = "missing"
+        message = "Traefik n'est pas installé dans le dossier attendu."
+    elif not valid:
+        state = "invalid"
+        message = "Le dossier Traefik existe mais aucun fichier compose n'a été trouvé."
+    else:
+        state = "stopped"
+        message = "Traefik est installé mais pas démarré."
+
+    return {
+        "state": state,
+        "path": traefik_directory_label(),
+        "installed": has_compose,
+        "running": running,
+        "message": message,
+        "repo": TRAEFIK_REPO,
+        "requires_docker": not docker["running"],
+        "can_install": docker["running"] and not valid,
+        "can_start": docker["running"] and valid and not running,
+    }
 
 
 def container_status(name):
@@ -816,6 +890,13 @@ def manager_job(job, *args):
     if not MANAGER.exists():
         raise RuntimeError(f"Script introuvable: {MANAGER}")
     run_stream(job, shell_command(SETTINGS, MANAGER, *args))
+
+
+def install_traefik_job(job):
+    status = docker_status(SETTINGS)
+    if not status["running"]:
+        raise RuntimeError("Docker doit être installé et démarré avant l'installation de Traefik.")
+    manager_job(job, "--install-traefik")
 
 
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -2425,6 +2506,7 @@ class Handler(BaseHTTPRequestHandler):
                     self,
                     {
                         "docker": docker_status(SETTINGS),
+                        "traefik": traefik_status(),
                         "workspace": str(WORKSPACE),
                         "workspace_exists": WORKSPACE.exists() and WORKSPACE.is_dir(),
                     },
@@ -2545,6 +2627,8 @@ class Handler(BaseHTTPRequestHandler):
                 job = Job(f"Mettre à jour les addons projet sur {db_name}", manager_job, ("--update-local-modules", project, db_name))
             elif action == "create_project_terminal":
                 job = Job("Ouvrir Terminal pour créer un projet", create_project_terminal_job)
+            elif action == "install_traefik":
+                job = Job("Installer Traefik", install_traefik_job)
             elif action == "create_database":
                 project = validate_project(payload.get("project", ""))
                 db_name = validate_db(payload.get("db", ""))
