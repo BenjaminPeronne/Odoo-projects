@@ -1110,13 +1110,13 @@ export default function Home() {
                         <div
                           key={job.id}
                           className={cn(
-                            "group grid grid-cols-[minmax(0,1fr)_auto] gap-2 rounded-md border p-2 transition-colors hover:bg-muted",
+                            "group grid grid-cols-1 gap-2 rounded-md border p-2 transition-colors hover:bg-muted sm:grid-cols-[minmax(0,1fr)_auto]",
                             !externalLogView && selectedJob?.id === job.id && "border-primary bg-primary/8",
                           )}
                         >
                           <button
                             type="button"
-                            className="min-w-0 rounded-md p-1 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring"
+                            className="min-w-0 rounded-md p-2 text-left outline-none transition-colors hover:bg-card/70 focus-visible:ring-2 focus-visible:ring-ring"
                             onClick={() => selectJob(job.id)}
                           >
                             <div className="flex items-start justify-between gap-2">
@@ -1128,14 +1128,18 @@ export default function Home() {
                             </div>
                           </button>
                           <Button
-                            className="self-start opacity-70 transition-opacity hover:opacity-100 focus-visible:opacity-100"
-                            variant="ghost"
-                            size="icon"
+                            className="relative z-10 w-full shrink-0 border-red-200 text-red-700 hover:border-red-300 hover:bg-red-50 hover:text-red-800 active:bg-red-100 focus-visible:ring-red-500 sm:w-auto sm:self-start"
+                            variant="outline"
+                            size="sm"
                             title={`Supprimer l'historique ${job.title}`}
                             aria-label={`Supprimer l'historique ${job.title}`}
-                            onClick={() => deleteJob(job.id)}
+                            onClick={(event) => {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              deleteJob(job.id);
+                            }}
                           >
-                            <Trash2 className="h-4 w-4" />
+                            Supprimer
                           </Button>
                         </div>
                       ))}
