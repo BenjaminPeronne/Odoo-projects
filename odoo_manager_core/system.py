@@ -1,11 +1,21 @@
 import json
+import os
 import subprocess
 
-from .platform import command_prefix, executable_available, execution_path, open_terminal_script, platform_id, start_docker_desktop
+from .platform import (
+    command_prefix,
+    executable_available,
+    executable_search_path,
+    execution_path,
+    open_terminal_script,
+    platform_id,
+    resolve_executable,
+    start_docker_desktop,
+)
 
 
 def docker_command(settings, *arguments):
-    return [*command_prefix(settings), settings.docker_executable, *arguments]
+    return [*command_prefix(settings), resolve_executable(settings.docker_executable, settings), *arguments]
 
 
 def shell_command(settings, script_path, *arguments):
@@ -31,7 +41,9 @@ def docker_status(settings, timeout=6):
 
     command = docker_command(settings, "info", "--format", "{{json .ServerVersion}}")
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
+        env = os.environ.copy()
+        env["PATH"] = executable_search_path()
+        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False, env=env)
     except subprocess.TimeoutExpired:
         return {
             "state": "starting",

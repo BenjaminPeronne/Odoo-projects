@@ -8,6 +8,23 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+COMMON_EXECUTABLE_PATHS = {
+    "Darwin": [
+        "/Applications/Docker.app/Contents/Resources/bin",
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+    ],
+    "Linux": [
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/snap/bin",
+    ],
+}
+
+
 @dataclass(frozen=True)
 class LaunchResult:
     ok: bool
@@ -33,6 +50,26 @@ def command_prefix(settings):
     return command
 
 
+def executable_search_path(extra_paths=None):
+    paths = [path for path in os.environ.get("PATH", "").split(os.pathsep) if path]
+    for path in COMMON_EXECUTABLE_PATHS.get(platform.system(), []):
+        if path not in paths:
+            paths.append(path)
+    for path in extra_paths or []:
+        if path and path not in paths:
+            paths.append(path)
+    return os.pathsep.join(paths)
+
+
+def resolve_executable(executable, settings):
+    if settings.execution_mode == "wsl":
+        return executable
+    path = Path(executable).expanduser()
+    if path.is_absolute():
+        return str(path)
+    return shutil.which(executable, path=executable_search_path()) or executable
+
+
 def execution_path(path, settings):
     path = str(Path(path).expanduser().resolve())
     if settings.execution_mode != "wsl":
@@ -52,7 +89,7 @@ def executable_available(executable, settings):
     path = Path(executable).expanduser()
     if path.is_absolute():
         return path.exists() and path.is_file()
-    return shutil.which(executable) is not None
+    return shutil.which(executable, path=executable_search_path()) is not None
 
 
 def start_docker_desktop(settings):

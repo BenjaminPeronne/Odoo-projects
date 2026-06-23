@@ -23,6 +23,25 @@ class DockerStatusTests(unittest.TestCase):
         self.assertEqual(status["state"], "ready")
         self.assertEqual(status["version"], "28.0.0")
 
+    @mock.patch("odoo_manager_core.system.subprocess.run")
+    @mock.patch("odoo_manager_core.platform.shutil.which")
+    def test_ready_docker_resolves_common_app_path(self, which, run):
+        def fake_which(name, path=None):
+            if name == "docker" and path and "/usr/local/bin" in path:
+                return "/usr/local/bin/docker"
+            return None
+
+        which.side_effect = fake_which
+        run.return_value = mock.Mock(returncode=0, stdout='"29.5.3"\n', stderr="")
+
+        status = docker_status(self.settings)
+
+        self.assertEqual(status["state"], "ready")
+        self.assertEqual(status["version"], "29.5.3")
+        command = run.call_args.args[0]
+        self.assertEqual(command[0], "/usr/local/bin/docker")
+        self.assertIn("/usr/local/bin", run.call_args.kwargs["env"]["PATH"])
+
     @mock.patch("odoo_manager_core.system.executable_available", return_value=True)
     @mock.patch("odoo_manager_core.system.subprocess.run")
     def test_stopped_docker(self, run, _available):

@@ -14,3 +14,7 @@
 !/odoo_manager.sh
 !/odoo_manager_web.py
 !/odoo_next_gui.sh
+
+.build-venv/
+__pycache__/
+*.py[cod]

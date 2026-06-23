@@ -18,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from odoo_manager_core import ManagerSettings, SettingsStore, docker_status, open_terminal, start_docker
-from odoo_manager_core.platform import execution_path
+from odoo_manager_core.platform import executable_search_path, execution_path
 from odoo_manager_core.system import docker_command, shell_command
 
 
@@ -41,14 +41,6 @@ DELETED_PROJECTS = WORKSPACE / ".odoo_manager_deleted"
 DELETED_MODULES = WORKSPACE / ".odoo_manager_deleted_modules"
 HOST = os.environ.get("ODOO_GUI_HOST", "127.0.0.1")
 PORT = int(os.environ.get("ODOO_GUI_PORT", "8765"))
-
-EXTRA_PATHS = [
-    "/Applications/Docker.app/Contents/Resources/bin",
-    "/opt/homebrew/bin",
-    "/usr/local/bin",
-    "/usr/bin",
-    "/bin",
-]
 
 SAFE_PROJECT_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 SAFE_DB_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -94,12 +86,7 @@ def unique_child(parent, name):
 
 def command_env():
     env = os.environ.copy()
-    current = env.get("PATH", "")
-    parts = [p for p in current.split(os.pathsep) if p]
-    for path in EXTRA_PATHS:
-        if path not in parts:
-            parts.append(path)
-    env["PATH"] = os.pathsep.join(parts)
+    env["PATH"] = executable_search_path()
     env["PYTHONUNBUFFERED"] = "1"
     env["ODOO_WORKSPACE"] = execution_path(WORKSPACE, SETTINGS)
     if SETTINGS.traefik_directory:
