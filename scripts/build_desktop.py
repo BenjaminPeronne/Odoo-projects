@@ -41,8 +41,12 @@ def clean_macos_attributes() -> None:
 
 
 def run(command: list[str], *, cwd: Path = ROOT, env=None) -> None:
+    resolved = command.copy()
+    executable = shutil.which(resolved[0])
+    if executable:
+        resolved[0] = executable
     print("+", " ".join(command), flush=True)
-    subprocess.run(command, cwd=cwd, env=env, check=True)
+    subprocess.run(resolved, cwd=cwd, env=env, check=True)
 
 
 def main() -> None:
