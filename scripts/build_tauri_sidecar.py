@@ -62,27 +62,28 @@ def main():
     base_name = f"odoo-manager-backend-{target_triple()}"
     output = BINARIES / f"{base_name}{extension}"
     data_separator = os.pathsep
+    pyinstaller_args = [
+        str(ROOT / "odoo_manager_web.py"),
+        "--onefile",
+        "--noconfirm",
+        "--clean",
+        "--name",
+        base_name,
+        "--distpath",
+        str(BINARIES),
+        "--workpath",
+        str(build_root / "work"),
+        "--specpath",
+        str(build_root),
+        "--add-data",
+        f"{ROOT / 'odoo_manager.sh'}{data_separator}.",
+        "--add-data",
+        f"{ROOT / 'odoo_manager_core'}{data_separator}odoo_manager_core",
+    ]
+    if os.name == "nt":
+        pyinstaller_args.append("--noconsole")
 
-    PyInstaller.__main__.run(
-        [
-            str(ROOT / "odoo_manager_web.py"),
-            "--onefile",
-            "--noconfirm",
-            "--clean",
-            "--name",
-            base_name,
-            "--distpath",
-            str(BINARIES),
-            "--workpath",
-            str(build_root / "work"),
-            "--specpath",
-            str(build_root),
-            "--add-data",
-            f"{ROOT / 'odoo_manager.sh'}{data_separator}.",
-            "--add-data",
-            f"{ROOT / 'odoo_manager_core'}{data_separator}odoo_manager_core",
-        ]
-    )
+    PyInstaller.__main__.run(pyinstaller_args)
     print(f"Sidecar créé: {output}")
 
 

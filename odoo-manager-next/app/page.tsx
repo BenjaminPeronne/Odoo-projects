@@ -63,6 +63,12 @@ type DockerStatus = {
   execution_mode: string;
   can_start: boolean;
   version?: string;
+  install_guide?: {
+    title: string;
+    download_url: string;
+    install_url: string;
+    steps: string[];
+  };
 };
 
 type SystemStatus = {
@@ -720,13 +726,39 @@ export default function Home() {
                   <div className="min-w-0">
                     <div className="font-semibold">Docker n’est pas disponible</div>
                     <div className="mt-0.5 break-words text-amber-800">{systemStatus.docker.message}</div>
+                    {systemStatus.docker.state === "missing" && systemStatus.docker.install_guide && (
+                      <div className="mt-3 rounded-md border border-amber-200 bg-white/70 p-3">
+                        <div className="font-medium">{systemStatus.docker.install_guide.title}</div>
+                        <ol className="mt-2 list-decimal space-y-1 pl-4 text-xs leading-5 text-amber-900">
+                          {systemStatus.docker.install_guide.steps.map((step) => (
+                            <li key={step}>{step}</li>
+                          ))}
+                        </ol>
+                      </div>
+                    )}
                   </div>
                 </div>
                 <div className="flex shrink-0 flex-col gap-2 sm:flex-row">
+                  {systemStatus.docker.state === "missing" && systemStatus.docker.install_guide?.download_url && (
+                    <Button className="w-full sm:w-auto" size="sm" asChild>
+                      <a href={systemStatus.docker.install_guide.download_url} target="_blank" rel="noreferrer">
+                        <CloudDownload className="h-4 w-4" />
+                        Télécharger Docker
+                      </a>
+                    </Button>
+                  )}
                   {systemStatus.docker.can_start && (
                     <Button className="w-full sm:w-auto" size="sm" disabled={loading} onClick={requestDockerStart}>
                       {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
                       Ouvrir Docker
+                    </Button>
+                  )}
+                  {systemStatus.docker.install_guide?.install_url && (
+                    <Button className="w-full sm:w-auto" size="sm" variant="outline" asChild>
+                      <a href={systemStatus.docker.install_guide.install_url} target="_blank" rel="noreferrer">
+                        <ExternalLink className="h-4 w-4" />
+                        Guide Docker
+                      </a>
                     </Button>
                   )}
                   <Button

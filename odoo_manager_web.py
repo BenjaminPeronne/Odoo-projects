@@ -1821,15 +1821,27 @@ INDEX_HTML = """<!doctype html>
         const docker = state.systemStatus.docker;
         const alert = document.getElementById('dockerAlert');
         if (!docker.running) {
+          const guide = docker.install_guide || {};
+          const steps = Array.isArray(guide.steps) ? guide.steps : [];
+          const guideHtml = docker.state === 'missing' && guide.title ? `
+            <div class="mt-2 rounded border bg-white bg-opacity-75 p-2">
+              <div class="fw-semibold small">${esc(guide.title)}</div>
+              <ol class="small mb-0 mt-1 ps-3">
+                ${steps.map((step) => `<li>${esc(step)}</li>`).join('')}
+              </ol>
+            </div>` : '';
           alert.className = `alert ${docker.state === 'missing' ? 'alert-danger' : 'alert-warning'}`;
           alert.innerHTML = `
             <div class="docker-alert-content">
               <div class="docker-alert-message">
                 <div class="fw-semibold"><i class="bi bi-exclamation-triangle me-1"></i> Docker n’est pas disponible</div>
                 <div class="small mt-1">${esc(docker.message)}</div>
+                ${guideHtml}
               </div>
               <div class="docker-alert-actions">
+                ${docker.state === 'missing' && guide.download_url ? `<a class="btn btn-sm btn-primary" href="${esc(guide.download_url)}" target="_blank" rel="noopener noreferrer"><i class="bi bi-cloud-download"></i> Télécharger Docker</a>` : ''}
                 ${docker.can_start ? '<button class="btn btn-sm btn-primary" id="startDockerBtn"><i class="bi bi-play-fill"></i> Ouvrir Docker</button>' : ''}
+                ${guide.install_url ? `<a class="btn btn-sm btn-outline-secondary" href="${esc(guide.install_url)}" target="_blank" rel="noopener noreferrer"><i class="bi bi-box-arrow-up-right"></i> Guide Docker</a>` : ''}
                 <button class="btn btn-sm btn-outline-secondary" id="dockerSettingsBtn"><i class="bi bi-gear"></i> Paramètres</button>
               </div>
             </div>`;

@@ -14,6 +14,12 @@ class DockerStatusTests(unittest.TestCase):
         status = docker_status(self.settings)
         self.assertEqual(status["state"], "missing")
         self.assertFalse(status["running"])
+        self.assertFalse(status["can_start"])
+        self.assertIn("install_guide", status)
+        self.assertIn("Docker", status["install_guide"]["title"])
+        self.assertTrue(status["install_guide"]["download_url"].startswith("https://www.docker.com/"))
+        self.assertTrue(status["install_guide"]["install_url"].startswith("https://docs.docker.com/"))
+        self.assertGreaterEqual(len(status["install_guide"]["steps"]), 2)
 
     @mock.patch("odoo_manager_core.system.executable_available", return_value=True)
     @mock.patch("odoo_manager_core.system.subprocess.run")
@@ -22,6 +28,7 @@ class DockerStatusTests(unittest.TestCase):
         status = docker_status(self.settings)
         self.assertEqual(status["state"], "ready")
         self.assertEqual(status["version"], "28.0.0")
+        self.assertFalse(status["can_start"])
 
     @mock.patch("odoo_manager_core.system.subprocess.run")
     @mock.patch("odoo_manager_core.platform.shutil.which")
