@@ -32,7 +32,8 @@ class DockerStatusTests(unittest.TestCase):
 
     @mock.patch("odoo_manager_core.system.subprocess.run")
     @mock.patch("odoo_manager_core.platform.shutil.which")
-    def test_ready_docker_resolves_common_app_path(self, which, run):
+    @mock.patch("odoo_manager_core.platform.platform.system", return_value="Darwin")
+    def test_ready_docker_resolves_common_app_path(self, _system, which, run):
         def fake_which(name, path=None):
             if name == "docker" and path and "/usr/local/bin" in path:
                 return "/usr/local/bin/docker"
