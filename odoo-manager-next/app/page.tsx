@@ -353,6 +353,7 @@ export default function Home() {
   const [zipDialogOpen, setZipDialogOpen] = useState(false);
   const [createDbOpen, setCreateDbOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [updateAllDialogOpen, setUpdateAllDialogOpen] = useState(false);
   const [uninstallDialogOpen, setUninstallDialogOpen] = useState(false);
   const [deleteCodeDialogOpen, setDeleteCodeDialogOpen] = useState(false);
   const [replaceZipModules, setReplaceZipModules] = useState(true);
@@ -599,13 +600,52 @@ export default function Home() {
     }
   }
 
+  function selectedDatabaseOrNotify(action: string) {
+    if (!selectedProject) {
+      pushToast("error", `Sélectionne un projet avant de lancer ${action}.`);
+      return "";
+    }
+    if (!canUseDb) {
+      pushToast("error", `Sélectionne une base Odoo avant de lancer ${action}. La base technique postgres n'est pas utilisable ici.`);
+      return "";
+    }
+    return selectedDb;
+  }
+
+  async function requestUpdateLocalModules() {
+    const db = selectedDatabaseOrNotify("la MAJ addons projet");
+    if (!db || !selectedProject) return;
+    await createJob("update_local_modules", { project: selectedProject.name, db });
+    window.setTimeout(refreshModules, 2500);
+  }
+
   function requestUpdateAllOdooModules() {
-    if (!selectedProject || !canUseDb) return;
-    const confirmed = window.confirm(
-      `Lancer une mise à jour complète Odoo sur la base ${selectedDb} ?\n\nEquivalent: odoo -d ${selectedDb} -u all --stop-after-init`,
-    );
-    if (!confirmed) return;
-    createJob("update_all_modules", { project: selectedProject.name, db: selectedDb }).then(() => window.setTimeout(refreshModules, 2500));
+    const db = selectedDatabaseOrNotify("la MAJ complète Odoo");
+    if (!db) return;
+    setUpdateAllDialogOpen(true);
+  }
+
+  async function confirmUpdateAllOdooModules() {
+    const db = selectedDatabaseOrNotify("la MAJ complète Odoo");
+    if (!db || !selectedProject) return;
+    const job = await createJob("update_all_modules", { project: selectedProject.name, db });
+    if (job) {
+      setUpdateAllDialogOpen(false);
+      window.setTimeout(refreshModules, 2500);
+    }
+  }
+
+  async function refreshAllViews() {
+    await Promise.all([refreshOverview(), refreshSystemStatus(), refreshJobs()]);
+  }
+
+  async function copyOutput() {
+    try {
+      await navigator.clipboard.writeText(outputContent);
+      pushToast("success", "Sortie copiée.");
+    } catch {
+      pushToast("error", "Impossible de copier la sortie.");
+    }
   }
 
   async function showLogs() {
@@ -885,7 +925,7 @@ export default function Home() {
                 </p>
               </div>
               <div className="flex w-full shrink-0 flex-wrap gap-2 xl:w-auto xl:max-w-[660px] xl:justify-end">
-                <Button className="w-full sm:w-auto" variant="outline" onClick={refreshOverview}>
+                <Button className="w-full sm:w-auto" variant="outline" onClick={refreshAllViews}>
                   <RefreshCcw className="h-4 w-4" />
                   Actualiser
                 </Button>
@@ -896,8 +936,8 @@ export default function Home() {
                 <Button
                   className="w-full sm:w-auto"
                   variant="outline"
-                  disabled={!selectedProjectReady || !canUseDb || loading}
-                  onClick={() => createJob("update_local_modules", { project: selectedProject?.name, db: selectedDb })}
+                  disabled={!selectedProjectReady || loading}
+                  onClick={requestUpdateLocalModules}
                 >
                   <ListRestart className="h-4 w-4" />
                   MAJ addons projet
@@ -905,7 +945,7 @@ export default function Home() {
                 <Button
                   className="w-full sm:w-auto"
                   variant="outline"
-                  disabled={!selectedProjectReady || !canUseDb || loading}
+                  disabled={!selectedProjectReady || loading}
                   onClick={requestUpdateAllOdooModules}
                 >
                   <RefreshCcw className="h-4 w-4" />
@@ -1378,7 +1418,7 @@ export default function Home() {
                         <Button
                           variant="outline"
                           size="sm"
-                          onClick={() => navigator.clipboard.writeText(outputContent)}
+                          onClick={copyOutput}
                         >
                           <Copy className="h-4 w-4" />
                           Copier
@@ -1402,11 +1442,11 @@ export default function Home() {
                       <CardDescription>Met à jour les modules dans la base sélectionnée.</CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-2">
-                      <Button className="w-full" variant="outline" disabled={!selectedProjectReady || !canUseDb || loading} onClick={() => createJob("update_local_modules", { project: selectedProject?.name, db: selectedDb })}>
+                      <Button className="w-full" variant="outline" disabled={!selectedProjectReady || loading} onClick={requestUpdateLocalModules}>
                         <ListRestart className="h-4 w-4" />
                         MAJ addons projet
                       </Button>
-                      <Button className="w-full" disabled={!selectedProjectReady || !canUseDb || loading} onClick={requestUpdateAllOdooModules}>
+                      <Button className="w-full" disabled={!selectedProjectReady || loading} onClick={requestUpdateAllOdooModules}>
                         <RefreshCcw className="h-4 w-4" />
                         MAJ complète Odoo (-u all)
                       </Button>
@@ -1636,6 +1676,42 @@ export default function Home() {
             <Trash2 className="h-4 w-4" />
             Supprimer
           </Button>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={updateAllDialogOpen} onOpenChange={setUpdateAllDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>MAJ complète Odoo</DialogTitle>
+            <DialogDescription>
+              Cette action lance une mise à jour de tous les modules installés sur la base sélectionnée.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3 rounded-md border bg-muted/40 p-3 text-sm">
+            <div className="grid gap-1">
+              <span className="text-xs font-medium uppercase text-muted-foreground">Projet</span>
+              <span className="break-words font-medium">{selectedProject?.name || "-"}</span>
+            </div>
+            <div className="grid gap-1">
+              <span className="text-xs font-medium uppercase text-muted-foreground">Base</span>
+              <span className="break-words font-medium">{selectedDb || "-"}</span>
+            </div>
+            <div className="grid gap-1">
+              <span className="text-xs font-medium uppercase text-muted-foreground">Commande</span>
+              <code className="break-all rounded bg-slate-950 px-2 py-1 text-xs text-emerald-100">
+                odoo -d {selectedDb || "BASE"} -u all --stop-after-init
+              </code>
+            </div>
+          </div>
+          <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+            <Button variant="outline" onClick={() => setUpdateAllDialogOpen(false)}>
+              Annuler
+            </Button>
+            <Button disabled={!selectedProjectReady || !canUseDb || loading} onClick={confirmUpdateAllOdooModules}>
+              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
+              Lancer la MAJ complète
+            </Button>
+          </div>
         </DialogContent>
       </Dialog>
 
