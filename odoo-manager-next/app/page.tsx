@@ -215,6 +215,19 @@ function firstOdooDatabase(project?: Project) {
   return project?.databases?.find((db) => db !== "postgres") || project?.databases?.[0] || "";
 }
 
+function odooAccessUrl(project?: Project, db?: string) {
+  if (!project?.url) return "#";
+  if (!db || db === "postgres") return project.url;
+  try {
+    const url = new URL("/web", project.url);
+    url.searchParams.set("db", db);
+    return url.toString();
+  } catch {
+    const separator = project.url.includes("?") ? "&" : "?";
+    return `${project.url.replace(/\/$/, "")}/web${separator}db=${encodeURIComponent(db)}`;
+  }
+}
+
 export default function Home() {
   const [overview, setOverview] = useState<Overview | null>(null);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
@@ -270,6 +283,15 @@ export default function Home() {
       .filter((module) => moduleFilter === "all" || module.state === moduleFilter)
       .slice(0, 300);
   }, [modules, moduleFilter, moduleSearch]);
+
+  const moduleByName = useMemo(() => new Map(modules.map((module) => [module.name, module])), [modules]);
+  const filteredModuleNames = useMemo(() => filteredModules.map((module) => module.name), [filteredModules]);
+  const selectedFilteredModuleCount = useMemo(
+    () => filteredModuleNames.filter((name) => selectedModules.has(name)).length,
+    [filteredModuleNames, selectedModules],
+  );
+  const allFilteredModulesSelected = filteredModuleNames.length > 0 && selectedFilteredModuleCount === filteredModuleNames.length;
+  const someFilteredModulesSelected = selectedFilteredModuleCount > 0 && !allFilteredModulesSelected;
 
   const pushToast = useCallback((kind: Toast["kind"], message: string) => {
     const id = toastId.current++;
@@ -573,13 +595,43 @@ export default function Home() {
     }
   }
 
-  const selectedModuleList = Array.from(selectedModules);
-  const selectedInstalledModuleList = selectedModuleList.filter((name) => modules.find((module) => module.name === name)?.state === "installed");
-  const selectedRemovableModuleList = selectedModuleList.filter((name) => modules.find((module) => module.name === name)?.removable);
+  const selectedModuleList = useMemo(() => Array.from(selectedModules), [selectedModules]);
+  const selectedInstalledModuleList = useMemo(
+    () => selectedModuleList.filter((name) => moduleByName.get(name)?.state === "installed"),
+    [moduleByName, selectedModuleList],
+  );
+  const selectedRemovableModuleList = useMemo(
+    () => selectedModuleList.filter((name) => moduleByName.get(name)?.removable),
+    [moduleByName, selectedModuleList],
+  );
   const selectedProjectReady = Boolean(selectedProject);
   const canUseDb = Boolean(selectedDb && selectedDb !== "postgres");
+  const selectedOdooUrl = odooAccessUrl(selectedProject, selectedDb);
   const outputTitle = externalLogView?.title || selectedJob?.title || "Aucune action sélectionnée";
   const outputContent = externalLogView?.content || selectedJob?.output || selectedJob?.lines?.join("\n") || "Aucune sortie.";
+
+  const toggleModuleSelection = useCallback((name: string, checked: boolean) => {
+    setSelectedModules((current) => {
+      const next = new Set(current);
+      if (checked) next.add(name);
+      else next.delete(name);
+      return next;
+    });
+  }, []);
+
+  const toggleFilteredModules = useCallback(
+    (checked: boolean) => {
+      setSelectedModules((current) => {
+        const next = new Set(current);
+        for (const name of filteredModuleNames) {
+          if (checked) next.add(name);
+          else next.delete(name);
+        }
+        return next;
+      });
+    },
+    [filteredModuleNames],
+  );
 
   return (
     <main className="min-h-screen overflow-x-hidden">
@@ -708,7 +760,7 @@ export default function Home() {
                 </Button>
                 {selectedProject && (
                   <Button className="w-full sm:w-auto" variant="outline" asChild>
-                    <a href={selectedProject.url} target="_blank">
+                    <a href={selectedOdooUrl} target="_blank" rel="noreferrer">
                       <ExternalLink className="h-4 w-4" />
                       Odoo
                     </a>
@@ -930,6 +982,30 @@ export default function Home() {
                         </SelectContent>
                       </Select>
                     </div>
+                    <div className="mb-3 flex flex-col gap-2 rounded-md border bg-muted/45 p-3 text-sm sm:flex-row sm:items-center sm:justify-between">
+                      <label className="flex min-w-0 cursor-pointer items-start gap-3">
+                        <input
+                          className="mt-0.5 h-4 w-4 shrink-0"
+                          aria-checked={someFilteredModulesSelected ? "mixed" : allFilteredModulesSelected}
+                          ref={(input) => {
+                            if (input) input.indeterminate = someFilteredModulesSelected;
+                          }}
+                          type="checkbox"
+                          checked={allFilteredModulesSelected}
+                          disabled={!filteredModuleNames.length}
+                          onChange={(event) => toggleFilteredModules(event.target.checked)}
+                        />
+                        <span className="min-w-0">
+                          <span className="block font-medium">Sélectionner les résultats affichés</span>
+                          <span className="block text-xs text-muted-foreground">
+                            Coche automatiquement les modules présents dans la recherche courante.
+                          </span>
+                        </span>
+                      </label>
+                      <Badge className="w-fit shrink-0" variant="outline">
+                        {selectedFilteredModuleCount}/{filteredModuleNames.length} sélectionné(s)
+                      </Badge>
+                    </div>
                     <div className="overflow-hidden rounded-md border">
                       <div className="hidden border-b bg-muted px-3 py-2 text-xs font-medium uppercase text-muted-foreground lg:grid lg:grid-cols-[minmax(220px,1.45fr)_120px_130px_minmax(180px,1fr)_168px] lg:items-center lg:gap-3">
                         <div>Module</div>
@@ -953,12 +1029,7 @@ export default function Home() {
                                     aria-label={`Sélectionner ${module.name}`}
                                     type="checkbox"
                                     checked={selectedModules.has(module.name)}
-                                    onChange={(event) => {
-                                      const next = new Set(selectedModules);
-                                      if (event.target.checked) next.add(module.name);
-                                      else next.delete(module.name);
-                                      setSelectedModules(next);
-                                    }}
+                                    onChange={(event) => toggleModuleSelection(module.name, event.target.checked)}
                                   />
                                   <div className="min-w-0">
                                     <div className="break-words font-medium">{module.name}</div>
@@ -1038,39 +1109,33 @@ export default function Home() {
                       {jobs.map((job) => (
                         <div
                           key={job.id}
-                          role="button"
-                          tabIndex={0}
                           className={cn(
-                            "w-full cursor-pointer rounded-md border p-3 text-left transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                            "group grid grid-cols-[minmax(0,1fr)_auto] gap-2 rounded-md border p-2 transition-colors hover:bg-muted",
                             !externalLogView && selectedJob?.id === job.id && "border-primary bg-primary/8",
                           )}
-                          onClick={() => selectJob(job.id)}
-                          onKeyDown={(event) => {
-                            if (event.target !== event.currentTarget) return;
-                            if (event.key === "Enter" || event.key === " ") {
-                              event.preventDefault();
-                              selectJob(job.id);
-                            }
-                          }}
                         >
-                          <div className="flex items-start justify-between gap-2">
-                            <div className="min-w-0 flex-1">
-                              <div className="break-words font-medium">{job.title}</div>
-                              <div className="mt-1 text-xs text-muted-foreground">{job.started_at}</div>
+                          <button
+                            type="button"
+                            className="min-w-0 rounded-md p-1 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring"
+                            onClick={() => selectJob(job.id)}
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0 flex-1">
+                                <div className="break-words font-medium">{job.title}</div>
+                                <div className="mt-1 text-xs text-muted-foreground">{job.started_at}</div>
+                              </div>
+                              <Badge className="shrink-0" variant={statusVariant(job.status)}>{job.status}</Badge>
                             </div>
-                            <Badge className="shrink-0" variant={statusVariant(job.status)}>{job.status}</Badge>
-                          </div>
+                          </button>
                           <Button
-                            className="mt-2"
+                            className="self-start opacity-70 transition-opacity hover:opacity-100 focus-visible:opacity-100"
                             variant="ghost"
-                            size="sm"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              deleteJob(job.id);
-                            }}
+                            size="icon"
+                            title={`Supprimer l'historique ${job.title}`}
+                            aria-label={`Supprimer l'historique ${job.title}`}
+                            onClick={() => deleteJob(job.id)}
                           >
                             <Trash2 className="h-4 w-4" />
-                            Supprimer
                           </Button>
                         </div>
                       ))}
