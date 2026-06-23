@@ -858,18 +858,17 @@ export default function Home() {
 
               <TabsContent value="modules">
                 <Card>
-                  <CardHeader className="gap-3 lg:flex-row lg:items-center lg:justify-between">
-                    <div>
+                  <CardHeader className="gap-3 xl:flex-row xl:items-start xl:justify-between">
+                    <div className="min-w-0">
                       <CardTitle>Modules</CardTitle>
                       <CardDescription>Recherche par nom technique, sélection multiple et actions groupées.</CardDescription>
                     </div>
-                    <div className="flex w-full flex-wrap gap-2 lg:w-auto lg:justify-end">
-                      <Button className="w-full sm:w-auto" variant="outline" onClick={() => setZipDialogOpen(true)} disabled={!selectedProjectReady}>
+                    <div className="grid w-full min-w-0 grid-cols-1 gap-2 sm:grid-cols-2 xl:flex xl:w-auto xl:max-w-[760px] xl:flex-wrap xl:justify-end">
+                      <Button variant="outline" onClick={() => setZipDialogOpen(true)} disabled={!selectedProjectReady}>
                         <FileArchive className="h-4 w-4" />
                         Import ZIP
                       </Button>
                       <Button
-                        className="w-full sm:w-auto"
                         disabled={!selectedModuleList.length || !canUseDb || loading}
                         onClick={() => createJob("install_module", { project: selectedProject?.name, db: selectedDb, modules: selectedModuleList.join(",") })}
                       >
@@ -877,7 +876,6 @@ export default function Home() {
                         Installer sélection
                       </Button>
                       <Button
-                        className="w-full sm:w-auto"
                         variant="outline"
                         disabled={!selectedModuleList.length || !canUseDb || loading}
                         onClick={() => createJob("update_module", { project: selectedProject?.name, db: selectedDb, modules: selectedModuleList.join(",") })}
@@ -886,7 +884,6 @@ export default function Home() {
                         Mettre à jour sélection
                       </Button>
                       <Button
-                        className="w-full sm:w-auto"
                         variant="destructive"
                         disabled={!selectedInstalledModuleList.length || !canUseDb || loading}
                         onClick={() => requestUninstall(selectedModuleList)}
@@ -895,7 +892,6 @@ export default function Home() {
                         Désinstaller sélection
                       </Button>
                       <Button
-                        className="w-full sm:w-auto"
                         variant="destructive"
                         disabled={!selectedRemovableModuleList.length || loading}
                         onClick={() => requestDeleteCode(selectedModuleList)}
@@ -906,7 +902,7 @@ export default function Home() {
                     </div>
                   </CardHeader>
                   <CardContent>
-                    <div className="mb-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_220px_220px]">
+                    <div className="mb-4 grid min-w-0 gap-3 md:grid-cols-[minmax(0,1fr)_minmax(150px,220px)] xl:grid-cols-[minmax(0,1fr)_220px_220px]">
                       <div className="relative">
                         <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
                         <Input className="pl-9" placeholder="Rechercher par nom de module" value={moduleSearch} onChange={(event) => setModuleSearch(event.target.value)} />
@@ -934,53 +930,60 @@ export default function Home() {
                         </SelectContent>
                       </Select>
                     </div>
-                    <div className="overflow-auto rounded-md border">
-                      <table className="w-full min-w-[1040px] text-sm">
-                        <thead className="bg-muted text-left">
-                          <tr>
-                            <th className="w-12 px-3 py-3">
-                              <span className="sr-only">Sélection</span>
-                            </th>
-                            <th className="px-3 py-3">Module</th>
-                            <th className="px-3 py-3">État</th>
-                            <th className="px-3 py-3">Version</th>
-                            <th className="px-3 py-3">Chemin</th>
-                            <th className="px-3 py-3 text-right">Actions</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {filteredModules.map((module) => (
-                            <tr key={module.name} className="border-t">
-                              <td className="px-3 py-3">
-                                <input
-                                  aria-label={`Sélectionner ${module.name}`}
-                                  type="checkbox"
-                                  checked={selectedModules.has(module.name)}
-                                  onChange={(event) => {
-                                    const next = new Set(selectedModules);
-                                    if (event.target.checked) next.add(module.name);
-                                    else next.delete(module.name);
-                                    setSelectedModules(next);
-                                  }}
-                                />
-                              </td>
-                              <td className="px-3 py-3">
-                                <div className="font-medium">{module.name}</div>
-                                <div className="text-xs text-muted-foreground">{module.title}</div>
-                              </td>
-                              <td className="px-3 py-3">
-                                <Badge variant={module.state === "installed" ? "success" : "secondary"}>{module.state}</Badge>
-                              </td>
-                              <td className="px-3 py-3">{module.installed_version || module.version || "-"}</td>
-                              <td className="max-w-[360px] truncate px-3 py-3 font-mono text-xs text-pink-700" title={module.path}>
-                                {overview ? module.path.replace(`${overview.workspace}/`, "") : module.path}
-                              </td>
-                              <td className="px-3 py-3">
-                                <div className="flex justify-end gap-2">
-                                  <Button size="icon" variant="outline" disabled={!canUseDb} onClick={() => createJob("install_module", { project: selectedProject?.name, db: selectedDb, modules: module.name })}>
+                    <div className="overflow-hidden rounded-md border">
+                      <div className="hidden border-b bg-muted px-3 py-2 text-xs font-medium uppercase text-muted-foreground lg:grid lg:grid-cols-[minmax(220px,1.45fr)_120px_130px_minmax(180px,1fr)_168px] lg:items-center lg:gap-3">
+                        <div>Module</div>
+                        <div>État</div>
+                        <div>Version</div>
+                        <div>Chemin</div>
+                        <div className="text-right">Actions</div>
+                      </div>
+                      <div className="max-h-[min(62vh,720px)] overflow-y-auto">
+                        {filteredModules.length ? (
+                          filteredModules.map((module) => {
+                            const displayPath = overview ? module.path.replace(`${overview.workspace}/`, "") : module.path;
+                            return (
+                              <div
+                                key={module.name}
+                                className="grid min-w-0 gap-3 border-t p-3 first:border-t-0 lg:grid-cols-[minmax(220px,1.45fr)_120px_130px_minmax(180px,1fr)_168px] lg:items-center"
+                              >
+                                <div className="flex min-w-0 items-start gap-3">
+                                  <input
+                                    className="mt-1 h-4 w-4 shrink-0"
+                                    aria-label={`Sélectionner ${module.name}`}
+                                    type="checkbox"
+                                    checked={selectedModules.has(module.name)}
+                                    onChange={(event) => {
+                                      const next = new Set(selectedModules);
+                                      if (event.target.checked) next.add(module.name);
+                                      else next.delete(module.name);
+                                      setSelectedModules(next);
+                                    }}
+                                  />
+                                  <div className="min-w-0">
+                                    <div className="break-words font-medium">{module.name}</div>
+                                    <div className="mt-0.5 break-words text-xs text-muted-foreground">{module.title || module.name}</div>
+                                  </div>
+                                </div>
+                                <div className="flex min-w-0 items-center justify-between gap-3 lg:block">
+                                  <span className="text-xs font-medium text-muted-foreground lg:hidden">État</span>
+                                  <Badge className="shrink-0" variant={module.state === "installed" ? "success" : "secondary"}>{module.state}</Badge>
+                                </div>
+                                <div className="flex min-w-0 items-start justify-between gap-3 text-sm lg:block">
+                                  <span className="text-xs font-medium text-muted-foreground lg:hidden">Version</span>
+                                  <span className="min-w-0 break-words">{module.installed_version || module.version || "-"}</span>
+                                </div>
+                                <div className="min-w-0">
+                                  <div className="mb-1 text-xs font-medium text-muted-foreground lg:hidden">Chemin</div>
+                                  <div className="break-all font-mono text-xs text-pink-700" title={module.path}>
+                                    {displayPath || "-"}
+                                  </div>
+                                </div>
+                                <div className="grid grid-cols-4 gap-2 sm:flex sm:justify-end">
+                                  <Button size="icon" variant="outline" disabled={!canUseDb} title={`Installer ${module.name}`} aria-label={`Installer ${module.name}`} onClick={() => createJob("install_module", { project: selectedProject?.name, db: selectedDb, modules: module.name })}>
                                     <PlusCircle className="h-4 w-4" />
                                   </Button>
-                                  <Button size="icon" disabled={!canUseDb} onClick={() => createJob("update_module", { project: selectedProject?.name, db: selectedDb, modules: module.name })}>
+                                  <Button size="icon" disabled={!canUseDb} title={`Mettre à jour ${module.name}`} aria-label={`Mettre à jour ${module.name}`} onClick={() => createJob("update_module", { project: selectedProject?.name, db: selectedDb, modules: module.name })}>
                                     <RefreshCcw className="h-4 w-4" />
                                   </Button>
                                   <Button
@@ -1004,18 +1007,22 @@ export default function Home() {
                                     <Trash2 className="h-4 w-4" />
                                   </Button>
                                 </div>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                              </div>
+                            );
+                          })
+                        ) : (
+                          <div className="p-6 text-center text-sm text-muted-foreground">
+                            Aucun module ne correspond à la recherche.
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </CardContent>
                 </Card>
               </TabsContent>
 
               <TabsContent value="logs">
-                <div className="grid gap-4 xl:grid-cols-[420px_minmax(0,1fr)]">
+                <div className="grid gap-4 xl:grid-cols-[minmax(280px,420px)_minmax(0,1fr)]">
                   <Card>
                     <CardHeader className="gap-3 sm:flex-row sm:items-center sm:justify-between">
                       <div>
@@ -1027,7 +1034,7 @@ export default function Home() {
                         Effacer
                       </Button>
                     </CardHeader>
-                    <CardContent className="max-h-[520px] space-y-2 overflow-auto">
+                    <CardContent className="max-h-[min(58vh,620px)] space-y-2 overflow-auto">
                       {jobs.map((job) => (
                         <div
                           key={job.id}
@@ -1073,9 +1080,9 @@ export default function Home() {
                     <CardHeader className="gap-3 sm:flex-row sm:items-center sm:justify-between">
                       <div>
                         <CardTitle>Sortie</CardTitle>
-                        <CardDescription>{outputTitle}</CardDescription>
+                        <CardDescription className="break-words">{outputTitle}</CardDescription>
                       </div>
-                      <div className="flex flex-wrap gap-2">
+                      <div className="grid w-full grid-cols-1 gap-2 sm:grid-cols-3 xl:w-auto">
                         <Button variant="outline" size="sm" onClick={showDiagnostics} disabled={!selectedProjectReady}>
                           <Activity className="h-4 w-4" />
                           Diagnostic
@@ -1095,7 +1102,7 @@ export default function Home() {
                       </div>
                     </CardHeader>
                     <CardContent>
-                      <pre className="h-[520px] overflow-auto rounded-md bg-slate-950 p-4 text-xs leading-relaxed text-emerald-100">
+                      <pre className="min-h-[260px] max-h-[min(58vh,620px)] overflow-auto whitespace-pre-wrap break-words rounded-md bg-slate-950 p-4 text-xs leading-relaxed text-emerald-100">
                         {outputContent}
                       </pre>
                     </CardContent>

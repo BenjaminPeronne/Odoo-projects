@@ -30,6 +30,12 @@ body {
   color: hsl(var(--foreground));
 }
 
+html,
+body {
+  min-width: 0;
+  overflow-x: hidden;
+}
+
 button,
 input,
 select,
