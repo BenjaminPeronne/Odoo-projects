@@ -50,6 +50,13 @@ class ModuleLayoutTests(unittest.TestCase):
         self.assertTrue(link.is_symlink())
         self.assertEqual(Path("../odoo/addons/custom_module"), Path(link.readlink()))
 
+        modules = web.modules_for(self.project)
+        module = next(item for item in modules if item["name"] == "custom_module")
+        self.assertEqual(str(link), module["path"])
+        self.assertEqual(str(link), module["link_path"])
+        self.assertEqual(str(storage.resolve(strict=False)), module["source_path"])
+        self.assertEqual("lien vers source projet", module["path_kind"])
+
     def test_delete_module_removes_link_and_storage_copy(self):
         job = DummyJob()
         web.link_module_candidates(job, self.project, [self.external])

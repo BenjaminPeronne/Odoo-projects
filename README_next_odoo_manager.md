@@ -92,6 +92,25 @@ Le workflow `.github/workflows/build-desktop.yml` compile nativement les trois
 plateformes. Il peut etre lance manuellement dans GitHub Actions ou par un tag
 `app-v*`, par exemple `app-v0.1.0`.
 
+Un script lance toute la procedure depuis le poste local :
+
+```sh
+sh scripts/build_all_platforms.sh
+```
+
+Il verifie le backend, les tests et le build Next.js, cree un tag `app-v*`, le
+pousse sur GitHub et laisse GitHub Actions compiler macOS, Linux et Windows. Si
+GitHub CLI est installe et authentifie (`gh auth login`), le script attend la
+fin du workflow puis telecharge les artefacts dans `dist/all-platforms/<tag>/`.
+
+Exemples utiles :
+
+```sh
+sh scripts/build_all_platforms.sh --tag app-v0.1.0-build14
+sh scripts/build_all_platforms.sh --local
+sh scripts/build_all_platforms.sh --no-wait --no-download
+```
+
 Chaque runner reconstruit le sidecar Python de sa plateforme avant de produire
 l'installateur. Cette etape est necessaire : un Mac ne produit pas de maniere
 fiable un installateur Windows ou Linux complet.

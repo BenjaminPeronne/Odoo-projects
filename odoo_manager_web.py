@@ -550,7 +550,50 @@ def parse_manifest(path):
     }
 
 
-def basic_module(path):
+def module_location_info(project, path):
+    link_parent = project_addons_link_parent(project).resolve(strict=False)
+    storage_parent = project_addons_storage_parent(project).resolve(strict=False)
+    imports_roots = module_import_roots(project)
+    project_store = (project_odoo_root(project) / "addons-store").resolve(strict=False)
+    parent = path.parent.resolve(strict=False)
+    source_path = path.resolve(strict=False) if path.is_symlink() else path
+
+    link_path = ""
+    if parent == link_parent:
+        link_path = str(path)
+    else:
+        candidate_link = project_addons_link_parent(project) / path.name
+        if candidate_link.exists() or candidate_link.is_symlink():
+            link_path = str(candidate_link)
+
+    if parent == link_parent and path.is_symlink():
+        if path_is_relative_to(source_path, storage_parent):
+            kind = "lien vers source projet"
+        elif any(path_is_relative_to(source_path, root) for root in imports_roots):
+            kind = "lien vers import outil"
+        elif path_is_relative_to(source_path, project_store):
+            kind = "lien vers addons-store"
+        else:
+            kind = "lien vers source externe"
+    elif parent == link_parent:
+        kind = "dossier direct dans odoo/addons"
+    elif parent == storage_parent:
+        kind = "source projet"
+    elif path_is_relative_to(path.resolve(strict=False), project_store):
+        kind = "addons-store"
+    else:
+        kind = "source externe"
+
+    return {
+        "path": str(path),
+        "link_path": link_path,
+        "source_path": str(source_path),
+        "path_kind": kind,
+    }
+
+
+def basic_module(project, path):
+    location = module_location_info(project, path)
     return {
         "name": path.name,
         "title": path.name,
@@ -558,7 +601,7 @@ def basic_module(path):
         "version": "",
         "category": "",
         "installable": True,
-        "path": str(path),
+        **location,
     }
 
 
@@ -655,7 +698,7 @@ def modules_for(project, db_name=None):
             base_modules = None
 
     if base_modules is None:
-        base_modules = [basic_module(path) for path in module_dirs(project)]
+        base_modules = [basic_module(project, path) for path in module_dirs(project)]
         with MODULE_CACHE_LOCK:
             MODULE_CACHE[cache_key] = {"created_at": now, "modules": [dict(item) for item in base_modules]}
 

@@ -125,6 +125,9 @@ type ModuleInfo = {
   version?: string;
   installed_version?: string;
   path: string;
+  source_path?: string;
+  link_path?: string;
+  path_kind?: string;
   removable?: boolean;
   removal_mode?: string;
   removal_note?: string;
@@ -174,7 +177,6 @@ class ApiUnavailableError extends Error {
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response | undefined;
   const retryDelays = isTauriRuntime() ? TAURI_API_RETRY_DELAYS_MS : [0];
-  let lastNetworkError: unknown;
   try {
     for (const [index, delay] of retryDelays.entries()) {
       if (delay) await new Promise((resolve) => window.setTimeout(resolve, delay));
@@ -185,12 +187,11 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
         });
         break;
       } catch (error) {
-        lastNetworkError = error;
         if (index === retryDelays.length - 1) throw error;
       }
     }
   } catch {
-    throw new ApiUnavailableError(lastNetworkError instanceof Error ? `${lastNetworkError.message}. API locale indisponible.` : undefined);
+    throw new ApiUnavailableError();
   }
   if (!response) throw new ApiUnavailableError();
   const text = await response.text();
@@ -329,6 +330,12 @@ function odooAccessUrl(project?: Project, db?: string) {
   }
 }
 
+function compactWorkspacePath(path: string | undefined, workspace: string | undefined) {
+  if (!path) return "";
+  if (!workspace) return path;
+  return path.replace(`${workspace.replace(/\/$/, "")}/`, "");
+}
+
 export default function Home() {
   const [overview, setOverview] = useState<Overview | null>(null);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
@@ -347,6 +354,7 @@ export default function Home() {
   const [selectedJobId, setSelectedJobId] = useState<number | null>(null);
   const [externalLogView, setExternalLogView] = useState<{ title: string; content: string } | null>(null);
   const [loading, setLoading] = useState(false);
+  const [initializing, setInitializing] = useState(true);
   const [error, setError] = useState("");
   const [apiUnavailable, setApiUnavailable] = useState(false);
   const [desktopRuntime, setDesktopRuntime] = useState(false);
@@ -367,6 +375,7 @@ export default function Home() {
   const zipInputRef = useRef<HTMLInputElement>(null);
   const toastId = useRef(1);
   const lastDockerState = useRef<string | null>(null);
+  const initializingRef = useRef(true);
 
   const selectedProject = useMemo(
     () => overview?.projects.find((project) => project.name === selectedProjectName) || overview?.projects[0],
@@ -417,7 +426,7 @@ export default function Home() {
       }
     } catch (err) {
       setApiUnavailable(err instanceof ApiUnavailableError);
-      setError(err instanceof Error ? err.message : "Impossible de charger l'overview.");
+      setError(!initializingRef.current && !(err instanceof ApiUnavailableError) ? err instanceof Error ? err.message : "Impossible de charger l'overview." : "");
     }
   }, [selectedProjectName]);
 
@@ -435,7 +444,7 @@ export default function Home() {
     } catch (err) {
       setSystemStatus(null);
       setApiUnavailable(err instanceof ApiUnavailableError);
-      if (lastDockerState.current !== "api-error") {
+      if (!initializingRef.current && lastDockerState.current !== "api-error") {
         pushToast("error", err instanceof Error ? err.message : "État système indisponible.");
         lastDockerState.current = "api-error";
       }
@@ -449,7 +458,7 @@ export default function Home() {
       setSettingsDraft(payload.settings);
       setApiUnavailable(false);
     } catch (err) {
-      if (!(err instanceof ApiUnavailableError)) {
+      if (!initializingRef.current && !(err instanceof ApiUnavailableError)) {
         pushToast("error", err instanceof Error ? err.message : "Paramètres indisponibles.");
       }
     }
@@ -485,16 +494,24 @@ export default function Home() {
 
   useEffect(() => {
     setDesktopRuntime(isTauriRuntime());
-    refreshOverview();
-    refreshJobs();
-    refreshSystemStatus();
-    loadSettings();
+    let active = true;
+    Promise.allSettled([refreshOverview(), refreshJobs(), refreshSystemStatus(), loadSettings()]).finally(() => {
+      if (!active) return;
+      initializingRef.current = false;
+      setInitializing(false);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
     const timer = window.setInterval(() => {
       refreshOverview();
       refreshJobs();
     }, 5000);
     return () => window.clearInterval(timer);
-  }, [loadSettings, refreshJobs, refreshOverview, refreshSystemStatus]);
+  }, [refreshJobs, refreshOverview]);
 
   useEffect(() => {
     const interval = Math.max(3, settings?.docker_poll_interval || 10) * 1000;
@@ -847,6 +864,20 @@ export default function Home() {
       window.setTimeout(refreshOverview, 1200);
       window.setTimeout(refreshSystemStatus, 1600);
     }
+  }
+
+  if (initializing) {
+    return (
+      <main className="grid min-h-screen place-items-center bg-background px-6">
+        <div className="w-full max-w-md rounded-lg border bg-card p-6 text-center shadow-sm">
+          <Loader2 className="mx-auto h-8 w-8 animate-spin text-primary" />
+          <h1 className="mt-4 text-lg font-semibold">Chargement du gestionnaire</h1>
+          <p className="mt-2 text-sm text-muted-foreground">
+            Connexion à l’API locale et lecture des projets Odoo.
+          </p>
+        </div>
+      </main>
+    );
   }
 
   return (
@@ -1294,21 +1325,25 @@ export default function Home() {
                       </Badge>
                     </div>
                     <div className="overflow-hidden rounded-md border">
-                      <div className="hidden border-b bg-muted px-3 py-2 text-xs font-medium uppercase text-muted-foreground lg:grid lg:grid-cols-[minmax(220px,1.45fr)_120px_130px_minmax(180px,1fr)_168px] lg:items-center lg:gap-3">
+                      <div className="hidden border-b bg-muted px-3 py-2 text-xs font-medium uppercase text-muted-foreground lg:grid lg:grid-cols-[minmax(220px,1.35fr)_120px_130px_minmax(260px,1.15fr)_168px] lg:items-center lg:gap-3">
                         <div>Module</div>
                         <div>État</div>
                         <div>Version</div>
-                        <div>Chemin</div>
+                        <div>Emplacements</div>
                         <div className="text-right">Actions</div>
                       </div>
                       <div className="max-h-[min(62vh,720px)] overflow-y-auto">
                         {filteredModules.length ? (
                           filteredModules.map((module) => {
-                            const displayPath = overview ? module.path.replace(`${overview.workspace}/`, "") : module.path;
+                            const sourcePath = module.source_path || module.path;
+                            const linkPath = module.link_path || (module.path_kind?.startsWith("lien") ? module.path : "");
+                            const displaySourcePath = compactWorkspacePath(sourcePath, overview?.workspace);
+                            const displayLinkPath = compactWorkspacePath(linkPath, overview?.workspace);
+                            const samePaths = Boolean(linkPath && sourcePath && linkPath === sourcePath);
                             return (
                               <div
                                 key={module.name}
-                                className="grid min-w-0 gap-3 border-t p-3 first:border-t-0 lg:grid-cols-[minmax(220px,1.45fr)_120px_130px_minmax(180px,1fr)_168px] lg:items-center"
+                                className="grid min-w-0 gap-3 border-t p-3 first:border-t-0 lg:grid-cols-[minmax(220px,1.35fr)_120px_130px_minmax(260px,1.15fr)_168px] lg:items-center"
                               >
                                 <div className="flex min-w-0 items-start gap-3">
                                   <input
@@ -1332,9 +1367,27 @@ export default function Home() {
                                   <span className="min-w-0 break-words">{module.installed_version || module.version || "-"}</span>
                                 </div>
                                 <div className="min-w-0">
-                                  <div className="mb-1 text-xs font-medium text-muted-foreground lg:hidden">Chemin</div>
-                                  <div className="break-all font-mono text-xs text-pink-700" title={module.path}>
-                                    {displayPath || "-"}
+                                  <div className="mb-1 text-xs font-medium text-muted-foreground lg:hidden">Emplacements</div>
+                                  <div className="space-y-1">
+                                    {module.path_kind && (
+                                      <Badge className="w-fit max-w-full truncate" variant="outline" title={module.path_kind}>
+                                        {module.path_kind}
+                                      </Badge>
+                                    )}
+                                    <div className="min-w-0 text-xs">
+                                      <span className="font-medium text-muted-foreground">Source</span>
+                                      <div className="break-all font-mono text-pink-700" title={sourcePath}>
+                                        {displaySourcePath || "-"}
+                                      </div>
+                                    </div>
+                                    {displayLinkPath && !samePaths && (
+                                      <div className="min-w-0 text-xs">
+                                        <span className="font-medium text-muted-foreground">Lien Odoo</span>
+                                        <div className="break-all font-mono text-slate-600" title={linkPath}>
+                                          {displayLinkPath}
+                                        </div>
+                                      </div>
+                                    )}
                                   </div>
                                 </div>
                                 <div className="grid grid-cols-4 gap-2 sm:flex sm:justify-end">
@@ -1439,11 +1492,11 @@ export default function Home() {
                         <CardDescription className="break-words">{outputTitle}</CardDescription>
                       </div>
                       <div className="grid w-full grid-cols-1 gap-2 sm:grid-cols-3 xl:w-auto">
-                        <Button variant="outline" size="sm" onClick={showDiagnostics} disabled={!selectedProjectReady}>
+                        <Button className="justify-start sm:justify-center" variant="outline" size="sm" onClick={showDiagnostics} disabled={!selectedProjectReady}>
                           <Activity className="h-4 w-4" />
                           Diagnostic
                         </Button>
-                        <Button variant="outline" size="sm" onClick={showLogs} disabled={!selectedProjectReady}>
+                        <Button className="justify-start sm:justify-center" variant="outline" size="sm" onClick={showLogs} disabled={!selectedProjectReady}>
                           <Logs className="h-4 w-4" />
                           Logs Odoo
                         </Button>
