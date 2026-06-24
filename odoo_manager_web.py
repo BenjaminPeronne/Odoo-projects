@@ -69,11 +69,27 @@ def project_imports_root(project):
     return WORKSPACE / project / "odoo" / "addons-store" / ".odoo_manager_imports"
 
 
+def project_staging_imports_root(project):
+    return WORKSPACE / ".odoo_manager_imports" / project
+
+
 def module_import_roots(project):
     return (
         project_imports_root(project).resolve(),
-        (WORKSPACE / ".odoo_manager_imports" / project).resolve(),
+        project_staging_imports_root(project).resolve(),
     )
+
+
+def project_odoo_root(project):
+    return WORKSPACE / project / "odoo"
+
+
+def project_addons_link_parent(project):
+    return project_odoo_root(project) / "addons"
+
+
+def project_addons_storage_parent(project):
+    return project_odoo_root(project) / "odoo" / "addons"
 
 
 def unique_child(parent, name):
@@ -450,11 +466,11 @@ def database_base_versions(project, databases):
 
 
 def module_dirs(project):
-    base = WORKSPACE / project / "odoo"
+    base = project_odoo_root(project)
     candidates = [
-        base / "addons",
+        project_addons_link_parent(project),
+        project_addons_storage_parent(project),
         base / "odoo" / "odoo" / "addons",
-        base / "odoo" / "addons",
         base / "addons-store" / "odoo_entreprise",
         base / "addons-store" / "odoo_enterprise",
     ]
@@ -558,12 +574,19 @@ def should_parse_manifest(path):
 
 
 def module_removal_info(project, path):
-    primary_addons = (WORKSPACE / project / "odoo" / "addons").resolve()
+    link_parent = project_addons_link_parent(project).resolve()
+    storage_parent = project_addons_storage_parent(project).resolve()
     imports_roots = module_import_roots(project)
-    project_store = (WORKSPACE / project / "odoo" / "addons-store").resolve()
+    project_store = (project_odoo_root(project) / "addons-store").resolve()
     parent = path.parent.resolve()
 
-    if parent != primary_addons:
+    if parent != link_parent:
+        if parent == storage_parent:
+            return {
+                "removable": False,
+                "removal_mode": "protected_source",
+                "removal_note": "Module dans odoo/odoo/addons sans lien géré dans odoo/addons.",
+            }
         return {
             "removable": False,
             "removal_mode": "protected",
@@ -572,6 +595,12 @@ def module_removal_info(project, path):
 
     if path.is_symlink():
         target = path.resolve(strict=False)
+        if path_is_relative_to(target, storage_parent):
+            return {
+                "removable": True,
+                "removal_mode": "link_and_storage",
+                "removal_note": "Supprime le lien odoo/addons et le dossier source dans odoo/odoo/addons.",
+            }
         if any(path_is_relative_to(target, root) for root in imports_roots):
             return {
                 "removable": True,
@@ -1030,7 +1059,8 @@ def move_deleted_module_path(job, project, module_name, path, label):
 
 
 def delete_module_file_entry(job, project, module_name):
-    primary_addons = (WORKSPACE / project / "odoo" / "addons").resolve()
+    primary_addons = project_addons_link_parent(project).resolve()
+    storage_parent = project_addons_storage_parent(project).resolve()
     imports_roots = module_import_roots(project)
     entry = primary_addons / module_name
 
@@ -1046,21 +1076,191 @@ def delete_module_file_entry(job, project, module_name):
         target = entry.resolve(strict=False)
         entry.unlink()
         job.add(f"Lien supprimé: {entry}")
-        imports_root = next((root for root in imports_roots if path_is_relative_to(target, root)), None)
-        if imports_root is not None:
+        if path_is_relative_to(target, storage_parent):
             if target.exists() or target.is_symlink():
-                move_deleted_module_path(job, project, module_name, target, "Dossier importé")
-                prune_empty_dirs(target.parent, imports_root)
+                move_deleted_module_path(job, project, module_name, target, "Dossier source")
             else:
-                job.add(f"Cible importée déjà absente: {target}")
+                job.add(f"Dossier source déjà absent: {target}")
         else:
-            job.add(f"Source externe conservée: {target}")
+            imports_root = next((root for root in imports_roots if path_is_relative_to(target, root)), None)
+            if imports_root is not None:
+                if target.exists() or target.is_symlink():
+                    move_deleted_module_path(job, project, module_name, target, "Dossier importé")
+                    prune_empty_dirs(target.parent, imports_root)
+                else:
+                    job.add(f"Cible importée déjà absente: {target}")
+            else:
+                job.add(f"Source externe conservée: {target}")
     elif entry.is_dir():
         move_deleted_module_path(job, project, module_name, entry, "Dossier addon")
     else:
         move_deleted_module_path(job, project, module_name, entry, "Fichier addon")
 
     return True
+
+
+def stop_project_job(job, project):
+    project = validate_project(project)
+    path = (WORKSPACE / project).resolve()
+    compose = compose_file(project)
+    if not compose:
+        raise RuntimeError(f"Projet sans fichier compose: {project}")
+
+    docker_ok, docker_message = docker_available()
+    if not docker_ok:
+        raise RuntimeError(docker_message or "Docker ne répond pas.")
+
+    job.add(f"Arrêt du projet {project}")
+    code = run_stream(job, docker_command(SETTINGS, "compose", "stop"), cwd=path)
+    if code != 0:
+        raise RuntimeError("Impossible d'arrêter Docker Compose proprement.")
+    job.add(f"Projet arrêté: {project}")
+
+
+def managed_storage_link(project, module_name, storage_path):
+    link_path = project_addons_link_parent(project) / module_name
+    return link_path.is_symlink() and link_path.resolve(strict=False) == storage_path.resolve(strict=False)
+
+
+def copy_module_to_storage(job, project, module_path, replace_existing=False):
+    module_name = module_path.name
+    validate_modules(module_name)
+    storage_parent = project_addons_storage_parent(project)
+    link_path = project_addons_link_parent(project) / module_name
+    storage_path = storage_parent / module_name
+    storage_parent.mkdir(parents=True, exist_ok=True)
+
+    source_path = module_path.resolve()
+    if storage_path.exists() or storage_path.is_symlink():
+        if storage_path.resolve(strict=False) == source_path:
+            job.add(f"Module déjà dans le dossier source: {storage_path}")
+            return storage_path
+        if not replace_existing:
+            raise RuntimeError(f"Le module existe déjà dans le dossier source du projet: {storage_path}")
+        if not managed_storage_link(project, module_name, storage_path) and not link_path.exists() and not link_path.is_symlink():
+            raise RuntimeError(
+                f"Remplacement refusé pour {module_name}: un dossier existe déjà dans odoo/odoo/addons sans lien géré."
+            )
+        backup_existing_module(job, project, storage_path)
+
+    ignore = shutil.ignore_patterns(".git", "__pycache__", "node_modules", ".DS_Store")
+    shutil.copytree(source_path, storage_path, symlinks=True, ignore=ignore)
+    job.add(f"Module copié dans le dossier source: {source_path} -> {storage_path}")
+    return storage_path
+
+
+def ensure_relative_module_link(job, project, module_name, storage_path, replace_existing=False):
+    link_parent = project_addons_link_parent(project)
+    link_parent.mkdir(parents=True, exist_ok=True)
+    link_path = link_parent / module_name
+    link_value = Path(os.path.relpath(storage_path, start=link_parent))
+
+    if link_path.exists() or link_path.is_symlink():
+        if link_path.is_symlink() and link_path.resolve(strict=False) == storage_path.resolve(strict=False):
+            current = os.readlink(link_path)
+            if Path(current).is_absolute():
+                link_path.unlink()
+                link_path.symlink_to(link_value, target_is_directory=True)
+                job.add(f"Lien converti en relatif: {link_path} -> {link_value}")
+                return True
+            job.add(f"Déjà lié en relatif: {module_name}")
+            return False
+        info = module_removal_info(project, link_path)
+        if not replace_existing:
+            raise RuntimeError(f"Le module existe déjà dans le projet: {link_path}")
+        if not info["removable"]:
+            raise RuntimeError(f"Remplacement refusé pour {module_name}: {info['removal_note']}")
+        backup_existing_module(job, project, link_path)
+
+    link_path.symlink_to(link_value, target_is_directory=True)
+    job.add(f"Lien relatif créé: {link_path} -> {link_value}")
+    return True
+
+
+def install_module_candidates(job, project, candidates, replace_existing=False):
+    storage_parent = project_addons_storage_parent(project)
+    link_parent = project_addons_link_parent(project)
+
+    if not candidates:
+        raise RuntimeError("Aucun module Odoo trouve dans ce dossier.")
+
+    job.add(f"Dossier source modules: {storage_parent}")
+    job.add(f"Dossier liens Odoo: {link_parent}")
+
+    linked = 0
+    skipped = 0
+    for module_path in candidates:
+        module_path = module_path.resolve()
+        storage_path = copy_module_to_storage(job, project, module_path, replace_existing=replace_existing)
+        changed = ensure_relative_module_link(job, project, storage_path.name, storage_path, replace_existing=replace_existing)
+        if changed:
+            linked += 1
+        else:
+            skipped += 1
+
+    clear_project_module_cache(project)
+    job.add(f"Terminé. Modules préparés: {linked}. Déjà présents: {skipped}.")
+    job.add("Installe ou mets à jour le module depuis l'interface.")
+
+
+def link_module_candidates(job, project, candidates, replace_existing=False):
+    install_module_candidates(job, project, candidates, replace_existing=replace_existing)
+
+
+def normalize_module_layout_for_action(job, project, module_names):
+    link_parent = project_addons_link_parent(project)
+    storage_parent = project_addons_storage_parent(project)
+    project_store = (project_odoo_root(project) / "addons-store").resolve()
+
+    for module_name in module_names:
+        link_path = link_parent / module_name
+        storage_path = storage_parent / module_name
+        if not link_path.exists() and not link_path.is_symlink():
+            continue
+
+        if link_path.is_symlink():
+            target = link_path.resolve(strict=False)
+            if path_is_relative_to(target, project_store):
+                continue
+            if path_is_relative_to(target, storage_parent):
+                ensure_relative_module_link(job, project, module_name, target, replace_existing=True)
+                continue
+            if not target.exists():
+                job.add(f"Layout non normalisé pour {module_name}: cible absente {target}")
+                continue
+            if storage_path.exists() or storage_path.is_symlink():
+                if not (storage_path / "__manifest__.py").exists() and not (storage_path / "__openerp__.py").exists():
+                    job.add(f"Layout non normalisé pour {module_name}: dossier source existant sans manifest {storage_path}")
+                    continue
+                ensure_relative_module_link(job, project, module_name, storage_path, replace_existing=True)
+                job.add(f"Lien migré vers le dossier source existant: {module_name}")
+                continue
+            copied = copy_module_to_storage(job, project, target, replace_existing=False)
+            ensure_relative_module_link(job, project, module_name, copied, replace_existing=True)
+            job.add(f"Layout module normalisé avant action Odoo: {module_name}")
+            continue
+
+        if link_path.is_dir():
+            if storage_path.exists() or storage_path.is_symlink():
+                job.add(f"Layout non normalisé pour {module_name}: dossier source déjà présent {storage_path}")
+                continue
+            storage_parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(link_path), str(storage_path))
+            job.add(f"Dossier addon déplacé vers le dossier source: {link_path} -> {storage_path}")
+            ensure_relative_module_link(job, project, module_name, storage_path, replace_existing=True)
+
+
+def module_command_job(job, flag, project, db_name, modules):
+    project = validate_project(project)
+    db_name = validate_odoo_db(db_name)
+    module_names = [name.strip() for name in validate_modules(modules).split(",") if name.strip()]
+    if not module_names:
+        raise RuntimeError("Aucun module fourni.")
+
+    if flag in ("--install-module", "--update-module"):
+        normalize_module_layout_for_action(job, project, module_names)
+
+    manager_job(job, flag, project, db_name, ",".join(module_names))
 
 
 def delete_module_code_job(job, project, modules, db_name="", uninstall_first=False):
@@ -1175,45 +1375,6 @@ def backup_existing_module(job, project, target):
     return backup
 
 
-def link_module_candidates(job, project, candidates, replace_existing=False):
-    target_parent = WORKSPACE / project / "odoo" / "addons"
-    target_parent.mkdir(parents=True, exist_ok=True)
-    project_odoo_root = (WORKSPACE / project / "odoo").resolve()
-
-    if not candidates:
-        raise RuntimeError("Aucun module Odoo trouve dans ce dossier.")
-
-    linked = 0
-    skipped = 0
-    for module_path in candidates:
-        module_path = module_path.resolve()
-        target = target_parent / module_path.name
-        if target.exists() or target.is_symlink():
-            if target.is_symlink() and target.resolve(strict=False) == module_path:
-                job.add(f"Déjà lié: {module_path.name}")
-                skipped += 1
-                continue
-            if replace_existing:
-                backup_existing_module(job, project, target)
-            else:
-                raise RuntimeError(f"Le module existe deja dans le projet: {target}")
-        if path_is_relative_to(module_path, project_odoo_root):
-            link_value = Path(os.path.relpath(module_path, start=target_parent))
-        else:
-            link_value = module_path
-            job.add(
-                f"Attention: {module_path.name} est hors du projet; "
-                "ce lien absolu doit aussi être accessible dans le conteneur Docker."
-            )
-        target.symlink_to(link_value, target_is_directory=True)
-        job.add(f"Module lié: {module_path.name} -> {target} ({link_value})")
-        linked += 1
-
-    clear_project_module_cache(project)
-    job.add(f"Terminé. Modules liés: {linked}. Déjà présents: {skipped}.")
-    job.add("Installe ou mets à jour le module depuis l'interface.")
-
-
 def link_modules_job(job, project, source):
     project = validate_project(project)
     source_path = Path(source).expanduser().resolve()
@@ -1254,7 +1415,7 @@ def import_zip_modules_job(job, project, filename, data, replace_existing=False)
     if not data:
         raise RuntimeError("Fichier ZIP vide.")
 
-    imports_root = project_imports_root(project)
+    imports_root = project_staging_imports_root(project)
     import_name = f"{time.strftime('%Y%m%d_%H%M%S')}_{safe_import_name(filename)}"
     import_dir = imports_root / import_name
     zip_path = import_dir.with_suffix(".zip")
@@ -1279,7 +1440,8 @@ def import_zip_modules_job(job, project, filename, data, replace_existing=False)
     for candidate in candidates:
         job.add(f" - {candidate.name}")
     link_module_candidates(job, project, candidates, replace_existing=replace_existing)
-    job.add(f"Archive extraite dans: {import_dir}")
+    shutil.rmtree(import_dir, ignore_errors=True)
+    job.add(f"Archive temporaire nettoyée: {import_dir}")
 
 
 def jobs_snapshot():
@@ -1564,6 +1726,9 @@ class Handler(BaseHTTPRequestHandler):
             if action == "start_project":
                 project = validate_project(payload.get("project", ""))
                 job = Job(f"Démarrer {project}", manager_job, ("--start", project))
+            elif action == "stop_project":
+                project = validate_project(payload.get("project", ""))
+                job = Job(f"Arrêter {project}", stop_project_job, (project,))
             elif action == "update_project":
                 project = validate_project(payload.get("project", ""))
                 job = Job(f"MAJ projet {project}", manager_job, ("--update", project))
@@ -1615,7 +1780,10 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     flag = "--update-module"
                     label = "Mettre à jour"
-                job = Job(f"{label} {modules} sur {db_name}", manager_job, (flag, project, db_name, modules))
+                if action == "uninstall_module":
+                    job = Job(f"{label} {modules} sur {db_name}", manager_job, (flag, project, db_name, modules))
+                else:
+                    job = Job(f"{label} {modules} sur {db_name}", module_command_job, (flag, project, db_name, modules))
             elif action == "link_modules":
                 project = validate_project(payload.get("project", ""))
                 source = payload.get("source", "")

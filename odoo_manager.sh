@@ -337,6 +337,24 @@ start_project() {
   fi
 }
 
+stop_project() {
+  local project="$1"
+  local path
+  local compose_file
+
+  require_docker
+  path="$(project_path "$project")"
+  compose_file="$(compose_file_for "$path" 2>/dev/null || true)"
+  [ -n "$compose_file" ] || die "Projet introuvable ou sans fichier compose: $project"
+
+  echo "Arret du projet $project..."
+  (
+    cd "$path"
+    docker compose stop
+  )
+  echo "Projet arrete: $project"
+}
+
 wait_for_container() {
   local container="$1"
   local max_wait="$2"
@@ -924,16 +942,17 @@ interactive_menu() {
     echo "Gestionnaire Odoo local"
     echo "1) Voir toutes les bases / projets"
     echo "2) Demarrer et ouvrir un projet"
-    echo "3) Voir les bases PostgreSQL d'un projet"
-    echo "4) Creer une base Odoo dans un projet"
-    echo "5) Installer / mettre a jour un module Odoo"
-    echo "6) Mettre a jour les addons projet installes d'une base"
-    echo "7) Mettre a jour tous les modules Odoo d'une base (avance)"
-    echo "8) Mettre a jour le code / les images d'un projet"
-    echo "9) Mettre a jour le code / les images de tous les projets"
-    echo "10) Creer un nouveau projet local (repondre Non au demarrage Brainkeys)"
-    echo "11) Voir les logs Odoo"
-    echo "12) Ouvrir un shell dans Odoo"
+    echo "3) Arreter un projet"
+    echo "4) Voir les bases PostgreSQL d'un projet"
+    echo "5) Creer une base Odoo dans un projet"
+    echo "6) Installer / mettre a jour un module Odoo"
+    echo "7) Mettre a jour les addons projet installes d'une base"
+    echo "8) Mettre a jour tous les modules Odoo d'une base (avance)"
+    echo "9) Mettre a jour le code / les images d'un projet"
+    echo "10) Mettre a jour le code / les images de tous les projets"
+    echo "11) Creer un nouveau projet local (repondre Non au demarrage Brainkeys)"
+    echo "12) Voir les logs Odoo"
+    echo "13) Ouvrir un shell dans Odoo"
     echo "0) Quitter"
     echo ""
     printf "Votre choix: "
@@ -951,39 +970,43 @@ interactive_menu() {
         ;;
       3)
         project="$(pick_project)"
-        list_databases "$project"
+        stop_project "$project"
         ;;
       4)
         project="$(pick_project)"
-        open_database_manager "$project"
+        list_databases "$project"
         ;;
       5)
         project="$(pick_project)"
-        update_odoo_module "$project"
+        open_database_manager "$project"
         ;;
       6)
         project="$(pick_project)"
-        update_local_odoo_modules_interactive "$project"
+        update_odoo_module "$project"
         ;;
       7)
         project="$(pick_project)"
-        update_all_odoo_modules_interactive "$project"
+        update_local_odoo_modules_interactive "$project"
         ;;
       8)
         project="$(pick_project)"
-        update_project "$project"
+        update_all_odoo_modules_interactive "$project"
         ;;
       9)
-        update_all_projects
+        project="$(pick_project)"
+        update_project "$project"
         ;;
       10)
-        create_project
+        update_all_projects
         ;;
       11)
+        create_project
+        ;;
+      12)
         project="$(pick_project)"
         show_logs "$project"
         ;;
-      12)
+      13)
         project="$(pick_project)"
         open_odoo_shell "$project"
         ;;
@@ -1002,6 +1025,7 @@ usage() {
   echo "  ./odoo_manager.sh"
   echo "  ./odoo_manager.sh --list"
   echo "  ./odoo_manager.sh --start PROJET"
+  echo "  ./odoo_manager.sh --stop PROJET"
   echo "  ./odoo_manager.sh --dbs PROJET"
   echo "  ./odoo_manager.sh --create-db PROJET"
   echo "  ./odoo_manager.sh --update-module PROJET BASE MODULE"
@@ -1028,6 +1052,10 @@ main() {
     --start)
       [ -n "${2:-}" ] || die "Nom de projet manquant."
       start_project "$2"
+      ;;
+    --stop)
+      [ -n "${2:-}" ] || die "Nom de projet manquant."
+      stop_project "$2"
       ;;
     --dbs)
       [ -n "${2:-}" ] || die "Nom de projet manquant."

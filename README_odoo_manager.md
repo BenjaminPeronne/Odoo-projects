@@ -56,9 +56,17 @@ Windows, le bouton `Ouvrir Docker` tente de lancer Docker Desktop. Le bouton
 Pour ajouter des modules, selectionnez un projet puis utilisez `Ajouter des
 modules locaux` :
 
-- `Lier` relie un dossier local contenant un ou plusieurs modules Odoo.
-- `Importer ZIP` extrait une archive ZIP dans `.odoo_manager_imports/PROJET/`,
-  detecte les dossiers contenant `__manifest__.py`, puis les relie au projet.
+- `Copier et lier` copie les modules detectes dans
+  `PROJET/odoo/odoo/addons/`, puis cree un lien symbolique relatif dans
+  `PROJET/odoo/addons/`.
+- `Importer ZIP` extrait l'archive temporairement, detecte les dossiers
+  contenant `__manifest__.py`, copie les modules dans `PROJET/odoo/odoo/addons/`,
+  puis cree les liens relatifs dans `PROJET/odoo/addons/`.
+
+Avant une installation ou une mise a jour de module, le gestionnaire normalise
+aussi les anciens liens geres : un lien absolu ou un ancien import est recopie
+dans `PROJET/odoo/odoo/addons/`, puis remplace par un lien relatif depuis
+`PROJET/odoo/addons/`.
 
 Pour creer une base, selectionnez un projet puis cliquez sur `Creer base`.
 Le gestionnaire demarre le projet si necessaire, appelle Odoo, puis recharge la
@@ -94,6 +102,7 @@ Le menu permet de :
 
 - voir toutes les bases / projets locaux ;
 - demarrer et ouvrir un projet Odoo ;
+- arreter les conteneurs Docker Compose d'un projet ;
 - lister les bases PostgreSQL d'un projet demarre ;
 - ouvrir l'ecran Odoo de creation de base ;
 - installer ou mettre a jour un module Odoo sur une base ;
@@ -117,6 +126,7 @@ Repondez `Non`. Le gestionnaire detectera ensuite le nouveau projet, lancera lui
 ```bash
 ./odoo_manager.sh --list
 ./odoo_manager.sh --start PROJET
+./odoo_manager.sh --stop PROJET
 ./odoo_manager.sh --dbs PROJET
 ./odoo_manager.sh --create-db PROJET
 ./odoo_manager.sh --update-module PROJET BASE MODULE

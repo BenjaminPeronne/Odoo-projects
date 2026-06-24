@@ -46,7 +46,7 @@ Premiere tranche disponible :
 - onglets Bases, Modules, Logs, Actions ;
 - recherche/filtres modules ;
 - selection multiple de modules ;
-- import ZIP ;
+- import ZIP avec copie dans `PROJET/odoo/odoo/addons/` et lien relatif dans `PROJET/odoo/addons/` ;
 - creation de base ;
 - historique des jobs ;
 - actions principales projet ;

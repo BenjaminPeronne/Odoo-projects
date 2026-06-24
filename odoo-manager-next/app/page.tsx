@@ -22,6 +22,7 @@ import {
   RefreshCcw,
   Search,
   Settings,
+  Square,
   SquareTerminal,
   Trash2,
 } from "lucide-react";
@@ -798,6 +799,10 @@ export default function Home() {
     [moduleByName, selectedModuleList],
   );
   const selectedProjectReady = Boolean(selectedProject);
+  const selectedProjectHasContainers = Boolean(
+    selectedProject &&
+      [selectedProject.odoo_status, selectedProject.postgres_status].some((status) => status && status !== "absent" && status !== "docker off"),
+  );
   const canUseDb = Boolean(selectedDb && selectedDb !== "postgres");
   const selectedOdooUrl = odooAccessUrl(selectedProject, selectedDb);
   const outputTitle = externalLogView?.title || selectedJob?.title || "Aucune action sélectionnée";
@@ -825,6 +830,24 @@ export default function Home() {
     },
     [filteredModuleNames],
   );
+
+  async function requestStartProject() {
+    if (!selectedProject) return;
+    const job = await createJob("start_project", { project: selectedProject.name });
+    if (job) {
+      window.setTimeout(refreshOverview, 1800);
+      window.setTimeout(refreshSystemStatus, 2200);
+    }
+  }
+
+  async function requestStopProject() {
+    if (!selectedProject) return;
+    const job = await createJob("stop_project", { project: selectedProject.name });
+    if (job) {
+      window.setTimeout(refreshOverview, 1200);
+      window.setTimeout(refreshSystemStatus, 1600);
+    }
+  }
 
   return (
     <main className="min-h-screen overflow-x-hidden">
@@ -929,9 +952,18 @@ export default function Home() {
                   <RefreshCcw className="h-4 w-4" />
                   Actualiser
                 </Button>
-                <Button className="w-full sm:w-auto" disabled={!selectedProjectReady || loading} onClick={() => createJob("start_project", { project: selectedProject?.name })}>
+                <Button className="w-full sm:w-auto" disabled={!selectedProjectReady || loading} onClick={requestStartProject}>
                   <Play className="h-4 w-4" />
                   Démarrer
+                </Button>
+                <Button
+                  className="w-full sm:w-auto"
+                  variant="outline"
+                  disabled={!selectedProjectReady || !selectedProjectHasContainers || loading}
+                  onClick={requestStopProject}
+                >
+                  <Square className="h-4 w-4" />
+                  Arrêter
                 </Button>
                 <Button
                   className="w-full sm:w-auto"
@@ -1471,13 +1503,13 @@ export default function Home() {
                   <Card>
                     <CardHeader>
                       <CardTitle>Lier des modules</CardTitle>
-                      <CardDescription>Crée les liens symboliques vers le dossier addons du projet.</CardDescription>
+                      <CardDescription>Copie les modules dans odoo/odoo/addons puis crée les liens relatifs dans odoo/addons.</CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-2">
                       <Input placeholder="/Users/.../addons" value={sourcePath} onChange={(event) => setSourcePath(event.target.value)} />
                       <Button className="w-full" variant="outline" disabled={!selectedProjectReady || !sourcePath} onClick={() => createJob("link_modules", { project: selectedProject?.name, source: sourcePath })}>
                         <Link2 className="h-4 w-4" />
-                        Lier au projet
+                        Copier et lier
                       </Button>
                     </CardContent>
                   </Card>
@@ -1741,8 +1773,8 @@ export default function Home() {
           <DialogHeader>
             <DialogTitle>Supprimer les modules du projet</DialogTitle>
             <DialogDescription>
-              Cette action retire les modules de `odoo/addons`. Si le module vient d’un ZIP importé, le lien et le dossier extrait dans
-              `.odoo_manager_imports` sont retirés du chemin actif.
+              Cette action retire les modules de `odoo/addons` et supprime le dossier source géré dans `odoo/odoo/addons`.
+              Les anciens imports encore liés depuis `.odoo_manager_imports` restent aussi nettoyés.
             </DialogDescription>
           </DialogHeader>
           <div className="max-h-52 overflow-auto rounded-md border bg-muted/40 p-3 font-mono text-xs">
