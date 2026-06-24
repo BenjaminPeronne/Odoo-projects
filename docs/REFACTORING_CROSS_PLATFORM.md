@@ -5,7 +5,7 @@
 1. `odoo_manager_core/` porte la configuration et les adaptations système.
 2. `odoo_manager_web.py` reste temporairement l'API locale et le sidecar Python.
 3. `odoo-manager-next/` est l'interface principale React.
-4. L'interface Bootstrap embarquée reste disponible sur le port `8765` pendant la migration.
+4. L'ancienne interface Bootstrap est archivee dans `archive/bootstrap/`.
 5. `odoo-manager-next/src-tauri/` prépare l'application de bureau Tauri 2.
 6. `scripts/build_desktop.py` fournit une commande de construction native commune.
 
@@ -44,13 +44,14 @@ Variables de surcharge utiles :
 - centralisation du statut et du démarrage Docker ;
 - centralisation des emplacements de configuration par système ;
 - ajout d'un lanceur de terminal macOS/Linux/Windows-WSL ;
-- conservation d'une seule API pour React et Bootstrap.
+- conservation d'une seule API pour React/Tauri.
 
 ## Éléments conservés temporairement
 
 - `odoo_manager.sh` : encore requis par plusieurs actions métier ;
-- `odoo_manager_web.py` : API et interface Bootstrap de secours ;
-- `odoo_gui.sh` et `odoo_next_gui.sh` : lanceurs de développement et de secours.
+- `odoo_manager_web.py` : API locale et sidecar Python ;
+- `odoo_gui.sh` : alias de compatibilite vers l'interface Next ;
+- `odoo_next_gui.sh` : lanceur de développement Next.
 
 L'ancien `Odoo Manager.app`, qui ouvrait simplement l'interface React dans le
 navigateur, et son script `build_odoo_gui_app.sh` ont ete retires apres

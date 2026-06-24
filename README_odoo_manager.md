@@ -28,18 +28,15 @@ Pour arrêter l'interface React :
 ./odoo_next_gui.sh --stop
 ```
 
-L'interface Bootstrap reste disponible comme solution de secours :
+L'ancien lanceur Bootstrap est conserve comme alias de compatibilite :
 
 ```bash
 ./odoo_gui.sh
 ```
 
-L'interface Bootstrap permet de voir les projets et bases, demarrer un projet,
-ouvrir Odoo, creer une base depuis un formulaire integre, creer un nouveau
-projet, supprimer un projet de maniere recuperable, lier un dossier de modules
-local au projet, importer un ZIP d'addons, installer ou mettre a jour un module,
-mettre a jour tous les modules d'une base, lancer les mises a jour de code /
-images, consulter les logs et configurer le dossier de projets.
+Il lance maintenant l'interface Next active. La vue Bootstrap historique n'est
+plus exposee par le backend ; son HTML est archive dans
+`archive/bootstrap/odoo_manager_bootstrap_legacy.html`.
 
 La creation d'un nouveau projet ouvre le terminal local de la machine puis
 lance `brainkeys riplika`. Ce choix conserve l'interaction officielle de
@@ -78,27 +75,6 @@ odoo -d NOM_DE_BASE -u all --stop-after-init
 Pour supprimer un projet, selectionnez-le puis cliquez sur `Supprimer`.
 Le gestionnaire arrete `docker compose down`, puis deplace le dossier dans
 `.odoo_manager_deleted/` au lieu de le supprimer definitivement.
-
-## Application macOS
-
-L'application locale temporaire est disponible dans le dossier :
-
-```text
-Odoo Manager.app
-```
-
-Double-cliquez dessus pour démarrer l'interface React et ouvrir automatiquement
-la page dans le navigateur. L'application utilise `odoo_next_gui.sh`, donc
-gardez-la dans `Odoo-projects` jusqu'au remplacement par le paquet Tauri.
-
-Cette application historique reste fonctionnelle pendant la migration vers
-Tauri. Elle ne constitue plus la cible de distribution multiplateforme.
-
-Pour regenerer l'application apres modification du lanceur :
-
-```bash
-./build_odoo_gui_app.sh
-```
 
 ## Lancer le menu
 

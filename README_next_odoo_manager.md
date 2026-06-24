@@ -1,15 +1,16 @@
 # Interface Next.js du gestionnaire Odoo
 
-Cette interface est une nouvelle UI moderne, séparée de l'interface Bootstrap existante.
+Cette interface est l'UI active du gestionnaire Odoo local.
 
 - Application de bureau : installer le DMG puis ouvrir `Odoo Manager.app`
-- Interface Bootstrap historique : `./odoo_gui.sh`, puis http://127.0.0.1:8765/
-- Nouvelle interface Next.js : `./odoo_next_gui.sh`, puis http://127.0.0.1:3000/
+- Interface Next.js en developpement : `./odoo_next_gui.sh`, puis http://127.0.0.1:3000/
 
 La nouvelle interface consomme l'API Python existante servie par `odoo_manager_web.py`.
-Elle ne remplace donc pas encore le backend, ni l'interface Bootstrap.
+Le backend Python reste le sidecar API local. La vue Bootstrap historique est
+archivee dans `archive/bootstrap/odoo_manager_bootstrap_legacy.html` et n'est
+plus exposee comme interface de secours.
 
-Les deux interfaces utilisent la meme configuration persistante. Le dossier de
+L'interface utilise la configuration persistante du backend. Le dossier de
 projets peut etre change depuis `Parametres` sans deplacer le gestionnaire.
 
 ## Commandes
