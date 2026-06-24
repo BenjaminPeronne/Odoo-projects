@@ -1767,6 +1767,28 @@ INDEX_HTML = """<!doctype html>
     </div>
   </div>
 
+  <div class="modal fade" id="confirmActionModal" tabindex="-1" aria-labelledby="confirmActionModalTitle" aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <div>
+            <h2 class="h5 mb-0" id="confirmActionModalTitle">Confirmer l'action</h2>
+            <div class="small-muted" id="confirmActionModalSubtitle"></div>
+          </div>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button>
+        </div>
+        <div class="modal-body">
+          <div id="confirmActionModalMessage"></div>
+          <pre class="mt-3 mb-0 d-none rounded bg-dark p-2 small text-light text-wrap" id="confirmActionModalDetail"></pre>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" id="confirmActionCancelBtn" data-bs-dismiss="modal">Annuler</button>
+          <button type="button" class="btn btn-primary" id="confirmActionSubmitBtn">Confirmer</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="modal fade" id="settingsModal" tabindex="-1" aria-labelledby="settingsModalTitle" aria-hidden="true">
     <div class="modal-dialog modal-lg modal-dialog-scrollable">
       <div class="modal-content">
@@ -1835,7 +1857,7 @@ INDEX_HTML = """<!doctype html>
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script>
-    let state = { overview: null, systemStatus: null, settings: null, lastDockerState: null, selectedProject: null, modules: [], selectedJobId: null, outputMode: 'job', databaseModal: null, deleteModal: null, settingsModal: null, dockerTimer: null };
+    let state = { overview: null, systemStatus: null, settings: null, lastDockerState: null, selectedProject: null, modules: [], selectedJobId: null, outputMode: 'job', databaseModal: null, deleteModal: null, settingsModal: null, confirmModal: null, dockerTimer: null };
 
     const esc = (value) => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     const api = async (url, options = {}) => {
@@ -1860,6 +1882,42 @@ INDEX_HTML = """<!doctype html>
       element.addEventListener('hidden.bs.toast', () => element.remove());
       toast.show();
     };
+    const confirmAction = ({ title, subtitle = '', message, detail = '', confirmLabel = 'Confirmer', confirmClass = 'btn-primary' }) => new Promise((resolve) => {
+      const modalElement = document.getElementById('confirmActionModal');
+      const titleElement = document.getElementById('confirmActionModalTitle');
+      const subtitleElement = document.getElementById('confirmActionModalSubtitle');
+      const messageElement = document.getElementById('confirmActionModalMessage');
+      const detailElement = document.getElementById('confirmActionModalDetail');
+      const submitButton = document.getElementById('confirmActionSubmitBtn');
+
+      if (!state.confirmModal) state.confirmModal = new bootstrap.Modal(modalElement);
+      titleElement.textContent = title || "Confirmer l'action";
+      subtitleElement.textContent = subtitle || '';
+      messageElement.textContent = message || '';
+      detailElement.textContent = detail || '';
+      detailElement.classList.toggle('d-none', !detail);
+      submitButton.textContent = confirmLabel || 'Confirmer';
+      submitButton.className = `btn ${confirmClass || 'btn-primary'}`;
+
+      let answered = false;
+      const cleanup = () => {
+        submitButton.removeEventListener('click', onConfirm);
+        modalElement.removeEventListener('hidden.bs.modal', onHidden);
+      };
+      const onConfirm = () => {
+        answered = true;
+        cleanup();
+        state.confirmModal.hide();
+        resolve(true);
+      };
+      const onHidden = () => {
+        cleanup();
+        if (!answered) resolve(false);
+      };
+      submitButton.addEventListener('click', onConfirm);
+      modalElement.addEventListener('hidden.bs.modal', onHidden, { once: true });
+      state.confirmModal.show();
+    });
     const badgeClass = (status) => {
       if (status === 'running') return 'text-bg-success';
       if (status === 'exited' || status === 'created') return 'text-bg-warning';
@@ -2184,15 +2242,37 @@ INDEX_HTML = """<!doctype html>
         </tr>
       `).join('');
 	      body.querySelectorAll('button[data-module]').forEach(btn => {
-	        btn.addEventListener('click', () => {
+	        btn.addEventListener('click', async () => {
 	          const actionMap = {
 	            install: 'install_module',
 	            upgrade: 'update_module',
 	            uninstall: 'uninstall_module',
 	            'delete-code': 'delete_module_code',
 	          };
-	          if (btn.dataset.action === 'uninstall' && !confirm(`Désinstaller ${btn.dataset.module} de la base ${db} ? Les dossiers addons ne seront pas supprimés.`)) return;
-	          if (btn.dataset.action === 'delete-code' && !confirm(`Supprimer réellement ${btn.dataset.module} du dossier addons du projet ? Le module sera désinstallé de la base si nécessaire.`)) return;
+	          if (!db) {
+	            notify('Sélectionne une base Odoo avant de lancer cette action.', 'error');
+	            return;
+	          }
+	          if (btn.dataset.action === 'uninstall') {
+	            const confirmed = await confirmAction({
+	              title: 'Désinstaller le module',
+	              subtitle: `Base ${db}`,
+	              message: `Désinstaller ${btn.dataset.module} de la base ? Les dossiers addons ne seront pas supprimés.`,
+	              confirmLabel: 'Désinstaller',
+	              confirmClass: 'btn-danger',
+	            });
+	            if (!confirmed) return;
+	          }
+	          if (btn.dataset.action === 'delete-code') {
+	            const confirmed = await confirmAction({
+	              title: 'Supprimer le code addon',
+	              subtitle: state.selectedProject || '',
+	              message: `Supprimer réellement ${btn.dataset.module} du dossier addons du projet ? Le module sera désinstallé de la base si nécessaire.`,
+	              confirmLabel: 'Supprimer le code',
+	              confirmClass: 'btn-danger',
+	            });
+	            if (!confirmed) return;
+	          }
 	          const action = actionMap[btn.dataset.action] || 'update_module';
 	          createJob(action, { project: state.selectedProject, db, modules: btn.dataset.module, uninstall_first: btn.dataset.action === 'delete-code' && Boolean(db) });
 	        });
@@ -2398,15 +2478,30 @@ INDEX_HTML = """<!doctype html>
     document.getElementById('settingsExecutionMode').addEventListener('change', updateWslField);
     document.getElementById('startBtn').addEventListener('click', () => createJob('start_project', { project: state.selectedProject }));
     document.getElementById('updateProjectBtn').addEventListener('click', () => {
+      const db = selectedOdooDatabase();
+      if (!db) {
+        notify("Sélectionne une base Odoo avant de lancer la MAJ addons projet.", 'error');
+        return;
+      }
       createJob('update_local_modules', {
         project: state.selectedProject,
-        db: selectedOdooDatabase(),
+        db,
       }).then(() => window.setTimeout(refreshModules, 2500));
     });
-    document.getElementById('updateAllModulesBtn').addEventListener('click', () => {
+    document.getElementById('updateAllModulesBtn').addEventListener('click', async () => {
       const db = selectedOdooDatabase();
-      if (!db) return;
-      if (!confirm(`Lancer une mise à jour complète Odoo sur la base ${db} ?\\n\\nEquivalent: odoo -d ${db} -u all --stop-after-init`)) return;
+      if (!db) {
+        notify("Sélectionne une base Odoo avant de lancer la MAJ complète. La base postgres n'est pas utilisable ici.", 'error');
+        return;
+      }
+      const confirmed = await confirmAction({
+        title: 'MAJ complète Odoo',
+        subtitle: `Projet ${state.selectedProject} · Base ${db}`,
+        message: 'Cette action lance une mise à jour de tous les modules installés sur la base sélectionnée.',
+        detail: `odoo -d ${db} -u all --stop-after-init`,
+        confirmLabel: 'Lancer la MAJ complète',
+      });
+      if (!confirmed) return;
       createJob('update_all_modules', {
         project: state.selectedProject,
         db,
@@ -2435,22 +2530,46 @@ INDEX_HTML = """<!doctype html>
 	        modules: document.getElementById('moduleNames').value.trim(),
 	      });
 	    });
-		    document.getElementById('uninstallBtn').addEventListener('click', () => {
+		    document.getElementById('uninstallBtn').addEventListener('click', async () => {
 		      const db = document.getElementById('databaseSelect').value;
 		      const modules = document.getElementById('moduleNames').value.trim();
-		      if (!modules) return;
-		      if (!confirm(`Désinstaller ${modules} de la base ${db} ? Les dossiers addons ne seront pas supprimés.`)) return;
+		      if (!db || db === 'postgres') {
+		        notify("Sélectionne une base Odoo avant de désinstaller des modules.", 'error');
+		        return;
+		      }
+		      if (!modules) {
+		        notify("Saisis au moins un module à désinstaller.", 'error');
+		        return;
+		      }
+		      const confirmed = await confirmAction({
+		        title: 'Désinstaller les modules',
+		        subtitle: `Base ${db}`,
+		        message: `Désinstaller ${modules} de la base ? Les dossiers addons ne seront pas supprimés.`,
+		        confirmLabel: 'Désinstaller',
+		        confirmClass: 'btn-danger',
+		      });
+		      if (!confirmed) return;
 	      createJob('uninstall_module', {
 	        project: state.selectedProject,
 	        db,
 		        modules,
 		      });
 		    });
-		    document.getElementById('deleteModuleCodeBtn').addEventListener('click', () => {
+		    document.getElementById('deleteModuleCodeBtn').addEventListener('click', async () => {
 		      const db = document.getElementById('databaseSelect').value;
 		      const modules = document.getElementById('moduleNames').value.trim();
-		      if (!modules) return;
-		      if (!confirm(`Supprimer réellement ${modules} du dossier addons du projet ? Les modules installés seront d'abord désinstallés de la base.`)) return;
+		      if (!modules) {
+		        notify("Saisis au moins un module à supprimer du projet.", 'error');
+		        return;
+		      }
+		      const confirmed = await confirmAction({
+		        title: 'Supprimer le code addon',
+		        subtitle: state.selectedProject || '',
+		        message: `Supprimer réellement ${modules} du dossier addons du projet ? Les modules installés seront d'abord désinstallés de la base si une base est sélectionnée.`,
+		        confirmLabel: 'Supprimer le code',
+		        confirmClass: 'btn-danger',
+		      });
+		      if (!confirmed) return;
 		      createJob('delete_module_code', {
 		        project: state.selectedProject,
 		        db,
