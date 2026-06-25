@@ -90,7 +90,7 @@ prerequis Tauri de la plateforme doivent etre installes.
 
 Le workflow `.github/workflows/build-desktop.yml` compile nativement les trois
 plateformes. Il peut etre lance manuellement dans GitHub Actions ou par un tag
-`app-v*`, par exemple `app-v0.1.0`.
+`app-v*`, par exemple `app-v0.1.1`.
 
 Un script lance toute la procedure depuis le poste local :
 
@@ -106,7 +106,7 @@ fin du workflow puis telecharge les artefacts dans `dist/all-platforms/<tag>/`.
 Exemples utiles :
 
 ```sh
-sh scripts/build_all_platforms.sh --tag app-v0.1.0-build14
+sh scripts/build_all_platforms.sh --tag app-v0.1.1-build1
 sh scripts/build_all_platforms.sh --local
 sh scripts/build_all_platforms.sh --no-wait --no-download
 ```

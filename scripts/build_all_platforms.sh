@@ -27,7 +27,7 @@ Usage:
   sh scripts/build_all_platforms.sh [options]
 
 Options:
-  --tag NOM              Utilise un tag précis, par exemple app-v0.1.0-build14.
+  --tag NOM              Utilise un tag précis, par exemple app-v0.1.1-build1.
   --local                Compile aussi la plateforme courante en local.
   --skip-checks          Ne lance pas py_compile, unittest et npm run build.
   --no-wait              Ne surveille pas la fin du workflow GitHub Actions.
@@ -156,6 +156,23 @@ require_cmd npm
 [ -f "$ROOT/.github/workflows/$WORKFLOW" ] || die "workflow introuvable: .github/workflows/$WORKFLOW"
 [ -f "$ROOT/scripts/build_desktop.py" ] || die "script introuvable: scripts/build_desktop.py"
 
+version=$(package_version)
+
+if [ -z "$TAG" ]; then
+  TAG="app-v${version}-$(date '+%Y%m%d-%H%M%S')"
+fi
+
+case "$TAG" in
+  app-v*) ;;
+  *) die "le tag doit commencer par app-v pour déclencher le workflow: $TAG" ;;
+esac
+
+tag_version=${TAG#app-v}
+tag_version=${tag_version%%-*}
+if [ "$tag_version" != "$version" ]; then
+  die "version incohérente: l'app est en $version mais le tag demandé est $TAG. Utilise par exemple app-v${version}-build1."
+fi
+
 if ! git diff --quiet -- . ':!dist' || ! git diff --cached --quiet -- . ':!dist' || [ -n "$(git ls-files --others --exclude-standard)" ]; then
   printf 'Erreur: le dépôt contient des changements non commités.\n' >&2
   printf '\nFichiers concernés:\n' >&2
@@ -163,10 +180,10 @@ if ! git diff --quiet -- . ':!dist' || ! git diff --cached --quiet -- . ':!dist'
   printf '\nGitHub Actions compile uniquement l état Git poussé sur GitHub.\n' >&2
   printf 'Commite et pousse d abord les changements, puis relance ce script.\n\n' >&2
   printf 'Commandes typiques:\n' >&2
-  printf '  git add README_next_odoo_manager.md odoo-manager-next/app/page.tsx odoo-manager-next/components/ui/button.tsx odoo_manager_web.py tests/test_module_layout.py scripts/build_all_platforms.sh\n' >&2
+  printf '  git add README_next_odoo_manager.md odoo-manager-next/package.json odoo-manager-next/package-lock.json odoo-manager-next/src-tauri/tauri.conf.json odoo-manager-next/src-tauri/Cargo.toml odoo-manager-next/src-tauri/Cargo.lock scripts/build_all_platforms.sh\n' >&2
   printf '  git commit -m "Add all-platform desktop build launcher"\n' >&2
   printf '  git push origin main\n' >&2
-  printf '  sh scripts/build_all_platforms.sh --tag %s\n' "${TAG:-app-v0.1.0-build14}" >&2
+  printf '  sh scripts/build_all_platforms.sh --tag %s\n' "${TAG:-app-v0.1.1-build1}" >&2
   exit 1
 fi
 
@@ -186,16 +203,6 @@ if [ "$LOCAL_BUILD" -eq 1 ]; then
   log "Build local de la plateforme courante"
   run python3 "$ROOT/scripts/build_desktop.py"
 fi
-
-if [ -z "$TAG" ]; then
-  version=$(package_version)
-  TAG="app-v${version}-$(date '+%Y%m%d-%H%M%S')"
-fi
-
-case "$TAG" in
-  app-v*) ;;
-  *) die "le tag doit commencer par app-v pour déclencher le workflow: $TAG" ;;
-esac
 
 if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
   die "le tag existe déjà localement: $TAG"
