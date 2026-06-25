@@ -7,6 +7,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -27,14 +28,26 @@ def default_bundles() -> str:
     }.get(platform.system(), "")
 
 
-def clean_macos_attributes() -> None:
+def local_macos_target_dir() -> Path | None:
+    if platform.system() != "Darwin" or os.environ.get("GITHUB_ACTIONS"):
+        return None
+    if os.environ.get("CARGO_TARGET_DIR"):
+        return Path(os.environ["CARGO_TARGET_DIR"])
+    return Path(tempfile.gettempdir()) / "odoo-manager-tauri-target"
+
+
+def clean_macos_attributes(*extra_paths: Path) -> None:
     if platform.system() != "Darwin" or not shutil.which("xattr"):
         return
     for path in (
+        FRONTEND / "out",
         FRONTEND / "assets",
+        FRONTEND / "public",
+        FRONTEND / "src-tauri",
         FRONTEND / "src-tauri" / "icons",
         FRONTEND / "src-tauri" / "binaries",
         FRONTEND / "src-tauri" / "target" / "release" / "bundle",
+        *extra_paths,
     ):
         if path.exists():
             subprocess.run(["xattr", "-cr", str(path)], check=False)
@@ -76,16 +89,27 @@ def main() -> None:
         sidecar_command.append("--clean")
     run(sidecar_command)
 
-    clean_macos_attributes()
     env = os.environ.copy()
     env["CI"] = "true"
+
+    cargo_target_dir = local_macos_target_dir()
+    if cargo_target_dir:
+        cargo_target_dir.mkdir(parents=True, exist_ok=True)
+        env["CARGO_TARGET_DIR"] = str(cargo_target_dir)
+
+    clean_macos_attributes(*(path for path in (cargo_target_dir,) if path))
 
     run(
         ["npm", "run", "tauri", "build", "--", "--bundles", bundles],
         cwd=FRONTEND,
         env=env,
     )
-    print(f"Paquets créés dans: {FRONTEND / 'src-tauri' / 'target' / 'release' / 'bundle'}")
+    bundle_dir = (
+        (cargo_target_dir / "release" / "bundle")
+        if cargo_target_dir
+        else (FRONTEND / "src-tauri" / "target" / "release" / "bundle")
+    )
+    print(f"Paquets créés dans: {bundle_dir}")
 
 
 if __name__ == "__main__":

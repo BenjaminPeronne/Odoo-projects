@@ -27,7 +27,7 @@ Usage:
   sh scripts/build_all_platforms.sh [options]
 
 Options:
-  --tag NOM              Utilise un tag précis, par exemple app-v0.1.1-build1.
+  --tag NOM              Utilise un tag précis, par exemple app-v0.1.1.
   --local                Compile aussi la plateforme courante en local.
   --skip-checks          Ne lance pas py_compile, unittest et npm run build.
   --no-wait              Ne surveille pas la fin du workflow GitHub Actions.
@@ -159,7 +159,7 @@ require_cmd npm
 version=$(package_version)
 
 if [ -z "$TAG" ]; then
-  TAG="app-v${version}-$(date '+%Y%m%d-%H%M%S')"
+  TAG="app-v${version}"
 fi
 
 case "$TAG" in
@@ -170,7 +170,7 @@ esac
 tag_version=${TAG#app-v}
 tag_version=${tag_version%%-*}
 if [ "$tag_version" != "$version" ]; then
-  die "version incohérente: l'app est en $version mais le tag demandé est $TAG. Utilise par exemple app-v${version}-build1."
+  die "version incohérente: l'app est en $version mais le tag demandé est $TAG. Utilise app-v${version} pour une version stable."
 fi
 
 if ! git diff --quiet -- . ':!dist' || ! git diff --cached --quiet -- . ':!dist' || [ -n "$(git ls-files --others --exclude-standard)" ]; then
@@ -180,10 +180,10 @@ if ! git diff --quiet -- . ':!dist' || ! git diff --cached --quiet -- . ':!dist'
   printf '\nGitHub Actions compile uniquement l état Git poussé sur GitHub.\n' >&2
   printf 'Commite et pousse d abord les changements, puis relance ce script.\n\n' >&2
   printf 'Commandes typiques:\n' >&2
-  printf '  git add README_next_odoo_manager.md odoo-manager-next/package.json odoo-manager-next/package-lock.json odoo-manager-next/src-tauri/tauri.conf.json odoo-manager-next/src-tauri/Cargo.toml odoo-manager-next/src-tauri/Cargo.lock scripts/build_all_platforms.sh\n' >&2
-  printf '  git commit -m "Add all-platform desktop build launcher"\n' >&2
+  printf '  git add .github/workflows/build-desktop.yml README_next_odoo_manager.md odoo-manager-next/src-tauri/tauri.conf.json scripts/build_all_platforms.sh scripts/build_desktop.py scripts/build_tauri_sidecar.py scripts/macos_allow_private_build.sh\n' >&2
+  printf '  git commit -m "Fix macOS desktop build signing"\n' >&2
   printf '  git push origin main\n' >&2
-  printf '  sh scripts/build_all_platforms.sh --tag %s\n' "${TAG:-app-v0.1.1-build1}" >&2
+  printf '  sh scripts/build_all_platforms.sh --tag %s\n' "${TAG:-app-v0.1.1}" >&2
   exit 1
 fi
 

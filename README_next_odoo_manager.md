@@ -83,14 +83,18 @@ Le script choisit les paquets natifs suivants :
 | Windows | installateur NSIS `.exe` |
 
 Les sorties sont placees dans
-`odoo-manager-next/src-tauri/target/release/bundle/`. Rust, Node.js, npm et les
-prerequis Tauri de la plateforme doivent etre installes.
+`odoo-manager-next/src-tauri/target/release/bundle/`. Sur un build macOS local,
+le script peut utiliser le dossier temporaire systeme et affiche alors le chemin
+exact en fin de commande. Rust, Node.js, npm et les prerequis Tauri de la
+plateforme doivent etre installes.
 
 ## Compilation multiplateforme
 
 Le workflow `.github/workflows/build-desktop.yml` compile nativement les trois
-plateformes. Il peut etre lance manuellement dans GitHub Actions ou par un tag
-`app-v*`, par exemple `app-v0.1.1`.
+plateformes. Le runner macOS est volontairement épinglé sur `macos-15` pour
+eviter les migrations automatiques de `macos-latest`. Il peut etre lance
+manuellement dans GitHub Actions ou par un tag `app-v*`, par exemple
+`app-v0.1.1`.
 
 Un script lance toute la procedure depuis le poste local :
 
@@ -106,17 +110,33 @@ fin du workflow puis telecharge les artefacts dans `dist/all-platforms/<tag>/`.
 Exemples utiles :
 
 ```sh
-sh scripts/build_all_platforms.sh --tag app-v0.1.1-build1
+sh scripts/build_all_platforms.sh --tag app-v0.1.1
 sh scripts/build_all_platforms.sh --local
 sh scripts/build_all_platforms.sh --no-wait --no-download
 ```
+
+Pour une version stable, utilise un tag sans suffixe, par exemple
+`app-v0.1.1`. Les suffixes comme `app-v0.1.1-build2` restent possibles pour des
+builds intermediaires, mais ils ne doivent pas etre utilises comme version de
+diffusion stable.
 
 Chaque runner reconstruit le sidecar Python de sa plateforme avant de produire
 l'installateur. Cette etape est necessaire : un Mac ne produit pas de maniere
 fiable un installateur Windows ou Linux complet.
 
-Les paquets locaux et CI sont non signes par defaut. Une signature ad hoc ne
-doit pas etre forcee : elle empeche le sidecar PyInstaller de charger sa
-bibliotheque Python sur macOS. Une distribution publique necessitera les
-certificats de signature Windows et Apple, la signature coherente du sidecar,
-ainsi que la notarisation Apple.
+Les paquets macOS privés sont signés ad hoc afin que le bundle `.app` soit
+coherent localement, mais ils ne sont pas notarizes par Apple. Apres un
+telechargement depuis GitHub ou un navigateur, macOS peut encore afficher que
+l'application est endommagee ou bloquee par securite. Pour un build prive,
+glisse l'app dans Applications puis lance :
+
+```sh
+sh scripts/macos_allow_private_build.sh
+```
+
+Ce script retire la quarantaine macOS et verifie la signature locale du bundle.
+
+Une distribution publique sans alerte macOS necessitera un certificat Apple
+Developer ID, la signature Developer ID du sidecar et de l'app, puis la
+notarisation Apple du DMG. Les certificats ne doivent pas etre commités dans le
+depot ; ils devront etre injectes via les secrets GitHub Actions.

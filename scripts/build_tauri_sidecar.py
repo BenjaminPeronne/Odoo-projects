@@ -47,12 +47,14 @@ def main():
     parser.add_argument("--clean", action="store_true", help="Supprime les sorties PyInstaller avant construction.")
     args = parser.parse_args()
 
+    build_root = ROOT / ".tauri-sidecar-build"
+    os.environ.setdefault("PYINSTALLER_CONFIG_DIR", str(build_root / "pyinstaller-config"))
+
     try:
         import PyInstaller.__main__
     except ImportError as exc:
         raise SystemExit("PyInstaller est requis: python -m pip install pyinstaller") from exc
 
-    build_root = ROOT / ".tauri-sidecar-build"
     if args.clean and build_root.exists():
         shutil.rmtree(build_root)
     build_root.mkdir(parents=True, exist_ok=True)
