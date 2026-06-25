@@ -98,6 +98,26 @@ class ModuleLayoutTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             web.delete_module_file_entry(job, self.project, "repo_module")
 
+    def test_replace_nested_addons_store_link_points_to_managed_copy(self):
+        job = DummyJob()
+        repository_module = self.project_root / "odoo" / "addons-store" / "sodial-addons" / "repo_module"
+        repository_module.mkdir(parents=True)
+        (repository_module / "__manifest__.py").write_text("{'name': 'Repo'}\n", encoding="utf-8")
+        link = self.project_root / "odoo" / "addons" / "repo_module"
+        link.symlink_to(Path("../addons-store/sodial-addons/repo_module"), target_is_directory=True)
+
+        replacement = self.root / "replacement" / "repo_module"
+        replacement.mkdir(parents=True)
+        (replacement / "__manifest__.py").write_text("{'name': 'Replacement'}\n", encoding="utf-8")
+
+        web.link_module_candidates(job, self.project, [replacement], replace_existing=True)
+
+        storage = self.project_root / "odoo" / "addons-store" / "repo_module"
+        self.assertTrue(repository_module.is_dir())
+        self.assertTrue(storage.is_dir())
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(Path("../addons-store/repo_module"), Path(link.readlink()))
+
 
 if __name__ == "__main__":
     unittest.main()

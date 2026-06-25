@@ -1245,7 +1245,14 @@ def ensure_relative_module_link(job, project, module_name, storage_path, replace
         if not replace_existing:
             raise RuntimeError(f"Le module existe déjà dans le projet: {link_path}")
         if not info["removable"]:
-            raise RuntimeError(f"Remplacement refusé pour {module_name}: {info['removal_note']}")
+            can_replace_store_link = (
+                link_path.is_symlink()
+                and info.get("removal_mode") == "protected_store"
+                and path_is_direct_child_of(storage_path, project_addons_storage_parent(project))
+                and (storage_path.exists() or storage_path.is_symlink())
+            )
+            if not can_replace_store_link:
+                raise RuntimeError(f"Remplacement refusé pour {module_name}: {info['removal_note']}")
         backup_existing_module(job, project, link_path)
 
     link_path.symlink_to(link_value, target_is_directory=True)
