@@ -83,6 +83,51 @@ print_failure_context() {
   fi
 }
 
+print_brainkeys_failure_help() {
+  local candidate
+  local modules
+
+  echo ""
+  echo "Brainkeys n'a pas termine la creation du projet."
+  echo ""
+
+  candidate="$(
+    find /tmp -maxdepth 1 -type d -name 'tmp-*' -print 2>/dev/null | while IFS= read -r dir; do
+      [ -d "$dir/.git" ] || continue
+      [ -f "$dir/odoo/odoo/release.py" ] && continue
+      find "$dir" -maxdepth 2 \( -name "__manifest__.py" -o -name "__openerp__.py" \) -print -quit 2>/dev/null | grep -q . || continue
+      printf '%s\n' "$dir"
+    done | tail -n 1
+  )"
+
+  if [ -n "$candidate" ]; then
+    echo "Diagnostic probable:"
+    echo "  Le depot clone ressemble a un depot d'addons Odoo, pas a un projet Odoo complet."
+    echo "  Brainkeys cherche le fichier odoo/odoo/release.py pour detecter la version Odoo,"
+    echo "  mais ce fichier est absent dans: $candidate"
+    echo ""
+    echo "Modules detectes dans le depot clone:"
+    modules="$(
+      find "$candidate" -maxdepth 2 \( -name "__manifest__.py" -o -name "__openerp__.py" \) -print 2>/dev/null |
+      while IFS= read -r manifest; do basename "$(dirname "$manifest")"; done |
+      sort
+    )"
+    if [ -n "$modules" ]; then
+      printf '%s\n' "$modules" | sed 's/^/  - /'
+    else
+      echo "  - aucun manifeste detecte"
+    fi
+    echo ""
+    echo "Que faire:"
+    echo "  1. Pour creer un projet avec Brainkeys, choisis un environnement/projet complet."
+    echo "  2. Pour ajouter ce depot d'addons a un projet existant, utilise ensuite"
+    echo "     l'action 'Lier des modules' ou l'import ZIP du gestionnaire."
+  else
+    echo "Aucun depot temporaire d'addons n'a ete detecte."
+    echo "Relance Brainkeys dans le terminal pour voir son message d'erreur complet."
+  fi
+}
+
 compose_file_for() {
   local project_path="$1"
 
@@ -873,7 +918,15 @@ create_project() {
   echo "attendre le conteneur, afficher l'URL et ouvrir la creation de base."
   echo ""
 
-  brainkeys riplika
+  set +e
+  _TYPER_STANDARD_TRACEBACK=1 brainkeys riplika
+  brainkeys_code=$?
+  set -e
+  if [ "$brainkeys_code" -ne 0 ]; then
+    print_brainkeys_failure_help
+    rm -f "$before_file" "$after_file"
+    return "$brainkeys_code"
+  fi
 
   snapshot_projects "$after_file"
   new_project="$(detect_new_project "$before_file" "$after_file")"

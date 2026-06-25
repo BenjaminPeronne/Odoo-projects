@@ -336,6 +336,27 @@ function compactWorkspacePath(path: string | undefined, workspace: string | unde
   return path.replace(`${workspace.replace(/\/$/, "")}/`, "");
 }
 
+function fallbackManagerSettings(
+  current: ManagerSettings | null,
+  overview: Overview | null,
+  systemStatus: SystemStatus | null,
+): ManagerSettings {
+  return {
+    version: current?.version ?? 1,
+    workspace: current?.workspace || systemStatus?.workspace || overview?.workspace || "",
+    execution_mode: current?.execution_mode || systemStatus?.docker.execution_mode || "native",
+    wsl_distribution: current?.wsl_distribution || "",
+    docker_executable: current?.docker_executable || "docker",
+    brainkeys_executable: current?.brainkeys_executable || "brainkeys",
+    traefik_directory: current?.traefik_directory || systemStatus?.traefik?.path || "",
+    terminal: current?.terminal || "auto",
+    docker_poll_interval: current?.docker_poll_interval || 10,
+    config_file: current?.config_file,
+    platform: current?.platform || systemStatus?.docker.platform || "",
+    workspace_exists: current?.workspace_exists ?? systemStatus?.workspace_exists,
+  };
+}
+
 export default function Home() {
   const [overview, setOverview] = useState<Overview | null>(null);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
@@ -463,6 +484,12 @@ export default function Home() {
       }
     }
   }, [pushToast]);
+
+  const openSettingsDialog = useCallback(() => {
+    setSettingsDraft(fallbackManagerSettings(settings, overview, systemStatus));
+    setSettingsOpen(true);
+    void loadSettings();
+  }, [loadSettings, overview, settings, systemStatus]);
 
   const refreshJobs = useCallback(async () => {
     try {
@@ -948,10 +975,7 @@ export default function Home() {
               <Button
                 className="w-full"
                 variant="ghost"
-                onClick={() => {
-                  setSettingsDraft(settings);
-                  setSettingsOpen(true);
-                }}
+                onClick={openSettingsDialog}
               >
                 <Settings className="h-4 w-4" />
                 Paramètres
@@ -1107,10 +1131,7 @@ export default function Home() {
                     className="w-full sm:w-auto"
                     size="sm"
                     variant="outline"
-                    onClick={() => {
-                      setSettingsDraft(settings);
-                      setSettingsOpen(true);
-                    }}
+                    onClick={openSettingsDialog}
                   >
                     <Settings className="h-4 w-4" />
                     Paramètres
@@ -1141,7 +1162,7 @@ export default function Home() {
                     {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
                     {systemStatus.traefik.installed ? "Démarrer Traefik" : "Installer Traefik"}
                   </Button>
-                  <Button className="w-full sm:w-auto" size="sm" variant="outline" onClick={() => setSettingsOpen(true)}>
+                  <Button className="w-full sm:w-auto" size="sm" variant="outline" onClick={openSettingsDialog}>
                     <Settings className="h-4 w-4" />
                     Paramètres
                   </Button>
@@ -1597,7 +1618,7 @@ export default function Home() {
               Le workspace est le dossier analysé pour lister les projets et celui utilisé lors des prochaines créations.
             </DialogDescription>
           </DialogHeader>
-          {settingsDraft && (
+          {settingsDraft ? (
             <div className="grid gap-4">
               <label className="grid min-w-0 gap-1.5 text-sm font-medium">
                 Dossier des projets
@@ -1697,6 +1718,11 @@ export default function Home() {
                   Enregistrer
                 </Button>
               </div>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2 rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Chargement des paramètres...
             </div>
           )}
         </DialogContent>
