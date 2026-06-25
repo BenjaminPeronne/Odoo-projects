@@ -89,7 +89,15 @@ def project_addons_link_parent(project):
 
 
 def project_addons_storage_parent(project):
+    return project_odoo_root(project) / "addons-store"
+
+
+def project_legacy_addons_storage_parent(project):
     return project_odoo_root(project) / "odoo" / "addons"
+
+
+def path_is_direct_child_of(path, parent):
+    return path.resolve(strict=False).parent == parent.resolve(strict=False)
 
 
 def unique_child(parent, name):
@@ -474,6 +482,7 @@ def module_dirs(project):
     candidates = [
         project_addons_link_parent(project),
         project_addons_storage_parent(project),
+        project_legacy_addons_storage_parent(project),
         base / "odoo" / "odoo" / "addons",
         base / "addons-store" / "odoo_entreprise",
         base / "addons-store" / "odoo_enterprise",
@@ -557,8 +566,8 @@ def parse_manifest(path):
 def module_location_info(project, path):
     link_parent = project_addons_link_parent(project).resolve(strict=False)
     storage_parent = project_addons_storage_parent(project).resolve(strict=False)
+    legacy_storage_parent = project_legacy_addons_storage_parent(project).resolve(strict=False)
     imports_roots = module_import_roots(project)
-    project_store = (project_odoo_root(project) / "addons-store").resolve(strict=False)
     parent = path.parent.resolve(strict=False)
     source_path = path.resolve(strict=False) if path.is_symlink() else path
 
@@ -571,19 +580,23 @@ def module_location_info(project, path):
             link_path = str(candidate_link)
 
     if parent == link_parent and path.is_symlink():
-        if path_is_relative_to(source_path, storage_parent):
-            kind = "lien vers source projet"
+        if path_is_direct_child_of(source_path, storage_parent):
+            kind = "lien vers addons-store"
+        elif path_is_direct_child_of(source_path, legacy_storage_parent):
+            kind = "lien vers ancien stockage"
         elif any(path_is_relative_to(source_path, root) for root in imports_roots):
             kind = "lien vers import outil"
-        elif path_is_relative_to(source_path, project_store):
-            kind = "lien vers addons-store"
+        elif path_is_relative_to(source_path, storage_parent):
+            kind = "lien vers dépôt addons-store"
         else:
             kind = "lien vers source externe"
     elif parent == link_parent:
         kind = "dossier direct dans odoo/addons"
     elif parent == storage_parent:
-        kind = "source projet"
-    elif path_is_relative_to(path.resolve(strict=False), project_store):
+        kind = "addons-store"
+    elif parent == legacy_storage_parent:
+        kind = "ancien stockage"
+    elif path_is_relative_to(path.resolve(strict=False), storage_parent):
         kind = "addons-store"
     else:
         kind = "source externe"
@@ -623,8 +636,8 @@ def should_parse_manifest(path):
 def module_removal_info(project, path):
     link_parent = project_addons_link_parent(project).resolve()
     storage_parent = project_addons_storage_parent(project).resolve()
+    legacy_storage_parent = project_legacy_addons_storage_parent(project).resolve()
     imports_roots = module_import_roots(project)
-    project_store = (project_odoo_root(project) / "addons-store").resolve()
     parent = path.parent.resolve()
 
     if parent != link_parent:
@@ -632,7 +645,13 @@ def module_removal_info(project, path):
             return {
                 "removable": False,
                 "removal_mode": "protected_source",
-                "removal_note": "Module dans odoo/odoo/addons sans lien géré dans odoo/addons.",
+                "removal_note": "Module dans odoo/addons-store sans lien géré dans odoo/addons.",
+            }
+        if parent == legacy_storage_parent:
+            return {
+                "removable": False,
+                "removal_mode": "protected_legacy_source",
+                "removal_note": "Module dans l'ancien dossier odoo/odoo/addons sans lien géré dans odoo/addons.",
             }
         return {
             "removable": False,
@@ -642,11 +661,17 @@ def module_removal_info(project, path):
 
     if path.is_symlink():
         target = path.resolve(strict=False)
-        if path_is_relative_to(target, storage_parent):
+        if path_is_direct_child_of(target, storage_parent):
             return {
                 "removable": True,
                 "removal_mode": "link_and_storage",
-                "removal_note": "Supprime le lien odoo/addons et le dossier source dans odoo/odoo/addons.",
+                "removal_note": "Supprime le lien odoo/addons et le dossier dans odoo/addons-store.",
+            }
+        if path_is_direct_child_of(target, legacy_storage_parent):
+            return {
+                "removable": True,
+                "removal_mode": "link_and_legacy_storage",
+                "removal_note": "Supprime le lien odoo/addons et le dossier dans l'ancien odoo/odoo/addons.",
             }
         if any(path_is_relative_to(target, root) for root in imports_roots):
             return {
@@ -654,11 +679,11 @@ def module_removal_info(project, path):
                 "removal_mode": "link_and_import",
                 "removal_note": "Supprime le lien odoo/addons et le dossier extrait géré par l'outil.",
             }
-        if path_is_relative_to(target, project_store):
+        if path_is_relative_to(target, storage_parent):
             return {
                 "removable": False,
                 "removal_mode": "protected_store",
-                "removal_note": "Module fourni par addons-store; suppression du lien seule le ferait réapparaître.",
+                "removal_note": "Module fourni par un dépôt sous addons-store; suppression du lien seule le ferait réapparaître.",
             }
         return {
             "removable": True,
@@ -1124,6 +1149,7 @@ def move_deleted_module_path(job, project, module_name, path, label):
 def delete_module_file_entry(job, project, module_name):
     primary_addons = project_addons_link_parent(project).resolve()
     storage_parent = project_addons_storage_parent(project).resolve()
+    legacy_storage_parent = project_legacy_addons_storage_parent(project).resolve()
     imports_roots = module_import_roots(project)
     entry = primary_addons / module_name
 
@@ -1139,11 +1165,11 @@ def delete_module_file_entry(job, project, module_name):
         target = entry.resolve(strict=False)
         entry.unlink()
         job.add(f"Lien supprimé: {entry}")
-        if path_is_relative_to(target, storage_parent):
+        if path_is_direct_child_of(target, storage_parent) or path_is_direct_child_of(target, legacy_storage_parent):
             if target.exists() or target.is_symlink():
-                move_deleted_module_path(job, project, module_name, target, "Dossier source")
+                move_deleted_module_path(job, project, module_name, target, "Dossier addons-store")
             else:
-                job.add(f"Dossier source déjà absent: {target}")
+                job.add(f"Dossier addons-store déjà absent: {target}")
         else:
             imports_root = next((root for root in imports_roots if path_is_relative_to(target, root)), None)
             if imports_root is not None:
@@ -1183,19 +1209,19 @@ def copy_module_to_storage(job, project, module_path, replace_existing=False):
     source_path = module_path.resolve()
     if storage_path.exists() or storage_path.is_symlink():
         if storage_path.resolve(strict=False) == source_path:
-            job.add(f"Module déjà dans le dossier source: {storage_path}")
+            job.add(f"Module déjà dans addons-store: {storage_path}")
             return storage_path
         if not replace_existing:
-            raise RuntimeError(f"Le module existe déjà dans le dossier source du projet: {storage_path}")
+            raise RuntimeError(f"Le module existe déjà dans addons-store du projet: {storage_path}")
         if not managed_storage_link(project, module_name, storage_path) and not link_path.exists() and not link_path.is_symlink():
             raise RuntimeError(
-                f"Remplacement refusé pour {module_name}: un dossier existe déjà dans odoo/odoo/addons sans lien géré."
+                f"Remplacement refusé pour {module_name}: un dossier existe déjà dans odoo/addons-store sans lien géré."
             )
         backup_existing_module(job, project, storage_path)
 
     ignore = shutil.ignore_patterns(".git", "__pycache__", "node_modules", ".DS_Store")
     shutil.copytree(source_path, storage_path, symlinks=True, ignore=ignore)
-    job.add(f"Module copié dans le dossier source: {source_path} -> {storage_path}")
+    job.add(f"Module copié dans addons-store: {source_path} -> {storage_path}")
     return storage_path
 
 
@@ -1234,7 +1260,7 @@ def install_module_candidates(job, project, candidates, replace_existing=False):
     if not candidates:
         raise RuntimeError("Aucun module Odoo trouve dans ce dossier.")
 
-    job.add(f"Dossier source modules: {storage_parent}")
+    job.add(f"Dossier addons-store modules: {storage_parent}")
     job.add(f"Dossier liens Odoo: {link_parent}")
 
     linked = 0
@@ -1260,7 +1286,7 @@ def link_module_candidates(job, project, candidates, replace_existing=False):
 def normalize_module_layout_for_action(job, project, module_names):
     link_parent = project_addons_link_parent(project)
     storage_parent = project_addons_storage_parent(project)
-    project_store = (project_odoo_root(project) / "addons-store").resolve()
+    legacy_storage_parent = project_legacy_addons_storage_parent(project)
 
     for module_name in module_names:
         link_path = link_parent / module_name
@@ -1270,20 +1296,22 @@ def normalize_module_layout_for_action(job, project, module_names):
 
         if link_path.is_symlink():
             target = link_path.resolve(strict=False)
-            if path_is_relative_to(target, project_store):
+            if path_is_relative_to(target, storage_parent.resolve()):
                 continue
-            if path_is_relative_to(target, storage_parent):
-                ensure_relative_module_link(job, project, module_name, target, replace_existing=True)
+            if path_is_direct_child_of(target, legacy_storage_parent):
+                copied = copy_module_to_storage(job, project, target, replace_existing=False)
+                ensure_relative_module_link(job, project, module_name, copied, replace_existing=True)
+                job.add(f"Layout module migré vers addons-store avant action Odoo: {module_name}")
                 continue
             if not target.exists():
                 job.add(f"Layout non normalisé pour {module_name}: cible absente {target}")
                 continue
             if storage_path.exists() or storage_path.is_symlink():
                 if not (storage_path / "__manifest__.py").exists() and not (storage_path / "__openerp__.py").exists():
-                    job.add(f"Layout non normalisé pour {module_name}: dossier source existant sans manifest {storage_path}")
+                    job.add(f"Layout non normalisé pour {module_name}: dossier addons-store existant sans manifest {storage_path}")
                     continue
                 ensure_relative_module_link(job, project, module_name, storage_path, replace_existing=True)
-                job.add(f"Lien migré vers le dossier source existant: {module_name}")
+                job.add(f"Lien migré vers le dossier addons-store existant: {module_name}")
                 continue
             copied = copy_module_to_storage(job, project, target, replace_existing=False)
             ensure_relative_module_link(job, project, module_name, copied, replace_existing=True)
@@ -1292,11 +1320,11 @@ def normalize_module_layout_for_action(job, project, module_names):
 
         if link_path.is_dir():
             if storage_path.exists() or storage_path.is_symlink():
-                job.add(f"Layout non normalisé pour {module_name}: dossier source déjà présent {storage_path}")
+                job.add(f"Layout non normalisé pour {module_name}: dossier addons-store déjà présent {storage_path}")
                 continue
             storage_parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(link_path), str(storage_path))
-            job.add(f"Dossier addon déplacé vers le dossier source: {link_path} -> {storage_path}")
+            job.add(f"Dossier addon déplacé vers addons-store: {link_path} -> {storage_path}")
             ensure_relative_module_link(job, project, module_name, storage_path, replace_existing=True)
 
 
@@ -1838,7 +1866,7 @@ class Handler(BaseHTTPRequestHandler):
                 project = validate_project(payload.get("project", ""))
                 source = payload.get("source", "")
                 if not source:
-                    raise ValueError("Dossier source manquant.")
+                    raise ValueError("Dossier de modules manquant.")
                 job = Job(f"Lier modules dans {project}", link_modules_job, (project, source))
             else:
                 return json_response(self, {"error": "Action inconnue."}, status=400)

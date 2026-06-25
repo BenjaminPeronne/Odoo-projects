@@ -1577,7 +1577,7 @@ export default function Home() {
                   <Card>
                     <CardHeader>
                       <CardTitle>Lier des modules</CardTitle>
-                      <CardDescription>Copie les modules dans odoo/odoo/addons puis crée les liens relatifs dans odoo/addons.</CardDescription>
+                      <CardDescription>Copie les modules dans odoo/addons-store puis crée les liens relatifs dans odoo/addons.</CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-2">
                       <Input placeholder="/Users/.../addons" value={sourcePath} onChange={(event) => setSourcePath(event.target.value)} />
@@ -1852,7 +1852,7 @@ export default function Home() {
           <DialogHeader>
             <DialogTitle>Supprimer les modules du projet</DialogTitle>
             <DialogDescription>
-              Cette action retire les modules de `odoo/addons` et supprime le dossier source géré dans `odoo/odoo/addons`.
+              Cette action retire les modules de `odoo/addons` et supprime le dossier géré dans `odoo/addons-store`.
               Les anciens imports encore liés depuis `.odoo_manager_imports` restent aussi nettoyés.
             </DialogDescription>
           </DialogHeader>

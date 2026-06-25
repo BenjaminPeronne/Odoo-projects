@@ -57,15 +57,15 @@ Pour ajouter des modules, selectionnez un projet puis utilisez `Ajouter des
 modules locaux` :
 
 - `Copier et lier` copie les modules detectes dans
-  `PROJET/odoo/odoo/addons/`, puis cree un lien symbolique relatif dans
+  `PROJET/odoo/addons-store/`, puis cree un lien symbolique relatif dans
   `PROJET/odoo/addons/`.
 - `Importer ZIP` extrait l'archive temporairement, detecte les dossiers
-  contenant `__manifest__.py`, copie les modules dans `PROJET/odoo/odoo/addons/`,
+  contenant `__manifest__.py`, copie les modules dans `PROJET/odoo/addons-store/`,
   puis cree les liens relatifs dans `PROJET/odoo/addons/`.
 
 Avant une installation ou une mise a jour de module, le gestionnaire normalise
 aussi les anciens liens geres : un lien absolu ou un ancien import est recopie
-dans `PROJET/odoo/odoo/addons/`, puis remplace par un lien relatif depuis
+dans `PROJET/odoo/addons-store/`, puis remplace par un lien relatif depuis
 `PROJET/odoo/addons/`.
 
 Pour creer une base, selectionnez un projet puis cliquez sur `Creer base`.
