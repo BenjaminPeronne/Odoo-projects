@@ -279,6 +279,33 @@ start_traefik() {
   )
 }
 
+compose_up_project() {
+  local project="$1"
+  local path="$2"
+  local code
+
+  set +e
+  (
+    cd "$path"
+    if [ "$(container_status "odoo-$project")" != "absent" ] || [ "$(container_status "postgresql-$project")" != "absent" ]; then
+      echo "Conteneurs existants detectes, demarrage sans recreation..."
+      docker compose up -d --no-recreate
+    else
+      docker compose up --pull always -d
+    fi
+  )
+  code=$?
+  set -e
+
+  if [ "$code" -ne 0 ] && is_running "odoo-$project"; then
+    echo "Docker Compose a retourne une erreur, mais odoo-$project est deja running."
+    echo "Le gestionnaire continue avec le conteneur existant."
+    return 0
+  fi
+
+  return "$code"
+}
+
 odoo_server_running() {
   local container="$1"
 
@@ -362,10 +389,7 @@ start_project() {
 
   start_traefik
   echo "Demarrage du projet $project..."
-  (
-    cd "$path"
-    docker compose up --pull always -d
-  )
+  compose_up_project "$project" "$path"
 
   wait_for_container "odoo-$project" 60
 

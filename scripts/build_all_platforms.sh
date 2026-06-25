@@ -155,6 +155,7 @@ require_cmd npm
 
 [ -f "$ROOT/.github/workflows/$WORKFLOW" ] || die "workflow introuvable: .github/workflows/$WORKFLOW"
 [ -f "$ROOT/scripts/build_desktop.py" ] || die "script introuvable: scripts/build_desktop.py"
+[ -f "$ROOT/scripts/build_local_desktop.sh" ] || die "script introuvable: scripts/build_local_desktop.sh"
 
 version=$(package_version)
 
@@ -180,7 +181,7 @@ if ! git diff --quiet -- . ':!dist' || ! git diff --cached --quiet -- . ':!dist'
   printf '\nGitHub Actions compile uniquement l état Git poussé sur GitHub.\n' >&2
   printf 'Commite et pousse d abord les changements, puis relance ce script.\n\n' >&2
   printf 'Commandes typiques:\n' >&2
-  printf '  git add .github/workflows/build-desktop.yml README_next_odoo_manager.md odoo-manager-next/src-tauri/tauri.conf.json scripts/build_all_platforms.sh scripts/build_desktop.py scripts/build_tauri_sidecar.py scripts/macos_allow_private_build.sh\n' >&2
+  printf '  git add .github/workflows/build-desktop.yml README_next_odoo_manager.md odoo-manager-next/src-tauri/tauri.conf.json scripts/build_all_platforms.sh scripts/build_desktop.py scripts/build_local_desktop.sh scripts/build_tauri_sidecar.py scripts/macos_allow_private_build.sh\n' >&2
   printf '  git commit -m "Fix macOS desktop build signing"\n' >&2
   printf '  git push origin main\n' >&2
   printf '  sh scripts/build_all_platforms.sh --tag %s\n' "${TAG:-app-v0.1.1}" >&2
@@ -201,7 +202,7 @@ fi
 
 if [ "$LOCAL_BUILD" -eq 1 ]; then
   log "Build local de la plateforme courante"
-  run python3 "$ROOT/scripts/build_desktop.py"
+  run sh "$ROOT/scripts/build_local_desktop.sh"
 fi
 
 if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then

@@ -70,8 +70,13 @@ formats `.icns`, `.ico` et PNG utilises par les installateurs sont generes dans
 Pour construire l'application sur le systeme courant :
 
 ```sh
-python3 -m pip install pyinstaller
-python3 scripts/build_desktop.py
+sh scripts/build_local_desktop.sh
+```
+
+Sur macOS, pour generer uniquement le bundle `.app` local :
+
+```sh
+sh scripts/build_local_desktop.sh --bundles app
 ```
 
 Le script choisit les paquets natifs suivants :

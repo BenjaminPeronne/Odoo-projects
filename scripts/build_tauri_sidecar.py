@@ -53,7 +53,10 @@ def main():
     try:
         import PyInstaller.__main__
     except ImportError as exc:
-        raise SystemExit("PyInstaller est requis: python -m pip install pyinstaller") from exc
+        raise SystemExit(
+            "PyInstaller est requis. Lance plutot: "
+            "sh scripts/build_local_desktop.sh"
+        ) from exc
 
     if args.clean and build_root.exists():
         shutil.rmtree(build_root)
