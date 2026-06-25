@@ -83,6 +83,24 @@ print_failure_context() {
   fi
 }
 
+path_mtime() {
+  local path="$1"
+
+  stat -f '%m' "$path" 2>/dev/null || stat -c '%Y' "$path" 2>/dev/null || printf '0\n'
+}
+
+brainkeys_addon_candidates() {
+  {
+    find -H /tmp -maxdepth 1 -type d -name 'tmp-*' -print 2>/dev/null || true
+    find /private/tmp -maxdepth 1 -type d -name 'tmp-*' -print 2>/dev/null || true
+  } | while IFS= read -r dir; do
+    [ -d "$dir/.git" ] || continue
+    [ -f "$dir/odoo/odoo/release.py" ] && continue
+    find "$dir" -maxdepth 2 \( -name "__manifest__.py" -o -name "__openerp__.py" \) -print -quit 2>/dev/null | grep -q . || continue
+    (cd "$dir" 2>/dev/null && pwd -P)
+  done | sort -u
+}
+
 print_brainkeys_failure_help() {
   local candidate
   local modules
@@ -92,12 +110,9 @@ print_brainkeys_failure_help() {
   echo ""
 
   candidate="$(
-    find /tmp -maxdepth 1 -type d -name 'tmp-*' -print 2>/dev/null | while IFS= read -r dir; do
-      [ -d "$dir/.git" ] || continue
-      [ -f "$dir/odoo/odoo/release.py" ] && continue
-      find "$dir" -maxdepth 2 \( -name "__manifest__.py" -o -name "__openerp__.py" \) -print -quit 2>/dev/null | grep -q . || continue
-      printf '%s\n' "$dir"
-    done | tail -n 1
+    brainkeys_addon_candidates | while IFS= read -r dir; do
+      printf '%s %s\n' "$(path_mtime "$dir")" "$dir"
+    done | sort -n | tail -n 1 | cut -d ' ' -f 2-
   )"
 
   if [ -n "$candidate" ]; then
