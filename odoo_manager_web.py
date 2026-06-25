@@ -17,7 +17,7 @@ import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from odoo_manager_core import ManagerSettings, SettingsStore, docker_status, open_terminal, start_docker
+from odoo_manager_core import ManagerSettings, SettingsStore, ProjectService, docker_status, open_terminal, start_docker
 from odoo_manager_core.platform import command_prefix, executable_search_path, execution_path
 from odoo_manager_core.system import docker_command, shell_command
 
@@ -259,6 +259,10 @@ def local_traefik_directory():
     if SETTINGS.execution_mode == "wsl":
         return None
     return default_traefik_directory()
+
+
+def project_service():
+    return ProjectService(SETTINGS, WORKSPACE, traefik_dir=local_traefik_directory())
 
 
 def traefik_compose_probe():
@@ -971,6 +975,24 @@ def install_traefik_job(job):
     manager_job(job, "--install-traefik")
 
 
+def start_project_job(job, project):
+    project = validate_project(project)
+    project_service().start_project(project, log=job.add)
+
+
+def update_project_job(job, project):
+    project = validate_project(project)
+    project_service().update_project(project, log=job.add)
+    clear_project_module_cache(project)
+
+
+def update_all_projects_job(job):
+    projects = project_dirs()
+    project_service().update_all_projects(log=job.add)
+    for project in projects:
+        clear_project_module_cache(project)
+
+
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -1007,9 +1029,7 @@ def create_database_job(job, project, db_name, master_pwd, login, password, lang
 
     job.add(f"Creation de la base {db_name} dans {project}")
     job.add("Demarrage du projet avant creation de base...")
-    code = run_stream(job, shell_command(SETTINGS, MANAGER, "--start", project))
-    if code != 0:
-        raise RuntimeError("Le projet n'a pas demarre correctement.")
+    project_service().start_project(project, log=job.add)
 
     existing = set(list_databases_for(project))
     if db_name in existing:
@@ -1144,20 +1164,7 @@ def delete_module_file_entry(job, project, module_name):
 
 def stop_project_job(job, project):
     project = validate_project(project)
-    path = (WORKSPACE / project).resolve()
-    compose = compose_file(project)
-    if not compose:
-        raise RuntimeError(f"Projet sans fichier compose: {project}")
-
-    docker_ok, docker_message = docker_available()
-    if not docker_ok:
-        raise RuntimeError(docker_message or "Docker ne répond pas.")
-
-    job.add(f"Arrêt du projet {project}")
-    code = run_stream(job, docker_command(SETTINGS, "compose", "stop"), cwd=path)
-    if code != 0:
-        raise RuntimeError("Impossible d'arrêter Docker Compose proprement.")
-    job.add(f"Projet arrêté: {project}")
+    project_service().stop_project(project, log=job.add)
 
 
 def managed_storage_link(project, module_name, storage_path):
@@ -1768,15 +1775,15 @@ class Handler(BaseHTTPRequestHandler):
 
             if action == "start_project":
                 project = validate_project(payload.get("project", ""))
-                job = Job(f"Démarrer {project}", manager_job, ("--start", project))
+                job = Job(f"Démarrer {project}", start_project_job, (project,))
             elif action == "stop_project":
                 project = validate_project(payload.get("project", ""))
                 job = Job(f"Arrêter {project}", stop_project_job, (project,))
             elif action == "update_project":
                 project = validate_project(payload.get("project", ""))
-                job = Job(f"MAJ projet {project}", manager_job, ("--update", project))
+                job = Job(f"MAJ projet {project}", update_project_job, (project,))
             elif action == "update_all":
-                job = Job("MAJ tous les projets", manager_job, ("--update-all",))
+                job = Job("MAJ tous les projets", update_all_projects_job)
             elif action == "update_all_modules":
                 project = validate_project(payload.get("project", ""))
                 db_name = validate_odoo_db(payload.get("db", ""))
