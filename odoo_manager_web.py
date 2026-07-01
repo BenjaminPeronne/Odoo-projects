@@ -1198,6 +1198,15 @@ def managed_storage_link(project, module_name, storage_path):
     return link_path.is_symlink() and link_path.resolve(strict=False) == storage_path.resolve(strict=False)
 
 
+def managed_module_copy_ready(project, module_name, storage_path):
+    expected_path = project_addons_storage_parent(project) / module_name
+    if storage_path.absolute() != expected_path.absolute():
+        return False
+    if storage_path.is_symlink() or not storage_path.is_dir():
+        return False
+    return (storage_path / "__manifest__.py").is_file() or (storage_path / "__openerp__.py").is_file()
+
+
 def copy_module_to_storage(job, project, module_path, replace_existing=False):
     module_name = module_path.name
     validate_modules(module_name)
@@ -1248,11 +1257,14 @@ def ensure_relative_module_link(job, project, module_name, storage_path, replace
             can_replace_store_link = (
                 link_path.is_symlink()
                 and info.get("removal_mode") == "protected_store"
-                and path_is_direct_child_of(storage_path, project_addons_storage_parent(project))
-                and (storage_path.exists() or storage_path.is_symlink())
+                and managed_module_copy_ready(project, module_name, storage_path)
             )
             if not can_replace_store_link:
                 raise RuntimeError(f"Remplacement refusé pour {module_name}: {info['removal_note']}")
+            job.add(
+                f"Lien fourni par un dépôt remplacé par la copie gérée: {link_path} -> {link_value}. "
+                "La source du dépôt est conservée."
+            )
         backup_existing_module(job, project, link_path)
 
     link_path.symlink_to(link_value, target_is_directory=True)
@@ -1501,8 +1513,7 @@ def import_zip_modules_job(job, project, filename, data, replace_existing=False)
         raise RuntimeError("Fichier ZIP vide.")
 
     imports_root = project_staging_imports_root(project)
-    import_name = f"{time.strftime('%Y%m%d_%H%M%S')}_{safe_import_name(filename)}"
-    import_dir = imports_root / import_name
+    import_dir = unique_child(imports_root, safe_import_name(filename))
     zip_path = import_dir.with_suffix(".zip")
     imports_root.mkdir(parents=True, exist_ok=True)
 
@@ -1524,9 +1535,11 @@ def import_zip_modules_job(job, project, filename, data, replace_existing=False)
     job.add(f"Modules detectes dans le ZIP: {len(candidates)}")
     for candidate in candidates:
         job.add(f" - {candidate.name}")
-    link_module_candidates(job, project, candidates, replace_existing=replace_existing)
-    shutil.rmtree(import_dir, ignore_errors=True)
-    job.add(f"Archive temporaire nettoyée: {import_dir}")
+    try:
+        link_module_candidates(job, project, candidates, replace_existing=replace_existing)
+    finally:
+        shutil.rmtree(import_dir, ignore_errors=True)
+        job.add(f"Archive temporaire nettoyée: {import_dir}")
 
 
 def jobs_snapshot():

@@ -1,5 +1,7 @@
+import io
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 import odoo_manager_web as web
@@ -117,6 +119,52 @@ class ModuleLayoutTests(unittest.TestCase):
         self.assertTrue(storage.is_dir())
         self.assertTrue(link.is_symlink())
         self.assertEqual(Path("../addons-store/repo_module"), Path(link.readlink()))
+        self.assertTrue(any("La source du dépôt est conservée" in line for line in job.lines))
+
+    def test_replace_existing_managed_copy_when_link_still_targets_repository(self):
+        job = DummyJob()
+        repository_module = self.project_root / "odoo" / "addons-store" / "browseinfo" / "repo_module"
+        repository_module.mkdir(parents=True)
+        (repository_module / "__manifest__.py").write_text("{'name': 'Repository'}\n", encoding="utf-8")
+
+        storage = self.project_root / "odoo" / "addons-store" / "repo_module"
+        storage.mkdir()
+        (storage / "__manifest__.py").write_text("{'name': 'Old managed copy'}\n", encoding="utf-8")
+
+        link = self.project_root / "odoo" / "addons" / "repo_module"
+        link.symlink_to(Path("../addons-store/browseinfo/repo_module"), target_is_directory=True)
+
+        replacement = self.root / "replacement" / "repo_module"
+        replacement.mkdir(parents=True)
+        (replacement / "__manifest__.py").write_text("{'name': 'Fresh ZIP copy'}\n", encoding="utf-8")
+
+        web.link_module_candidates(job, self.project, [replacement], replace_existing=True)
+
+        self.assertTrue(repository_module.is_dir())
+        self.assertIn("Fresh ZIP copy", (storage / "__manifest__.py").read_text(encoding="utf-8"))
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(Path("../addons-store/repo_module"), Path(link.readlink()))
+
+    def test_failed_zip_import_cleans_staging_directory(self):
+        job = DummyJob()
+        web.link_module_candidates(job, self.project, [self.external])
+
+        archive_buffer = io.BytesIO()
+        with zipfile.ZipFile(archive_buffer, "w") as archive:
+            archive.writestr("custom_module/__manifest__.py", "{'name': 'Replacement'}\n")
+
+        with self.assertRaises(RuntimeError):
+            web.import_zip_modules_job(
+                job,
+                self.project,
+                "custom_modules.zip",
+                archive_buffer.getvalue(),
+                replace_existing=False,
+            )
+
+        staging_root = web.project_staging_imports_root(self.project)
+        self.assertFalse(any(staging_root.iterdir()))
+        self.assertTrue(any("Archive temporaire nettoyée" in line for line in job.lines))
 
 
 if __name__ == "__main__":
