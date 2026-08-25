@@ -1,4 +1,5 @@
 import io
+import stat
 import tempfile
 import unittest
 import zipfile
@@ -160,6 +161,85 @@ class ModuleLayoutTests(unittest.TestCase):
                 "custom_modules.zip",
                 archive_buffer.getvalue(),
                 replace_existing=False,
+            )
+
+        staging_root = web.project_staging_imports_root(self.project)
+        self.assertFalse(any(staging_root.iterdir()))
+        self.assertTrue(any("Archive temporaire nettoyée" in line for line in job.lines))
+
+    def test_zip_import_ignores_packaging_symlinks_and_imports_real_modules(self):
+        job = DummyJob()
+        archive_buffer = io.BytesIO()
+        with zipfile.ZipFile(archive_buffer, "w") as archive:
+            archive.writestr(
+                "stock-addons/available_stock_by_warehouse/__manifest__.py",
+                "{'name': 'Available stock'}\n",
+            )
+            archive.writestr(
+                "stock-addons/catalog_main_menu/__manifest__.py",
+                "{'name': 'Catalog'}\n",
+            )
+            link = zipfile.ZipInfo(
+                "stock-addons/setup/available_stock_by_warehouse/odoo/addons/available_stock_by_warehouse"
+            )
+            link.create_system = 3
+            link.external_attr = (stat.S_IFLNK | 0o777) << 16
+            archive.writestr(link, "../../../../available_stock_by_warehouse")
+
+        inspection = web.inspect_zip_modules(
+            self.project,
+            "stock-addons.zip",
+            archive_buffer.getvalue(),
+        )
+        self.assertEqual(
+            ["available_stock_by_warehouse", "catalog_main_menu"],
+            inspection["modules"],
+        )
+        self.assertEqual(1, inspection["ignored_symlinks"])
+
+        web.import_zip_modules_job(
+            job,
+            self.project,
+            "stock-addons.zip",
+            archive_buffer.getvalue(),
+            selected_modules="available_stock_by_warehouse",
+        )
+
+        storage = self.project_root / "odoo" / "addons-store" / "available_stock_by_warehouse"
+        managed_link = self.project_root / "odoo" / "addons" / "available_stock_by_warehouse"
+        self.assertTrue(storage.is_dir())
+        self.assertTrue(managed_link.is_symlink())
+        self.assertEqual(Path("../addons-store/available_stock_by_warehouse"), managed_link.readlink())
+        self.assertFalse((self.project_root / "odoo" / "addons-store" / "catalog_main_menu").exists())
+        self.assertFalse((self.project_root / "odoo" / "addons" / "catalog_main_menu").exists())
+        self.assertTrue(any("Liens symboliques internes ignores" in line for line in job.lines))
+        self.assertTrue(any("Modules sélectionnés pour l'import: 1" in line for line in job.lines))
+
+    def test_safe_extract_zip_rejects_path_traversal(self):
+        archive_buffer = io.BytesIO()
+        with zipfile.ZipFile(archive_buffer, "w") as archive:
+            archive.writestr("../outside.txt", "unsafe")
+
+        archive_path = self.root / "unsafe.zip"
+        archive_path.write_bytes(archive_buffer.getvalue())
+        destination = self.root / "extract"
+
+        with self.assertRaisesRegex(RuntimeError, "Chemin ZIP dangereux"):
+            web.safe_extract_zip(archive_path, destination)
+        self.assertFalse((self.root / "outside.txt").exists())
+
+    def test_rejected_zip_import_cleans_staging_directory(self):
+        archive_buffer = io.BytesIO()
+        with zipfile.ZipFile(archive_buffer, "w") as archive:
+            archive.writestr("../outside.txt", "unsafe")
+
+        job = DummyJob()
+        with self.assertRaisesRegex(RuntimeError, "Chemin ZIP dangereux"):
+            web.import_zip_modules_job(
+                job,
+                self.project,
+                "unsafe.zip",
+                archive_buffer.getvalue(),
             )
 
         staging_root = web.project_staging_imports_root(self.project)

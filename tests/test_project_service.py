@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from odoo_manager_core.config import ManagerSettings
 from odoo_manager_core.project_service import ProjectService
@@ -17,16 +18,43 @@ class FakeRunner:
         self.statuses = {}
         self.odoo_server_running = True
         self.odoo_port_ready = True
+        self.stream_codes = []
+        self.compose_container_ids = []
+        self.localtime_mounts = {}
+        self.container_networks = {}
+        self.missing_networks = set()
+        self.missing_network_outputs = {}
+        self.networks_missing_after_stream = set()
 
     def stream(self, command, cwd=None, log=None):
         self.streams.append((list(command), Path(cwd) if cwd else None))
         if log:
             log("$ " + " ".join(command))
-        return 0
+        code = self.stream_codes.pop(0) if self.stream_codes else 0
+        self.missing_networks.update(self.networks_missing_after_stream)
+        self.networks_missing_after_stream.clear()
+        return code
 
     def capture(self, command, cwd=None, timeout=10):
         self.captures.append((list(command), Path(cwd) if cwd else None, timeout))
         command = list(command)
+        if command[-3:] == ["compose", "ps", "-aq"]:
+            output = "\n".join(self.compose_container_ids)
+            return (0, output) if output else (0, "")
+        if len(command) >= 5 and command[1:3] == ["inspect", "-f"] and "/etc/localtime" in command[3]:
+            return 0, self.localtime_mounts.get(command[4], "")
+        if len(command) >= 5 and command[1:3] == ["inspect", "-f"] and "NetworkSettings.Networks" in command[3]:
+            networks = self.container_networks.get(command[4], {})
+            output = "".join(f"{name}|{network_id};" for name, network_id in networks.items())
+            return 0, output
+        if len(command) >= 3 and command[-3:-1] == ["network", "inspect"]:
+            network_id = command[-1]
+            if network_id in self.missing_networks:
+                return 1, self.missing_network_outputs.get(
+                    network_id,
+                    f"Error response from daemon: network {network_id} not found",
+                )
+            return 0, "[]"
         if len(command) >= 5 and command[1:4] == ["inspect", "-f", "{{.State.Status}}"]:
             status = self.statuses.get(command[4], "absent")
             return (0, status) if status != "absent" else (1, "")
@@ -65,7 +93,7 @@ class ProjectServiceTests(unittest.TestCase):
         self.assertTrue(has_command_tail(commands, ["compose", "up", "-d", "--no-recreate"]))
         self.assertFalse(has_command_tail(commands, ["compose", "up", "--pull", "always", "-d"]))
 
-    def test_start_project_pulls_when_containers_are_absent(self):
+    def test_start_project_creates_missing_containers_without_forced_pull(self):
         self.runner.statuses = {
             "odoo-DEMO": "absent",
             "postgresql-DEMO": "absent",
@@ -74,7 +102,117 @@ class ProjectServiceTests(unittest.TestCase):
         self.service.compose_up_project("DEMO", self.project_path, log=lambda _line: None)
 
         commands = [command for command, _cwd in self.runner.streams]
-        self.assertTrue(has_command_tail(commands, ["compose", "up", "--pull", "always", "-d"]))
+        self.assertTrue(has_command_tail(commands, ["compose", "up", "-d", "--no-recreate"]))
+        self.assertFalse(any("--pull" in command for command in commands))
+
+    @patch("odoo_manager_core.project_service.platform.system", return_value="Darwin")
+    def test_start_project_recovers_stale_macos_localtime_mount(self, _system):
+        self.runner.stream_codes = [0]
+        self.runner.compose_container_ids = ["postgres-id", "odoo-id"]
+        self.runner.localtime_mounts = {
+            "postgres-id": "/etc/localtime",
+            "odoo-id": "/etc/localtime",
+        }
+
+        self.service.compose_up_project("DEMO", self.project_path, log=lambda _line: None)
+
+        commands = [command for command, _cwd in self.runner.streams]
+        self.assertFalse(has_command_tail(commands, ["compose", "up", "-d", "--no-recreate"]))
+        self.assertTrue(has_command_tail(commands, ["compose", "up", "-d", "--force-recreate"]))
+
+    @patch("odoo_manager_core.project_service.platform.system", return_value="Linux")
+    def test_start_project_does_not_recreate_after_unrelated_compose_failure(self, _system):
+        self.runner.stream_codes = [1]
+
+        with self.assertRaisesRegex(RuntimeError, "données ont été conservées"):
+            self.service.compose_up_project("DEMO", self.project_path, log=lambda _line: None)
+
+        commands = [command for command, _cwd in self.runner.streams]
+        self.assertFalse(any("--force-recreate" in command for command in commands))
+
+    @patch("odoo_manager_core.project_service.platform.system", return_value="Linux")
+    def test_start_project_recovers_containers_attached_to_deleted_network(self, _system):
+        stale_network_id = "7b0c5d442968cc9b1ad34b9442c0f1c0c0b0d61dffbc0c0808261b30aa394c14"
+        self.runner.stream_codes = [0]
+        self.runner.compose_container_ids = ["postgres-id", "odoo-id"]
+        self.runner.container_networks = {
+            "postgres-id": {"traefik-local": stale_network_id},
+            "odoo-id": {"traefik-local": stale_network_id},
+        }
+        self.runner.missing_networks = {stale_network_id}
+
+        logs = []
+        self.service.compose_up_project("DEMO", self.project_path, log=logs.append)
+
+        commands = [command for command, _cwd in self.runner.streams]
+        self.assertFalse(has_command_tail(commands, ["compose", "up", "-d", "--no-recreate"]))
+        self.assertTrue(has_command_tail(commands, ["compose", "up", "-d", "--force-recreate"]))
+        self.assertTrue(any("Ancien réseau Docker supprimé" in line for line in logs))
+
+    @patch("odoo_manager_core.project_service.platform.system", return_value="Linux")
+    def test_deleted_network_empty_json_output_is_treated_as_missing(self, _system):
+        stale_network_id = "7b0c5d442968cc9b1ad34b9442c0f1c0c0b0d61dffbc0c0808261b30aa394c14"
+        self.runner.compose_container_ids = ["postgres-id"]
+        self.runner.container_networks = {
+            "postgres-id": {"traefik-local": stale_network_id},
+        }
+        self.runner.missing_networks = {stale_network_id}
+        self.runner.missing_network_outputs = {stale_network_id: "[]"}
+
+        self.assertEqual(
+            self.service.stale_container_networks(self.project_path),
+            [("postgres-id", "traefik-local", stale_network_id)],
+        )
+
+    @patch("odoo_manager_core.project_service.platform.system", return_value="Linux")
+    def test_start_project_recovers_network_deleted_during_compose_up(self, _system):
+        stale_network_id = "7b0c5d442968cc9b1ad34b9442c0f1c0c0b0d61dffbc0c0808261b30aa394c14"
+        self.runner.stream_codes = [1, 0]
+        self.runner.compose_container_ids = ["postgres-id", "odoo-id"]
+        self.runner.container_networks = {
+            "postgres-id": {"traefik-local": stale_network_id},
+            "odoo-id": {"traefik-local": stale_network_id},
+        }
+        self.runner.networks_missing_after_stream = {stale_network_id}
+
+        self.service.compose_up_project("DEMO", self.project_path, log=lambda _line: None)
+
+        commands = [command for command, _cwd in self.runner.streams]
+        self.assertTrue(has_command_tail(commands, ["compose", "up", "-d", "--no-recreate"]))
+        self.assertTrue(has_command_tail(commands, ["compose", "up", "-d", "--force-recreate"]))
+
+    @patch("odoo_manager_core.project_service.platform.system", return_value="Linux")
+    def test_deleted_network_recovery_is_not_skipped_when_odoo_is_still_running(self, _system):
+        stale_network_id = "7b0c5d442968cc9b1ad34b9442c0f1c0c0b0d61dffbc0c0808261b30aa394c14"
+        self.runner.stream_codes = [0]
+        self.runner.statuses = {"odoo-DEMO": "running"}
+        self.runner.compose_container_ids = ["postgres-id", "odoo-id"]
+        self.runner.container_networks = {
+            "postgres-id": {"traefik-local": stale_network_id},
+            "odoo-id": {"traefik-local": stale_network_id},
+        }
+        self.runner.missing_networks = {stale_network_id}
+
+        self.service.compose_up_project("DEMO", self.project_path, log=lambda _line: None)
+
+        commands = [command for command, _cwd in self.runner.streams]
+        self.assertTrue(has_command_tail(commands, ["compose", "up", "-d", "--force-recreate"]))
+
+    @patch("odoo_manager_core.project_service.platform.system", return_value="Linux")
+    def test_start_project_does_not_recreate_when_container_network_still_exists(self, _system):
+        network_id = "6654d1b678b2d875eba39291d607c4709910ad8731452594a54829650fb05fcc"
+        self.runner.stream_codes = [1]
+        self.runner.compose_container_ids = ["postgres-id", "odoo-id"]
+        self.runner.container_networks = {
+            "postgres-id": {"traefik-local": network_id},
+            "odoo-id": {"traefik-local": network_id},
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "données ont été conservées"):
+            self.service.compose_up_project("DEMO", self.project_path, log=lambda _line: None)
+
+        commands = [command for command, _cwd in self.runner.streams]
+        self.assertFalse(any("--force-recreate" in command for command in commands))
 
     def test_update_project_pulls_git_and_compose(self):
         (self.project_path / ".git").mkdir()
@@ -84,7 +222,7 @@ class ProjectServiceTests(unittest.TestCase):
         commands = [command for command, _cwd in self.runner.streams]
         self.assertIn(["git", "pull", "--ff-only"], commands)
         self.assertTrue(has_command_tail(commands, ["compose", "pull"]))
-        self.assertTrue(has_command_tail(commands, ["compose", "up", "-d"]))
+        self.assertTrue(has_command_tail(commands, ["compose", "up", "-d", "--no-recreate"]))
 
     def test_update_all_projects_uses_workspace_projects(self):
         other = self.root / "OTHER"

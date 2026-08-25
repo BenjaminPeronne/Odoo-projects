@@ -6,6 +6,7 @@ import queue
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -17,8 +18,16 @@ import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from odoo_manager_core import ManagerSettings, SettingsStore, ProjectService, docker_status, open_terminal, start_docker
-from odoo_manager_core.platform import command_prefix, executable_search_path, execution_path
+from odoo_manager_core import ManagerSettings, ProjectCreator, SettingsStore, ProjectService, docker_status, start_docker
+from odoo_manager_core.platform import command_prefix, executable_search_path, execution_path, platform_id
+from odoo_manager_core.project_creator import (
+    SUPPORTED_ODOO_VERSIONS,
+    validate_git_ref,
+    validate_gitlab_repository,
+    validate_new_project_name,
+    validate_odoo_version,
+)
+from odoo_manager_core.project_service import terminate_active_processes as terminate_project_processes
 from odoo_manager_core.system import docker_command, shell_command
 
 
@@ -37,6 +46,7 @@ SETTINGS_STORE = SettingsStore(DEFAULT_WORKSPACE)
 SETTINGS = SETTINGS_STORE.load()
 WORKSPACE = Path(SETTINGS.workspace).resolve()
 MANAGER = Path(os.environ.get("ODOO_MANAGER_SCRIPT", ROOT / "odoo_manager.sh")).resolve()
+LOCAL_MODULE_OVERRIDES = SETTINGS_STORE.path.with_name("local_module_overrides.json")
 DELETED_PROJECTS = WORKSPACE / ".odoo_manager_deleted"
 DELETED_MODULES = WORKSPACE / ".odoo_manager_deleted_modules"
 HOST = os.environ.get("ODOO_GUI_HOST", "127.0.0.1")
@@ -44,13 +54,22 @@ PORT = int(os.environ.get("ODOO_GUI_PORT", "8765"))
 TRAEFIK_REPO = "ssh://git@gitlab.sudokeys.com:10022/devops/docker-local-tools.git"
 
 SAFE_PROJECT_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
-SAFE_DB_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 SAFE_MODULE_RE = re.compile(r"^[A-Za-z0-9_,.-]+$")
 SAFE_IMPORT_NAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+
+MAX_DB_NAME_BYTES = 63
+MAX_JSON_BODY_BYTES = 1024 * 1024
+MAX_RETAINED_JOBS = 60
+MAX_RUNNING_JOBS = 4
+MAX_ZIP_ENTRIES = 100_000
+MAX_ZIP_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
 
 JOBS = {}
 JOBS_LOCK = threading.Lock()
 NEXT_JOB_ID = 1
+ACTIVE_PROCESSES = set()
+ACTIVE_PROCESSES_LOCK = threading.Lock()
+LOCAL_MODULE_OVERRIDES_LOCK = threading.Lock()
 
 
 def truthy(value):
@@ -140,7 +159,7 @@ def settings_snapshot():
         {
             "config_file": str(SETTINGS_STORE.path),
             "workspace_exists": WORKSPACE.exists() and WORKSPACE.is_dir(),
-            "platform": docker_status(SETTINGS).get("platform", ""),
+            "platform": platform_id(),
         }
     )
     return payload
@@ -164,6 +183,7 @@ def json_response(handler, payload, status=200):
     try:
         handler.send_response(status)
         handler.send_header("Content-Type", "application/json; charset=utf-8")
+        handler.send_header("Cache-Control", "no-store")
         handler.send_header("Content-Length", str(len(body)))
         add_cors_headers(handler)
         handler.end_headers()
@@ -293,8 +313,8 @@ def traefik_compose_probe():
     return has_compose, True, has_compose
 
 
-def traefik_status():
-    docker = docker_status(SETTINGS)
+def traefik_status(docker=None):
+    docker = docker or docker_status(SETTINGS)
     has_compose, exists, valid = traefik_compose_probe()
     running = False
     if docker["running"]:
@@ -326,11 +346,81 @@ def traefik_status():
     }
 
 
+def system_status_snapshot(docker=None):
+    docker = docker or docker_status(SETTINGS)
+    return {
+        "docker": docker,
+        "traefik": traefik_status(docker),
+        "workspace": str(WORKSPACE),
+        "workspace_exists": WORKSPACE.exists() and WORKSPACE.is_dir(),
+    }
+
+
+def project_creation_prerequisites():
+    git_probe_cwd = WORKSPACE if WORKSPACE.exists() else ROOT
+    git_code, git_output = run_capture(
+        [*command_prefix(SETTINGS), "git", "--version"],
+        cwd=git_probe_cwd,
+        timeout=8,
+    )
+    if SETTINGS.execution_mode == "wsl":
+        key_code, key_output = run_capture(
+            [
+                *command_prefix(SETTINGS),
+                "sh",
+                "-lc",
+                'find "$HOME/.ssh" -maxdepth 1 -type f -name "*.pub" -print 2>/dev/null',
+            ],
+            timeout=8,
+        )
+        ssh_keys = [Path(line.strip()).name for line in key_output.splitlines() if line.strip()] if key_code == 0 else []
+    else:
+        ssh_dir = Path.home() / ".ssh"
+        ssh_keys = sorted(path.name for path in ssh_dir.glob("*.pub") if path.is_file()) if ssh_dir.exists() else []
+
+    workspace_exists = WORKSPACE.exists() and WORKSPACE.is_dir()
+    writable_parent = WORKSPACE.parent
+    while not writable_parent.exists() and writable_parent != writable_parent.parent:
+        writable_parent = writable_parent.parent
+    workspace_ready = (
+        os.access(WORKSPACE, os.W_OK) if workspace_exists else writable_parent.is_dir() and os.access(writable_parent, os.W_OK)
+    )
+
+    return {
+        "workspace": str(WORKSPACE),
+        "workspace_exists": workspace_exists,
+        "workspace_ready": workspace_ready,
+        "git_available": git_code == 0,
+        "git_version": git_output.splitlines()[0] if git_code == 0 and git_output else "",
+        "ssh_key_present": bool(ssh_keys),
+        "ssh_keys": ssh_keys,
+        "gitlab_ssh_keys_url": "https://gitlab.sudokeys.com/-/user_settings/ssh_keys",
+        "supported_versions": list(SUPPORTED_ODOO_VERSIONS),
+    }
+
+
 def container_status(name):
     code, output = run_capture(docker_command(SETTINGS, "inspect", "-f", "{{.State.Status}}", name), timeout=5)
     if code != 0 or not output:
         return "absent"
     return output.splitlines()[0].strip()
+
+
+def container_statuses(names):
+    names = tuple(names)
+    code, output = run_capture(
+        docker_command(SETTINGS, "ps", "-a", "--format", "{{.Names}}|{{.State}}"),
+        timeout=8,
+    )
+    if code != 0:
+        return {name: container_status(name) for name in names}
+
+    detected = {}
+    for line in output.splitlines():
+        name, separator, state = line.partition("|")
+        if separator and name in names:
+            detected[name] = state.strip() or "absent"
+    return {name: detected.get(name, "absent") for name in names}
 
 
 def project_dirs():
@@ -354,8 +444,19 @@ def validate_project(project):
 
 
 def validate_db(db_name):
-    if not db_name or not SAFE_DB_RE.match(db_name):
+    if not isinstance(db_name, str) or not db_name:
         raise ValueError("Nom de base invalide.")
+    if any(ord(character) < 32 or ord(character) == 127 for character in db_name):
+        raise ValueError("Nom de base contenant un caractère de contrôle invalide.")
+    if len(db_name.encode("utf-8")) > MAX_DB_NAME_BYTES:
+        raise ValueError(f"Nom de base trop long ({MAX_DB_NAME_BYTES} octets maximum).")
+    return db_name
+
+
+def validate_new_db(db_name):
+    db_name = validate_db(db_name)
+    if db_name != db_name.strip() or db_name in {".", ".."} or "/" in db_name or "\\" in db_name:
+        raise ValueError("Nom de base incompatible avec le stockage local.")
     return db_name
 
 
@@ -370,6 +471,14 @@ def validate_modules(modules):
     if not modules or not SAFE_MODULE_RE.match(modules):
         raise ValueError("Nom de module invalide.")
     return modules
+
+
+def module_name_list(modules):
+    value = validate_modules(modules)
+    names = sorted({name.strip() for name in value.split(",") if name.strip()})
+    if not names:
+        raise ValueError("Aucun module fourni.")
+    return names
 
 
 def validate_required_text(value, label, max_len=160):
@@ -447,8 +556,8 @@ def project_odoo_version(project):
     return ""
 
 
-def list_databases_for(project):
-    if container_status(f"postgresql-{project}") != "running":
+def list_databases_for(project, check_container=True):
+    if check_container and container_status(f"postgresql-{project}") != "running":
         return []
     query = "select datname from pg_database where datistemplate = false order by datname;"
     code, output = run_capture(
@@ -511,6 +620,103 @@ def module_dirs(project):
 
 MODULE_CACHE = {}
 MODULE_CACHE_LOCK = threading.Lock()
+
+# Odoo stores Studio customizations under this virtual module name. It has no
+# addon directory and must not be reported as missing source code.
+DATABASE_ONLY_MODULES = frozenset({"studio_customization"})
+TRANSIENT_MODULE_STATES = frozenset({"to install", "to upgrade", "to remove"})
+ACTIVE_MODULE_STATES = frozenset({"installed", *TRANSIENT_MODULE_STATES})
+
+
+def load_local_module_overrides():
+    try:
+        payload = json.loads(LOCAL_MODULE_OVERRIDES.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, ValueError, TypeError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    workspaces = payload.get("workspaces")
+    if not isinstance(workspaces, dict):
+        workspaces = {}
+    return {"version": 1, "workspaces": workspaces}
+
+
+def ignored_missing_modules(project, db_name):
+    with LOCAL_MODULE_OVERRIDES_LOCK:
+        payload = load_local_module_overrides()
+    workspace = payload["workspaces"].get(str(WORKSPACE), {})
+    project_config = workspace.get(project, {}) if isinstance(workspace, dict) else {}
+    modules = project_config.get(db_name, []) if isinstance(project_config, dict) else []
+    return {name for name in modules if isinstance(name, str) and SAFE_MODULE_RE.fullmatch(name)}
+
+
+def remember_ignored_missing_modules(project, db_name, modules):
+    with LOCAL_MODULE_OVERRIDES_LOCK:
+        payload = load_local_module_overrides()
+        workspaces = payload["workspaces"]
+        workspace = workspaces.setdefault(str(WORKSPACE), {})
+        project_config = workspace.setdefault(project, {})
+        current = {
+            name
+            for name in project_config.get(db_name, [])
+            if isinstance(name, str) and SAFE_MODULE_RE.fullmatch(name)
+        }
+        current.update(modules)
+        project_config[db_name] = sorted(current)
+        LOCAL_MODULE_OVERRIDES.parent.mkdir(parents=True, exist_ok=True)
+        temporary = LOCAL_MODULE_OVERRIDES.with_suffix(".tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(LOCAL_MODULE_OVERRIDES)
+
+
+def forget_ignored_missing_modules(project, db_name, modules):
+    with LOCAL_MODULE_OVERRIDES_LOCK:
+        payload = load_local_module_overrides()
+        workspaces = payload["workspaces"]
+        workspace = workspaces.get(str(WORKSPACE), {})
+        project_config = workspace.get(project, {}) if isinstance(workspace, dict) else {}
+        current = set(project_config.get(db_name, [])) if isinstance(project_config, dict) else set()
+        current.difference_update(modules)
+        if isinstance(project_config, dict):
+            project_config[db_name] = sorted(current)
+        LOCAL_MODULE_OVERRIDES.parent.mkdir(parents=True, exist_ok=True)
+        temporary = LOCAL_MODULE_OVERRIDES.with_suffix(".tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(LOCAL_MODULE_OVERRIDES)
+
+
+def local_ignore_plan(states, available_names, requested, dependencies, already_excluded=None):
+    requested = set(requested)
+    already_excluded = set(already_excluded or ())
+    candidates = sorted(
+        name
+        for name in requested
+        if name in states
+        and states[name].get("state") in TRANSIENT_MODULE_STATES
+        and name not in DATABASE_ONLY_MODULES
+    )
+    invalid = sorted(requested - set(candidates))
+    candidate_names = set(candidates)
+    blockers = {}
+    for dependent, dependency in dependencies:
+        if dependency not in candidate_names or dependent in candidate_names or dependent in already_excluded:
+            continue
+        if dependent not in available_names:
+            continue
+        if states.get(dependent, {}).get("state") not in ACTIVE_MODULE_STATES:
+            continue
+        blockers.setdefault(dependency, set()).add(dependent)
+    return candidates, invalid, {name: sorted(values) for name, values in sorted(blockers.items())}
+
+
+def modules_missing_from_code(states, available_names, accepted_states):
+    return sorted(
+        name
+        for name, state in states.items()
+        if state.get("state") in accepted_states
+        and name not in available_names
+        and name not in DATABASE_ONLY_MODULES
+    )
 
 
 def clear_project_module_cache(project):
@@ -754,8 +960,11 @@ def db_query_lines(project, db_name, query, timeout=18):
 
 
 def filestore_files(project, db_name):
-    filestore = WORKSPACE / project / "odoo_data" / "filestore" / db_name
+    filestore_root = (WORKSPACE / project / "odoo_data" / "filestore").resolve(strict=False)
+    filestore = (filestore_root / db_name).resolve(strict=False)
     files = set()
+    if filestore == filestore_root or not path_is_relative_to(filestore, filestore_root):
+        return files, filestore
     if not filestore.exists():
         return files, filestore
     for path in filestore.glob("*/*"):
@@ -765,6 +974,38 @@ def filestore_files(project, db_name):
             except ValueError:
                 pass
     return files, filestore
+
+
+def filestore_summary(stored, actual):
+    referenced = set(stored)
+    present = referenced & actual
+    missing = referenced - actual
+    return {
+        "referenced": len(stored),
+        "referenced_unique": len(referenced),
+        "actual": len(present),
+        "physical_total": len(actual),
+        "missing": len(missing),
+        "module_update_supported": True,
+    }, sorted(missing)
+
+
+def filestore_diagnostic_issue(db_name, filestore, missing):
+    displayed = list(missing[:5])
+    remaining = len(missing) - len(displayed)
+    if remaining > 0:
+        displayed.append(f"... {remaining} autre(s) fichier(s) manquant(s) non affiché(s)")
+    return {
+        "severity": "warning",
+        "title": f"Filestore partiel pour {db_name} (non bloquant pour la MAJ des modules)",
+        "details": (
+            f"{len(missing)} fichier(s) référencé(s) par ir_attachment sont absents de {filestore}. "
+            "Il n'est pas nécessaire de télécharger le filestore pour mettre à jour le code des modules. "
+            "Utilisez le mode sans filestore : les références seront conservées et seuls les médias absents "
+            "resteront indisponibles."
+        ),
+        "items": displayed,
+    }
 
 
 def project_diagnostics(project):
@@ -806,40 +1047,66 @@ def project_diagnostics(project):
     databases = [db_name for db_name in list_databases_for(project) if db_name != "postgres"]
 
     for db_name in databases:
-        db_info = {"name": db_name, "issues": []}
+        db_info = {
+            "name": db_name,
+            "issues": [],
+            "pending_modules": [],
+            "pending_missing_modules": [],
+            "ignored_missing_modules": [],
+            "local_excluded_modules": [],
+        }
         diagnostics["databases"].append(db_info)
 
-        try:
-            pending = db_query_lines(
-                project,
-                db_name,
-                "select name || '|' || state from ir_module_module where state in ('to install','to upgrade','to remove') order by name;",
-                timeout=12,
-            )
-        except Exception as exc:
+        states = installed_modules(project, db_name)
+        if not states:
             diagnostics["issues"].append(
                 {
                     "severity": "error",
                     "title": f"Impossible de lire les modules de {db_name}",
-                    "details": str(exc),
+                    "details": "La table ir_module_module est inaccessible ou ne contient aucun module.",
                     "items": [],
                 }
             )
             continue
 
-        if pending:
-            items = [line.replace("|", " · ") for line in pending[:40]]
+        pending_missing = modules_missing_from_code(states, available_paths, TRANSIENT_MODULE_STATES)
+        db_info["pending_missing_modules"] = pending_missing
+        db_info["pending_modules"] = [
+            {
+                "name": name,
+                "state": state.get("state", ""),
+                "code_available": name in available_paths or name in DATABASE_ONLY_MODULES,
+            }
+            for name, state in sorted(states.items())
+            if state.get("state") in TRANSIENT_MODULE_STATES and name not in DATABASE_ONLY_MODULES
+        ]
+        pending_missing_names = set(pending_missing)
+        pending_available = sorted(
+            f"{name} · {state.get('state', '')}"
+            for name, state in states.items()
+            if state.get("state") in TRANSIENT_MODULE_STATES
+            and name not in pending_missing_names
+            and name not in DATABASE_ONLY_MODULES
+        )
+        if pending_available:
             issue = {
                 "severity": "warning",
                 "title": f"Opération module en attente dans {db_name}",
-                "details": "Odoo peut refuser une installation tant que ces modules restent dans un état transitoire.",
-                "items": items,
+                "details": "Le code de ces modules est disponible, mais Odoo doit encore terminer leur opération.",
+                "items": pending_available[:40],
             }
             diagnostics["issues"].append(issue)
             db_info["issues"].append(issue)
 
-        states = installed_modules(project, db_name)
-        installed_missing = sorted(name for name, state in states.items() if state.get("state") == "installed" and name not in available_paths)
+        configured_ignored = ignored_missing_modules(project, db_name)
+        installed_missing_all = modules_missing_from_code(states, available_paths, {"installed"})
+        ignored_installed_missing = sorted(set(installed_missing_all) & configured_ignored)
+        installed_missing = sorted(set(installed_missing_all) - configured_ignored)
+        db_info["ignored_missing_modules"] = ignored_installed_missing
+        local_excluded = sorted(
+            name for name in configured_ignored if states.get(name, {}).get("state") == "installed"
+        )
+        db_info["local_excluded_modules"] = local_excluded
         if installed_missing:
             issue = {
                 "severity": "error",
@@ -850,32 +1117,43 @@ def project_diagnostics(project):
             diagnostics["issues"].append(issue)
             db_info["issues"].append(issue)
 
+        if local_excluded:
+            issue = {
+                "severity": "warning",
+                "title": f"Modules exclus des mises à jour sur la copie locale {db_name}",
+                "details": (
+                    "Leur opération en attente a été annulée localement sans désinstallation ni suppression de données. "
+                    "Les prochaines mises à jour utiliseront une liste explicite et les laisseront inchangés."
+                ),
+                "items": local_excluded[:60],
+            }
+            diagnostics["issues"].append(issue)
+            db_info["issues"].append(issue)
+
+        if pending_missing:
+            issue = {
+                "severity": "error",
+                "title": f"Modules en attente absents du code dans {db_name}",
+                "details": (
+                    "Odoo ne peut pas terminer leur opération tant que leurs dossiers addon et leurs dépendances "
+                    "ne sont pas restaurés dans les chemins montés."
+                ),
+                "items": pending_missing[:60],
+            }
+            diagnostics["issues"].append(issue)
+            db_info["issues"].append(issue)
+
         stored = db_query_lines(
             project,
             db_name,
             "select store_fname from ir_attachment where store_fname is not null and store_fname <> '' order by store_fname;",
             timeout=18,
         )
-        referenced = set(stored)
         actual, filestore = filestore_files(project, db_name)
-        missing = sorted(referenced - actual)
-        db_info["filestore"] = {
-            "path": str(filestore),
-            "referenced": len(stored),
-            "referenced_unique": len(referenced),
-            "actual": len(actual),
-            "missing": len(missing),
-        }
+        filestore_stats, missing = filestore_summary(stored, actual)
+        db_info["filestore"] = {"path": str(filestore), **filestore_stats}
         if missing:
-            issue = {
-                "severity": "error",
-                "title": f"Filestore incomplet pour {db_name}",
-                "details": (
-                    f"{len(missing)} fichier(s) référencé(s) par ir_attachment sont absents de {filestore}. "
-                    "Il faut récupérer le filestore source ou recréer les pièces jointes concernées."
-                ),
-                "items": missing[:40],
-            }
+            issue = filestore_diagnostic_issue(db_name, filestore, missing)
             diagnostics["issues"].append(issue)
             db_info["issues"].append(issue)
 
@@ -892,21 +1170,27 @@ def project_diagnostics(project):
     return diagnostics
 
 
-def overview():
-    docker_ok, docker_message = docker_available()
+def overview(docker=None):
+    docker = docker or docker_status(SETTINGS)
+    docker_ok = docker["running"]
+    docker_message = docker["message"]
+    project_names = project_dirs()
+    container_names = [name for project in project_names for name in (f"odoo-{project}", f"postgresql-{project}")]
+    statuses = container_statuses(container_names) if docker_ok else {}
     projects = []
-    for project in project_dirs():
-        odoo_status = container_status(f"odoo-{project}") if docker_ok else "docker off"
-        pg_status = container_status(f"postgresql-{project}") if docker_ok else "docker off"
-        databases = list_databases_for(project) if docker_ok else []
+    for project in project_names:
+        odoo_status = statuses.get(f"odoo-{project}", "absent") if docker_ok else "docker off"
+        pg_status = statuses.get(f"postgresql-{project}", "absent") if docker_ok else "docker off"
+        databases = list_databases_for(project, check_container=False) if pg_status == "running" else []
+        url = project_url(project)
         projects.append(
             {
                 "name": project,
                 "odoo_version": project_odoo_version(project),
                 "odoo_status": odoo_status,
                 "postgres_status": pg_status,
-                "url": project_url(project),
-                "database_manager_url": urllib.parse.urljoin(project_url(project), "web/database/manager"),
+                "url": url,
+                "database_manager_url": urllib.parse.urljoin(url, "web/database/manager"),
                 "databases": databases,
                 "database_versions": {},
             }
@@ -919,13 +1203,20 @@ def overview():
     }
 
 
+def bootstrap_snapshot():
+    """Return one coherent startup snapshot backed by a single Docker probe."""
+    docker = docker_status(SETTINGS)
+    return {
+        "overview": overview(docker),
+        "system_status": system_status_snapshot(docker),
+        "settings": settings_snapshot(),
+        "jobs": jobs_snapshot(),
+    }
+
+
 class Job:
     def __init__(self, title, target, args=()):
         global NEXT_JOB_ID
-        with JOBS_LOCK:
-            self.id = NEXT_JOB_ID
-            NEXT_JOB_ID += 1
-            JOBS[self.id] = self
         self.title = title
         self.status = "running"
         self.started_at = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -934,6 +1225,20 @@ class Job:
         self.output = ""
         self.target = target
         self.args = args
+        self.thread = None
+        with JOBS_LOCK:
+            running_count = sum(job.status == "running" for job in JOBS.values())
+            if running_count >= MAX_RUNNING_JOBS:
+                raise ValueError(
+                    f"Trop d'actions sont déjà en cours ({MAX_RUNNING_JOBS} maximum). Attends la fin d'une action."
+                )
+            completed_ids = [job_id for job_id, job in JOBS.items() if job.status != "running"]
+            excess = max(0, len(JOBS) - MAX_RETAINED_JOBS + 1)
+            for job_id in completed_ids[:excess]:
+                JOBS.pop(job_id, None)
+            self.id = NEXT_JOB_ID
+            NEXT_JOB_ID += 1
+            JOBS[self.id] = self
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
 
@@ -962,7 +1267,33 @@ class Job:
             self.add(f"Erreur: {exc}")
             self.status = "error"
         finally:
-            self.finished_at = time.strftime("%Y-%m-%d %H:%M:%S")
+            with JOBS_LOCK:
+                self.finished_at = time.strftime("%Y-%m-%d %H:%M:%S")
+                self.args = ()
+                self.target = None
+                self.thread = None
+
+
+def terminate_active_subprocesses(wait_seconds=0.5):
+    with ACTIVE_PROCESSES_LOCK:
+        processes = list(ACTIVE_PROCESSES)
+    for process in processes:
+        if process.poll() is None:
+            try:
+                process.terminate()
+            except OSError:
+                pass
+    deadline = time.monotonic() + wait_seconds
+    for process in processes:
+        remaining = max(0, deadline - time.monotonic())
+        if process.poll() is None:
+            try:
+                process.wait(timeout=remaining)
+            except (subprocess.TimeoutExpired, OSError):
+                try:
+                    process.kill()
+                except OSError:
+                    pass
 
 
 def run_stream(job, args, cwd=None):
@@ -977,10 +1308,18 @@ def run_stream(job, args, cwd=None):
         text=True,
         bufsize=1,
     )
-    assert process.stdout is not None
-    for line in process.stdout:
-        job.add(line)
-    code = process.wait()
+    with ACTIVE_PROCESSES_LOCK:
+        ACTIVE_PROCESSES.add(process)
+    try:
+        assert process.stdout is not None
+        for line in process.stdout:
+            job.add(line)
+        code = process.wait()
+    finally:
+        if process.stdout is not None:
+            process.stdout.close()
+        with ACTIVE_PROCESSES_LOCK:
+            ACTIVE_PROCESSES.discard(process)
     job.add(f"Code retour: {code}")
     if code != 0:
         job.status = "error"
@@ -991,6 +1330,148 @@ def manager_job(job, *args):
     if not MANAGER.exists():
         raise RuntimeError(f"Script introuvable: {MANAGER}")
     run_stream(job, shell_command(SETTINGS, MANAGER, *args))
+
+
+def update_all_modules_manager_args(project, db_name, allow_missing_filestore=False):
+    command = "--update-all-modules-without-filestore" if allow_missing_filestore else "--update-all-modules"
+    return command, project, db_name
+
+
+def available_update_modules(project, db_name, states=None, available_names=None, excluded_names=None):
+    states = states if states is not None else installed_modules(project, db_name)
+    available_names = available_names if available_names is not None else {path.name for path in module_dirs(project)}
+    excluded_names = set(excluded_names or ())
+    return sorted(
+        name
+        for name, state in states.items()
+        if name in available_names
+        and name not in excluded_names
+        and state.get("state") in {"installed", "to upgrade"}
+    )
+
+
+def active_local_module_exceptions(project, db_name, states=None, available_names=None):
+    states = states if states is not None else installed_modules(project, db_name)
+    configured = ignored_missing_modules(project, db_name)
+    return sorted(
+        name
+        for name in configured
+        if states.get(name, {}).get("state") == "installed"
+    )
+
+
+def cancel_missing_module_operations_job(job, project, db_name, modules):
+    project = validate_project(project)
+    db_name = validate_odoo_db(db_name)
+    requested = module_name_list(modules)
+
+    if container_status(f"postgresql-{project}") != "running":
+        project_service().start_project(project, log=job.add)
+
+    states = installed_modules(project, db_name)
+    if not states:
+        raise RuntimeError(f"Impossible de lire les modules de {db_name}.")
+
+    available_names = {path.name for path in module_dirs(project)}
+    dependency_lines = db_query_lines(
+        project,
+        db_name,
+        "select m.name || '|' || d.name "
+        "from ir_module_module_dependency d "
+        "join ir_module_module m on m.id = d.module_id "
+        "where m.state in ('installed','to install','to upgrade','to remove') "
+        "order by m.name,d.name;",
+    )
+    dependencies = []
+    for line in dependency_lines:
+        dependent, separator, dependency = line.partition("|")
+        if separator:
+            dependencies.append((dependent, dependency))
+
+    candidates, invalid, blockers = local_ignore_plan(
+        states,
+        available_names,
+        requested,
+        dependencies,
+        already_excluded=ignored_missing_modules(project, db_name),
+    )
+    if invalid:
+        raise RuntimeError(
+            "Ces modules ne sont pas des opérations en attente avec code absent: " + ", ".join(invalid)
+        )
+    if blockers:
+        details = "; ".join(
+            f"{name} est requis par {', '.join(dependents)}" for name, dependents in blockers.items()
+        )
+        raise RuntimeError(
+            "Annulation refusée car des modules actifs en dépendent. " + details + ". Restaure leur code avant la mise à jour."
+        )
+
+    quoted = ",".join(f"'{name}'" for name in candidates)
+    query = (
+        "begin; "
+        "lock table ir_module_module in row exclusive mode; "
+        "update ir_module_module "
+        "set state = case when state = 'to install' then 'uninstalled' else 'installed' end "
+        f"where name in ({quoted}) and state in ('to install','to upgrade','to remove') "
+        "returning name || '|' || state; "
+        "commit;"
+    )
+    changed_lines = db_query_lines(project, db_name, query)
+    changed = {}
+    for line in changed_lines:
+        name, separator, state = line.partition("|")
+        if separator and name in candidates:
+            changed[name] = state
+    if set(changed) != set(candidates):
+        missing = sorted(set(candidates) - set(changed))
+        raise RuntimeError("La base n'a pas confirmé la modification de: " + ", ".join(missing))
+
+    retained = [name for name in candidates if changed[name] == "installed"]
+    if retained:
+        remember_ignored_missing_modules(project, db_name, retained)
+
+    job.add("Modules exclus des mises à jour uniquement sur cette copie locale:")
+    for name in candidates:
+        job.add(f"- {name}: {states[name].get('state')} -> {changed[name]}")
+    job.add("Aucune donnée métier, table ou pièce jointe n'a été supprimée.")
+    job.add("Les prochaines mises à jour utiliseront uniquement les modules non exclus dont le code est disponible.")
+
+
+def restore_module_update_exclusions_job(job, project, db_name, modules):
+    project = validate_project(project)
+    db_name = validate_odoo_db(db_name)
+    requested = module_name_list(modules)
+    configured = ignored_missing_modules(project, db_name)
+    invalid = sorted(set(requested) - configured)
+    if invalid:
+        raise RuntimeError("Ces modules ne sont pas exclus localement: " + ", ".join(invalid))
+
+    quoted = ",".join(f"'{name}'" for name in requested)
+    query = (
+        "begin; "
+        "lock table ir_module_module in row exclusive mode; "
+        "update ir_module_module set state = 'to upgrade' "
+        f"where name in ({quoted}) and state = 'installed' "
+        "returning name || '|' || state; "
+        "commit;"
+    )
+    changed_lines = db_query_lines(project, db_name, query)
+    changed = {
+        name
+        for line in changed_lines
+        for name, separator, state in [line.partition("|")]
+        if separator and state == "to upgrade" and name in requested
+    }
+    if changed != set(requested):
+        missing = sorted(set(requested) - changed)
+        raise RuntimeError("La base n'a pas confirmé la réactivation de: " + ", ".join(missing))
+
+    forget_ignored_missing_modules(project, db_name, requested)
+    job.add("Modules réactivés pour la prochaine mise à jour:")
+    for name in sorted(changed):
+        job.add(f"- {name}: installed -> to upgrade")
+    job.add("Si leur code est absent, le diagnostic les signalera de nouveau avant la mise à jour.")
 
 
 def install_traefik_job(job):
@@ -1044,7 +1525,7 @@ def post_form_no_redirect(url, data, timeout=240):
 
 def create_database_job(job, project, db_name, master_pwd, login, password, lang, country, demo):
     project = validate_project(project)
-    db_name = validate_db(db_name)
+    db_name = validate_new_db(db_name)
     master_pwd = validate_required_text(master_pwd, "Master password")
     login = validate_required_text(login, "Login administrateur")
     password = validate_required_text(password, "Mot de passe administrateur")
@@ -1397,50 +1878,31 @@ def delete_module_code_job(job, project, modules, db_name="", uninstall_first=Fa
     job.add(f"Emplacement de récupération: {DELETED_MODULES / project}")
 
 
-def create_project_terminal_job(job):
-    if not MANAGER.exists():
-        raise RuntimeError(f"Script introuvable: {MANAGER}")
-
-    launcher_dir = WORKSPACE / ".odoo_manager_terminal"
-    launcher_dir.mkdir(parents=True, exist_ok=True)
-    launcher = launcher_dir / "create_project.sh"
-    shell_workspace = execution_path(WORKSPACE, SETTINGS)
-    shell_manager = execution_path(MANAGER, SETTINGS)
-    shell_traefik = execution_path(SETTINGS.traefik_directory, SETTINGS) if SETTINGS.traefik_directory else ""
-    exports = [
-        f"export ODOO_WORKSPACE={shlex.quote(shell_workspace)}",
-        f"export ODOO_MANAGER_DOCKER={shlex.quote(SETTINGS.docker_executable)}",
-        f"export ODOO_MANAGER_BRAINKEYS={shlex.quote(SETTINGS.brainkeys_executable)}",
-    ]
-    if shell_traefik:
-        exports.append(f"export TRAEFIK_DIR={shlex.quote(shell_traefik)}")
-    launcher.write_text(
-        "\n".join(
-            [
-                "#!/usr/bin/env sh",
-                "set -eu",
-                f"cd {shlex.quote(shell_workspace)}",
-                *exports,
-                'echo "Creation d un nouveau projet Odoo local via Brainkeys"',
-                'echo "Workspace: $(pwd)"',
-                'echo ""',
-                f"sh {shlex.quote(shell_manager)} --create-project",
-                'echo ""',
-                'echo "Process termine. Appuyez sur Entree pour fermer ce terminal."',
-                "read _",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
+def create_project_job(job, name, version, source_type, repository_url, repository_branch, start_after_creation):
+    creator = ProjectCreator(SETTINGS, WORKSPACE, project_service())
+    creator.create(
+        name,
+        version,
+        source_type=source_type,
+        repository_url=repository_url,
+        repository_branch=repository_branch,
+        log=job.add,
     )
-    launcher.chmod(0o755)
 
-    result = open_terminal(SETTINGS, launcher, cwd=WORKSPACE)
-    job.add(result["message"])
-    if not result["ok"]:
-        raise RuntimeError(result["message"])
-    job.add("Terminal local ouvert. Termine le processus Brainkeys dans cette fenêtre.")
-    job.add("Quand Brainkeys est terminé, clique sur Actualiser dans le gestionnaire.")
+    if not start_after_creation:
+        job.add("Le projet est prêt. Tu peux le démarrer depuis le gestionnaire.")
+        return
+
+    docker = docker_status(SETTINGS)
+    if not docker["running"]:
+        job.add("Docker n'est pas disponible: le projet a été créé mais n'a pas été démarré.")
+        return
+
+    current_traefik = traefik_status(docker)
+    if not current_traefik["installed"]:
+        job.add("Traefik est absent. Installation automatique avant le premier démarrage...")
+        install_traefik_job(job)
+    project_service().start_project(name, log=job.add)
 
 
 def find_module_candidates(source_path):
@@ -1488,24 +1950,39 @@ def safe_import_name(filename):
 def safe_extract_zip(zip_path, destination):
     destination.mkdir(parents=True, exist_ok=True)
     base = destination.resolve()
+    skipped_links = []
     with zipfile.ZipFile(zip_path) as archive:
-        for info in archive.infolist():
+        infos = archive.infolist()
+        if len(infos) > MAX_ZIP_ENTRIES:
+            raise RuntimeError(f"ZIP trop volumineux: plus de {MAX_ZIP_ENTRIES} entrées.")
+        if sum(info.file_size for info in infos) > MAX_ZIP_UNCOMPRESSED_BYTES:
+            raise RuntimeError("ZIP trop volumineux après décompression. Limite: 2 Go.")
+        for info in infos:
             name = info.filename
             if not name or name.startswith(("/", "\\")):
+                raise RuntimeError(f"Chemin ZIP invalide: {name}")
+            if "\\" in name or "\x00" in name or re.match(r"^[A-Za-z]:", name):
                 raise RuntimeError(f"Chemin ZIP invalide: {name}")
             parts = Path(name).parts
             if any(part == ".." for part in parts):
                 raise RuntimeError(f"Chemin ZIP dangereux: {name}")
             mode = (info.external_attr >> 16) & 0o170000
-            if mode == 0o120000:
-                raise RuntimeError(f"Lien symbolique refuse dans le ZIP: {name}")
+            if mode == stat.S_IFLNK:
+                skipped_links.append(name)
+                continue
+            if mode not in {0, stat.S_IFREG, stat.S_IFDIR}:
+                raise RuntimeError(f"Type de fichier ZIP non pris en charge: {name}")
             target = (destination / name).resolve()
             if base != target and base not in target.parents:
                 raise RuntimeError(f"Extraction hors dossier refusee: {name}")
-        archive.extractall(destination)
+        for info in infos:
+            if info.filename in skipped_links:
+                continue
+            archive.extract(info, destination)
+    return skipped_links
 
 
-def import_zip_modules_job(job, project, filename, data, replace_existing=False):
+def extract_zip_module_candidates(project, filename, data):
     project = validate_project(project)
     if not filename.lower().endswith(".zip"):
         raise RuntimeError("Le fichier doit etre un ZIP.")
@@ -1513,33 +1990,99 @@ def import_zip_modules_job(job, project, filename, data, replace_existing=False)
         raise RuntimeError("Fichier ZIP vide.")
 
     imports_root = project_staging_imports_root(project)
-    import_dir = unique_child(imports_root, safe_import_name(filename))
-    zip_path = import_dir.with_suffix(".zip")
     imports_root.mkdir(parents=True, exist_ok=True)
-
-    job.add(f"Import ZIP: {filename}")
-    job.add(f"Projet cible: {project}")
-    if replace_existing:
-        job.add("Mode remplacement: actif. Les modules existants seront sauvegardés avant remplacement.")
-    zip_path.write_bytes(data)
+    while True:
+        import_dir = unique_child(imports_root, safe_import_name(filename))
+        try:
+            import_dir.mkdir()
+            break
+        except FileExistsError:
+            continue
+    zip_path = import_dir.with_suffix(".zip")
 
     try:
-        safe_extract_zip(zip_path, import_dir)
+        zip_path.write_bytes(data)
+        skipped_links = safe_extract_zip(zip_path, import_dir)
+        candidates = find_module_candidates(import_dir)
+        names = [candidate.name for candidate in candidates]
+        seen = set()
+        duplicates = set()
+        for name in names:
+            if name in seen:
+                duplicates.add(name)
+            seen.add(name)
+        duplicates = sorted(duplicates)
+        if duplicates:
+            raise RuntimeError(
+                "Modules en double dans le ZIP: " + ", ".join(duplicates)
+            )
+        return import_dir, candidates, skipped_links
+    except Exception:
+        shutil.rmtree(import_dir, ignore_errors=True)
+        raise
     finally:
         try:
             zip_path.unlink()
         except OSError:
             pass
 
-    candidates = find_module_candidates(import_dir)
-    job.add(f"Modules detectes dans le ZIP: {len(candidates)}")
-    for candidate in candidates:
-        job.add(f" - {candidate.name}")
+
+def inspect_zip_modules(project, filename, data):
+    import_dir, candidates, skipped_links = extract_zip_module_candidates(project, filename, data)
     try:
-        link_module_candidates(job, project, candidates, replace_existing=replace_existing)
+        return {
+            "modules": [candidate.name for candidate in candidates],
+            "ignored_symlinks": len(skipped_links),
+        }
     finally:
         shutil.rmtree(import_dir, ignore_errors=True)
-        job.add(f"Archive temporaire nettoyée: {import_dir}")
+
+
+def import_zip_modules_job(job, project, filename, data, replace_existing=False, selected_modules=None):
+    project = validate_project(project)
+    job.add(f"Import ZIP: {filename}")
+    job.add(f"Projet cible: {project}")
+    if replace_existing:
+        job.add("Mode remplacement: actif. Les modules existants seront sauvegardés avant remplacement.")
+
+    import_dir = None
+    try:
+        import_dir, candidates, skipped_links = extract_zip_module_candidates(project, filename, data)
+        if skipped_links:
+            job.add(
+                f"Liens symboliques internes ignores pendant l'extraction securisee: {len(skipped_links)}"
+            )
+            for name in skipped_links[:10]:
+                job.add(f" - {name}")
+            if len(skipped_links) > 10:
+                job.add(f" - ... {len(skipped_links) - 10} autre(s) lien(s)")
+
+        job.add(f"Modules detectes dans le ZIP: {len(candidates)}")
+        for candidate in candidates:
+            job.add(f" - {candidate.name}")
+
+        if selected_modules is not None:
+            requested = module_name_list(selected_modules)
+            by_name = {candidate.name: candidate for candidate in candidates}
+            unknown = [name for name in requested if name not in by_name]
+            if unknown:
+                raise RuntimeError(
+                    "Modules sélectionnés absents du ZIP: " + ", ".join(unknown)
+                )
+            candidates = [by_name[name] for name in requested]
+            job.add(f"Modules sélectionnés pour l'import: {len(candidates)}")
+            for candidate in candidates:
+                job.add(f" - {candidate.name}")
+
+        link_module_candidates(job, project, candidates, replace_existing=replace_existing)
+    except Exception:
+        if import_dir is None:
+            job.add("Archive temporaire nettoyée après erreur d'analyse.")
+        raise
+    finally:
+        if import_dir is not None:
+            shutil.rmtree(import_dir, ignore_errors=True)
+            job.add(f"Archive temporaire nettoyée: {import_dir}")
 
 
 def jobs_snapshot():
@@ -1552,7 +2095,7 @@ def jobs_snapshot():
                 "status": job.status,
                 "started_at": job.started_at,
                 "finished_at": job.finished_at,
-                "lines": job.lines,
+                "lines": list(job.lines),
                 "output": job.output,
             }
             for job in reversed(values)
@@ -1693,6 +2236,8 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         if not length:
             return {}
+        if length > MAX_JSON_BODY_BYTES:
+            raise ValueError("Requête JSON trop volumineuse.")
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
     def do_OPTIONS(self):
@@ -1709,20 +2254,16 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/":
                 return html_response(self, INDEX_HTML)
+            if path == "/api/bootstrap":
+                return json_response(self, bootstrap_snapshot())
             if path == "/api/overview":
                 return json_response(self, overview())
             if path == "/api/settings":
                 return json_response(self, {"settings": settings_snapshot()})
             if path == "/api/system/status":
-                return json_response(
-                    self,
-                    {
-                        "docker": docker_status(SETTINGS),
-                        "traefik": traefik_status(),
-                        "workspace": str(WORKSPACE),
-                        "workspace_exists": WORKSPACE.exists() and WORKSPACE.is_dir(),
-                    },
-                )
+                return json_response(self, system_status_snapshot())
+            if path == "/api/system/project-creation-prerequisites":
+                return json_response(self, project_creation_prerequisites())
             if path == "/api/jobs":
                 return json_response(self, {"jobs": jobs_snapshot()})
 
@@ -1759,11 +2300,24 @@ class Handler(BaseHTTPRequestHandler):
             return json_response(self, {"error": "Route introuvable."}, status=404)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             return None
+        except ValueError as exc:
+            return json_response(self, {"error": str(exc)}, status=400)
         except Exception as exc:
             return json_response(self, {"error": str(exc)}, status=500)
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/api/system/shutdown":
+            json_response(self, {"ok": True})
+
+            def shutdown_server():
+                terminate_active_subprocesses()
+                terminate_project_processes()
+                self.server.shutdown()
+
+            threading.Thread(target=shutdown_server, daemon=True).start()
+            return
+
         if parsed.path == "/api/settings":
             try:
                 payload = self.read_json()
@@ -1782,6 +2336,26 @@ class Handler(BaseHTTPRequestHandler):
             result = start_docker(SETTINGS)
             return json_response(self, result, status=200 if result.get("ok") else 400)
 
+        zip_inspect_match = re.match(r"^/api/projects/([^/]+)/module-zip/inspect$", parsed.path)
+        if zip_inspect_match:
+            try:
+                project = validate_project(urllib.parse.unquote(zip_inspect_match.group(1)))
+                length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0:
+                    raise ValueError("Fichier ZIP manquant.")
+                if length > 250 * 1024 * 1024:
+                    raise ValueError("ZIP trop volumineux. Limite: 250 Mo.")
+                body = self.rfile.read(length)
+                _, files = parse_multipart_form(self.headers.get("Content-Type", ""), body)
+                upload = files.get("zip")
+                if not upload:
+                    raise ValueError("Champ fichier ZIP introuvable.")
+                filename = upload.get("filename") or "modules.zip"
+                result = inspect_zip_modules(project, filename, upload["data"])
+                return json_response(self, result)
+            except Exception as exc:
+                return json_response(self, {"error": str(exc)}, status=400)
+
         zip_match = re.match(r"^/api/projects/([^/]+)/module-zip$", parsed.path)
         if zip_match:
             try:
@@ -1798,7 +2372,14 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("Champ fichier ZIP introuvable.")
                 filename = upload.get("filename") or "modules.zip"
                 replace_existing = truthy(fields.get("replace_existing"))
-                job = Job(f"Importer ZIP {filename}", import_zip_modules_job, (project, filename, upload["data"], replace_existing))
+                selected_modules = fields.get("modules")
+                if selected_modules is not None:
+                    module_name_list(selected_modules)
+                job = Job(
+                    f"Importer ZIP {filename}",
+                    import_zip_modules_job,
+                    (project, filename, upload["data"], replace_existing, selected_modules),
+                )
                 return json_response(
                     self,
                     {
@@ -1835,18 +2416,83 @@ class Handler(BaseHTTPRequestHandler):
             elif action == "update_all_modules":
                 project = validate_project(payload.get("project", ""))
                 db_name = validate_odoo_db(payload.get("db", ""))
-                job = Job(f"Mettre à jour tous les modules sur {db_name}", manager_job, ("--update-all-modules", project, db_name))
+                allow_missing_filestore = truthy(payload.get("allow_missing_filestore"))
+                title_suffix = " sans filestore complet" if allow_missing_filestore else ""
+                module_states = installed_modules(project, db_name)
+                available_names = {path.name for path in module_dirs(project)}
+                local_exceptions = active_local_module_exceptions(
+                    project,
+                    db_name,
+                    states=module_states,
+                    available_names=available_names,
+                )
+                if local_exceptions:
+                    modules = available_update_modules(
+                        project,
+                        db_name,
+                        states=module_states,
+                        available_names=available_names,
+                        excluded_names=local_exceptions,
+                    )
+                    if not modules:
+                        raise ValueError("Aucun module installé avec code disponible à mettre à jour.")
+                    job = Job(
+                        f"Mettre à jour les modules disponibles sur {db_name}{title_suffix}",
+                        module_command_job,
+                        ("--update-module", project, db_name, ",".join(modules)),
+                    )
+                else:
+                    job = Job(
+                        f"Mettre à jour tous les modules sur {db_name}{title_suffix}",
+                        manager_job,
+                        update_all_modules_manager_args(project, db_name, allow_missing_filestore),
+                    )
             elif action == "update_local_modules":
                 project = validate_project(payload.get("project", ""))
                 db_name = validate_odoo_db(payload.get("db", ""))
                 job = Job(f"Mettre à jour les addons projet sur {db_name}", manager_job, ("--update-local-modules", project, db_name))
-            elif action == "create_project_terminal":
-                job = Job("Ouvrir Terminal pour créer un projet", create_project_terminal_job)
+            elif action == "ignore_missing_modules_locally":
+                project = validate_project(payload.get("project", ""))
+                db_name = validate_odoo_db(payload.get("db", ""))
+                modules = validate_modules(payload.get("modules", ""))
+                job = Job(
+                    f"Exclure localement {modules} sur {db_name}",
+                    cancel_missing_module_operations_job,
+                    (project, db_name, modules),
+                )
+            elif action == "restore_module_update_exclusions":
+                project = validate_project(payload.get("project", ""))
+                db_name = validate_odoo_db(payload.get("db", ""))
+                modules = validate_modules(payload.get("modules", ""))
+                job = Job(
+                    f"Réactiver les mises à jour de {modules} sur {db_name}",
+                    restore_module_update_exclusions_job,
+                    (project, db_name, modules),
+                )
+            elif action == "create_project":
+                name = validate_new_project_name(payload.get("name", ""))
+                version = validate_odoo_version(payload.get("version", ""))
+                source_type = str(payload.get("source_type", "standard") or "standard").strip()
+                repository_url = str(payload.get("repository_url", "") or "").strip()
+                repository_branch = str(payload.get("repository_branch", "") or "").strip()
+                if source_type not in {"standard", "gitlab"}:
+                    raise ValueError("Type de source invalide.")
+                if source_type == "gitlab":
+                    repository_url = validate_gitlab_repository(repository_url)
+                    repository_branch = validate_git_ref(repository_branch)
+                if (WORKSPACE / name).exists() or (WORKSPACE / name).is_symlink():
+                    raise ValueError(f"Un projet nommé {name} existe déjà dans le workspace.")
+                start_after_creation = truthy(payload.get("start_after_creation", True))
+                job = Job(
+                    f"Créer le projet {name or 'Odoo'}",
+                    create_project_job,
+                    (name, version, source_type, repository_url, repository_branch, start_after_creation),
+                )
             elif action == "install_traefik":
                 job = Job("Installer Traefik", install_traefik_job)
             elif action == "create_database":
                 project = validate_project(payload.get("project", ""))
-                db_name = validate_db(payload.get("db", ""))
+                db_name = validate_new_db(payload.get("db", ""))
                 master_pwd = payload.get("master_pwd", "")
                 login = payload.get("login", "")
                 password = payload.get("password", "")
@@ -1926,12 +2572,18 @@ class Handler(BaseHTTPRequestHandler):
             return json_response(self, {"error": str(exc)}, status=400)
 
 
+class ManagerHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    request_queue_size = 64
+    allow_reuse_address = True
+
+
 def main():
     if not MANAGER.exists():
         raise SystemExit(f"Script introuvable: {MANAGER}")
     url = f"http://{HOST}:{PORT}/"
     try:
-        server = ThreadingHTTPServer((HOST, PORT), Handler)
+        server = ManagerHTTPServer((HOST, PORT), Handler)
     except OSError as exc:
         if exc.errno == 48:
             print(f"Interface deja lancee ou port occupe: {url}")
@@ -1945,6 +2597,8 @@ def main():
     except KeyboardInterrupt:
         print("")
     finally:
+        terminate_active_subprocesses()
+        terminate_project_processes()
         server.server_close()
 
 

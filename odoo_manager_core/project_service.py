@@ -2,6 +2,7 @@ import os
 import platform
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -10,6 +11,32 @@ from .platform import executable_search_path
 
 
 COMPOSE_FILENAMES = ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml")
+ACTIVE_PROCESSES = set()
+ACTIVE_PROCESSES_LOCK = threading.Lock()
+
+
+def terminate_active_processes(wait_seconds=0.5):
+    with ACTIVE_PROCESSES_LOCK:
+        processes = list(ACTIVE_PROCESSES)
+
+    for process in processes:
+        if process.poll() is None:
+            try:
+                process.terminate()
+            except OSError:
+                pass
+
+    deadline = time.monotonic() + wait_seconds
+    for process in processes:
+        remaining = max(0, deadline - time.monotonic())
+        if process.poll() is None:
+            try:
+                process.wait(timeout=remaining)
+            except (subprocess.TimeoutExpired, OSError):
+                try:
+                    process.kill()
+                except OSError:
+                    pass
 
 
 class ProjectService:
@@ -22,6 +49,8 @@ class ProjectService:
     def env(self):
         env = os.environ.copy()
         env["PATH"] = executable_search_path()
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=10")
         return env
 
     def log(self, callback, message):
@@ -43,10 +72,18 @@ class ProjectService:
             text=True,
             bufsize=1,
         )
-        assert process.stdout is not None
-        for line in process.stdout:
-            self.log(log, line)
-        code = process.wait()
+        with ACTIVE_PROCESSES_LOCK:
+            ACTIVE_PROCESSES.add(process)
+        try:
+            assert process.stdout is not None
+            for line in process.stdout:
+                self.log(log, line)
+            code = process.wait()
+        finally:
+            if process.stdout is not None:
+                process.stdout.close()
+            with ACTIVE_PROCESSES_LOCK:
+                ACTIVE_PROCESSES.discard(process)
         self.log(log, f"Code retour: {code}")
         return code
 
@@ -63,7 +100,11 @@ class ProjectService:
                 text=True,
                 timeout=timeout,
             )
-            return result.returncode, (result.stdout or result.stderr or "").strip()
+            stdout = (result.stdout or "").strip()
+            stderr = (result.stderr or "").strip()
+            if result.returncode == 0:
+                return result.returncode, stdout or stderr
+            return result.returncode, "\n".join(part for part in (stdout, stderr) if part)
         except FileNotFoundError as exc:
             return 127, str(exc)
         except subprocess.TimeoutExpired as exc:
@@ -156,23 +197,119 @@ class ProjectService:
         if code != 0:
             raise RuntimeError("Impossible de démarrer Traefik.")
 
-    def compose_up_project(self, project, path, log=None):
-        existing = (
-            self.container_status(f"odoo-{project}") != "absent"
-            or self.container_status(f"postgresql-{project}") != "absent"
-        )
-        if existing:
-            self.log(log, "Conteneurs existants détectés, démarrage sans recréation...")
-            code = self.stream(self.docker("compose", "up", "-d", "--no-recreate"), cwd=path, log=log)
-        else:
-            code = self.stream(self.docker("compose", "up", "--pull", "always", "-d"), cwd=path, log=log)
+    def compose_container_ids(self, path):
+        code, output = self.capture(self.docker("compose", "ps", "-aq"), cwd=path, timeout=10)
+        if code != 0 or not output:
+            return []
+        return [line.strip() for line in output.splitlines() if line.strip()]
 
-        if code != 0 and self.is_running(f"odoo-{project}"):
-            self.log(log, f"Docker Compose a retourné une erreur, mais odoo-{project} est déjà running.")
-            self.log(log, "Le gestionnaire continue avec le conteneur existant.")
-            return
+    def stale_macos_localtime_mounts(self, path):
+        if platform.system() != "Darwin":
+            return []
+
+        mount_format = (
+            '{{range .Mounts}}{{if eq .Destination "/etc/localtime"}}'
+            "{{.Source}}{{end}}{{end}}"
+        )
+        stale = []
+        for container_id in self.compose_container_ids(path):
+            code, source = self.capture(
+                self.docker("inspect", "-f", mount_format, container_id),
+                timeout=5,
+            )
+            if code == 0 and source.strip():
+                stale.append((container_id, source.strip()))
+        return stale
+
+    def stale_container_networks(self, path):
+        network_format = (
+            "{{range $name, $network := .NetworkSettings.Networks}}"
+            "{{$name}}|{{$network.NetworkID}};{{end}}"
+        )
+        stale = []
+        checked = set()
+        for container_id in self.compose_container_ids(path):
+            code, output = self.capture(
+                self.docker("inspect", "-f", network_format, container_id),
+                timeout=5,
+            )
+            if code != 0:
+                continue
+            for item in output.split(";"):
+                if "|" not in item:
+                    continue
+                network_name, network_id = (part.strip() for part in item.split("|", 1))
+                if not network_id or network_id in checked:
+                    continue
+                checked.add(network_id)
+                inspect_code, inspect_output = self.capture(
+                    self.docker("network", "inspect", network_id),
+                    timeout=5,
+                )
+                error = inspect_output.lower()
+                missing_network = (
+                    "not found" in error
+                    or "no such network" in error
+                    or inspect_output.strip() in {"[]", "null"}
+                )
+                if inspect_code != 0 and missing_network:
+                    stale.append((container_id, network_name, network_id))
+        return stale
+
+    def recreate_stale_containers(self, path, stale_mounts, stale_networks, log=None):
+        if stale_mounts:
+            self.log(log, "Ancien montage macOS /etc/localtime détecté dans les conteneurs.")
+            for container_id, source in stale_mounts:
+                self.log(log, f" - {container_id[:12]}: {source} -> /etc/localtime")
+        if stale_networks:
+            self.log(log, "Ancien réseau Docker supprimé détecté dans les conteneurs.")
+            for container_id, network_name, network_id in stale_networks:
+                self.log(
+                    log,
+                    f" - {container_id[:12]}: {network_name} ({network_id[:12]})",
+                )
+        self.log(log, "Recréation contrôlée des conteneurs; les volumes et dossiers de données sont conservés.")
+        return self.stream(
+            self.docker("compose", "up", "-d", "--force-recreate"),
+            cwd=path,
+            log=log,
+        )
+
+    def compose_up_project(self, project, path, log=None):
+        stale_mounts = self.stale_macos_localtime_mounts(path)
+        stale_networks = self.stale_container_networks(path)
+        if stale_mounts or stale_networks:
+            self.log(log, "Anomalie Docker détectée avant démarrage.")
+            code = self.recreate_stale_containers(path, stale_mounts, stale_networks, log=log)
+        else:
+            self.log(log, "Démarrage des conteneurs existants sans recréation...")
+            code = self.stream(self.docker("compose", "up", "-d", "--no-recreate"), cwd=path, log=log)
+
         if code != 0:
-            raise RuntimeError("Docker Compose n'a pas démarré correctement.")
+            stale_mounts = self.stale_macos_localtime_mounts(path)
+            stale_networks = self.stale_container_networks(path)
+            if stale_mounts or stale_networks:
+                self.log(log, "")
+                self.log(log, "Anomalie Docker apparue pendant le démarrage.")
+                code = self.recreate_stale_containers(path, stale_mounts, stale_networks, log=log)
+            elif self.is_running(f"odoo-{project}"):
+                self.log(log, f"Docker Compose a retourné une erreur, mais odoo-{project} est déjà running.")
+                self.log(log, "Le gestionnaire continue avec le conteneur existant.")
+                return
+        if code != 0:
+            status_code, status = self.capture(
+                self.docker("compose", "ps", "-a"),
+                cwd=path,
+                timeout=10,
+            )
+            if status_code == 0 and status:
+                self.log(log, "")
+                self.log(log, "État des conteneurs du projet:")
+                self.log(log, status)
+            raise RuntimeError(
+                "Docker Compose n'a pas démarré correctement. "
+                "Les conteneurs existants et les données ont été conservées."
+            )
 
     def wait_for_container(self, container, max_wait=60, log=None, sleep=time.sleep):
         waited = 0
@@ -278,9 +415,7 @@ class ProjectService:
             raise RuntimeError(f"Docker pull impossible pour {project}.")
 
         self.log(log, "Redémarrage compose...")
-        code = self.stream(self.docker("compose", "up", "-d"), cwd=path, log=log)
-        if code != 0:
-            raise RuntimeError(f"Docker Compose n'a pas redémarré {project}.")
+        self.compose_up_project(project, path, log=log)
         self.log(log, f"Mise à jour terminée: {project}")
 
     def update_all_projects(self, log=None):

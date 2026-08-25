@@ -33,6 +33,7 @@ class SettingsTests(unittest.TestCase):
                     "execution_mode": "wsl",
                     "wsl_distribution": "Ubuntu",
                     "docker_poll_interval": 1,
+                    "onboarding_completed": True,
                 },
                 create_workspace=True,
             )
@@ -40,6 +41,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(settings, loaded)
             self.assertEqual(loaded.execution_mode, "wsl")
             self.assertEqual(loaded.docker_poll_interval, 3)
+            self.assertTrue(loaded.onboarding_completed)
 
     def test_invalid_mode_uses_native(self):
         settings = ManagerSettings.from_dict({"execution_mode": "dos"}, "/tmp/workspace")

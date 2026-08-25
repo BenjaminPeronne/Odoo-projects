@@ -1,9 +1,40 @@
-use std::sync::Mutex;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream};
 use std::process::Command;
+use std::sync::Mutex;
+use std::time::Duration;
 use tauri::Manager;
 use tauri_plugin_shell::{process::CommandChild, ShellExt};
 
 struct BackendProcess(Mutex<Option<CommandChild>>);
+
+fn request_backend_shutdown() {
+    let address: SocketAddr = match "127.0.0.1:8765".parse() {
+        Ok(address) => address,
+        Err(_) => return,
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(250)) else {
+        return;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+    let request = b"POST /api/system/shutdown HTTP/1.1\r\nHost: 127.0.0.1:8765\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    if stream.write_all(request).is_ok() {
+        let mut response = [0_u8; 64];
+        let _ = stream.read(&mut response);
+        std::thread::sleep(Duration::from_millis(1200));
+    }
+}
+
+fn stop_backend(app: &tauri::AppHandle) {
+    request_backend_shutdown();
+    let state = app.state::<BackendProcess>();
+    if let Ok(mut process) = state.0.lock() {
+        if let Some(child) = process.take() {
+            let _ = child.kill();
+        }
+    };
+}
 
 #[tauri::command]
 fn open_external_url(url: String) -> Result<(), String> {
@@ -74,25 +105,28 @@ fn run_command(command: &str, args: &[&str]) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![open_external_url, open_docker_desktop])
         .setup(|app| {
             let command = app.shell().sidecar("odoo-manager-backend")?;
-            let (_events, child) = command.spawn()?;
+            let (mut events, child) = command.spawn()?;
+            tauri::async_runtime::spawn(async move {
+                while events.recv().await.is_some() {}
+            });
             app.manage(BackendProcess(Mutex::new(Some(child))));
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::Destroyed = event {
-                let state = window.state::<BackendProcess>();
-                if let Ok(mut process) = state.0.lock() {
-                    if let Some(child) = process.take() {
-                        let _ = child.kill();
-                    }
-                };
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                window.app_handle().exit(0);
             }
         })
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("impossible de lancer Odoo Manager");
+    app.run(|app_handle, event| {
+        if matches!(event, tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }) {
+            stop_backend(app_handle);
+        }
+    });
 }

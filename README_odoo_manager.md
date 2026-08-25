@@ -38,10 +38,10 @@ Il lance maintenant l'interface Next active. La vue Bootstrap historique n'est
 plus exposee par le backend ; son HTML est archive dans
 `archive/bootstrap/odoo_manager_bootstrap_legacy.html`.
 
-La creation d'un nouveau projet ouvre le terminal local de la machine puis
-lance `brainkeys riplika`. Ce choix conserve l'interaction officielle de
-Brainkeys sans reproduire son terminal dans l'interface. Quand la creation est
-terminee, revenez dans le gestionnaire et cliquez sur `Actualiser`.
+La creation d'un nouveau projet se fait directement dans l'application. Le
+formulaire permet de choisir la version Odoo et un environnement standard ou
+un depot d'addons client GitLab. Aucun terminal et aucun mot de passe GitLab ne
+sont demandes : Git utilise la cle SSH deja configuree sur la machine.
 
 Le bandeau Docker indique si le moteur est arrete ou absent. Sur macOS et
 Windows, le bouton `Ouvrir Docker` tente de lancer Docker Desktop. Le bouton
@@ -49,8 +49,8 @@ Windows, le bouton `Ouvrir Docker` tente de lancer Docker Desktop. Le bouton
 
 - le workspace analyse pour lister et creer les projets ;
 - le mode natif ou WSL 2 ;
-- les commandes Docker et Brainkeys ;
-- le dossier Traefik et le terminal ;
+- la commande Docker ;
+- le dossier Traefik ;
 - la frequence de verification de Docker.
 
 Pour ajouter des modules, selectionnez un projet puis utilisez `Ajouter des
@@ -109,11 +109,12 @@ Le menu permet de :
 - mettre a jour tous les modules Odoo d'une base ;
 - mettre a jour le code / les images d'un projet ;
 - mettre a jour le code / les images de tous les projets ;
-- creer un nouveau projet via `brainkeys riplika` ;
+- creer un nouveau projet via `brainkeys riplika` (CLI historique uniquement) ;
 - afficher les logs Odoo ;
 - ouvrir un shell dans le conteneur Odoo.
 
-Lors de la creation d'un nouveau projet, si Brainkeys demande :
+La commande CLI historique `--create-project` utilise encore Brainkeys pour
+les parcours Rika non integres. Si Brainkeys demande :
 
 ```text
 Souhaitez-vous executer les conteneurs du projet ?

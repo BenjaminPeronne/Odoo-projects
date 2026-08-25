@@ -36,6 +36,7 @@ class ManagerSettings:
     traefik_directory: str = ""
     terminal: str = "auto"
     docker_poll_interval: int = 10
+    onboarding_completed: bool = False
 
     @classmethod
     def from_dict(cls, payload, default_workspace):
@@ -60,6 +61,7 @@ class ManagerSettings:
             traefik_directory=str(payload.get("traefik_directory", "")).strip(),
             terminal=str(payload.get("terminal", "auto")).strip() or "auto",
             docker_poll_interval=poll_interval,
+            onboarding_completed=bool(payload.get("onboarding_completed", False)),
         )
 
     def to_dict(self):

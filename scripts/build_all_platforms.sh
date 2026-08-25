@@ -27,7 +27,7 @@ Usage:
   sh scripts/build_all_platforms.sh [options]
 
 Options:
-  --tag NOM              Utilise un tag précis, par exemple app-v0.1.1.
+  --tag NOM              Force un tag précis, par exemple app-v0.1.2.
   --local                Compile aussi la plateforme courante en local.
   --skip-checks          Ne lance pas py_compile, unittest et npm run build.
   --no-wait              Ne surveille pas la fin du workflow GitHub Actions.
@@ -44,6 +44,7 @@ Pré-requis:
 Sorties:
   - GitHub Actions produit macOS, Linux x64 et Windows x64.
   - Si gh est disponible, les artefacts sont téléchargés dans dist/all-platforms/<tag>/.
+  - Sans --tag, le prochain tag app-v<version>-buildN est calculé automatiquement.
 EOF
 }
 
@@ -110,6 +111,29 @@ repo_slug() {
   esac
 }
 
+next_build_tag() {
+  current_version=$1
+  prefix="app-v${current_version}-build"
+  max_build=0
+  local_tags=$(git tag --list "${prefix}*")
+  remote_tags=$(git ls-remote --tags origin "refs/tags/${prefix}*" 2>/dev/null \
+    | awk '{print $2}' \
+    | sed 's#refs/tags/##; s/\^{}$//' \
+    || true)
+
+  for existing_tag in $local_tags $remote_tags; do
+    build_number=${existing_tag#"$prefix"}
+    case "$build_number" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    if [ "$build_number" -gt "$max_build" ]; then
+      max_build=$build_number
+    fi
+  done
+
+  printf '%s%s\n' "$prefix" "$((max_build + 1))"
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --tag)
@@ -160,7 +184,8 @@ require_cmd npm
 version=$(package_version)
 
 if [ -z "$TAG" ]; then
-  TAG="app-v${version}"
+  TAG=$(next_build_tag "$version")
+  printf 'Prochain numéro de build détecté: %s\n' "$TAG"
 fi
 
 case "$TAG" in
@@ -181,10 +206,10 @@ if ! git diff --quiet -- . ':!dist' || ! git diff --cached --quiet -- . ':!dist'
   printf '\nGitHub Actions compile uniquement l état Git poussé sur GitHub.\n' >&2
   printf 'Commite et pousse d abord les changements, puis relance ce script.\n\n' >&2
   printf 'Commandes typiques:\n' >&2
-  printf '  git add .github/workflows/build-desktop.yml README_next_odoo_manager.md odoo-manager-next/src-tauri/tauri.conf.json scripts/build_all_platforms.sh scripts/build_desktop.py scripts/build_local_desktop.sh scripts/build_tauri_sidecar.py scripts/macos_allow_private_build.sh\n' >&2
-  printf '  git commit -m "Fix macOS desktop build signing"\n' >&2
+  printf '  git add -A\n' >&2
+  printf '  git commit -m "Prepare Odoo Manager build"\n' >&2
   printf '  git push origin main\n' >&2
-  printf '  sh scripts/build_all_platforms.sh --tag %s\n' "${TAG:-app-v0.1.1}" >&2
+  printf '  sh scripts/build_all_platforms.sh\n' >&2
   exit 1
 fi
 

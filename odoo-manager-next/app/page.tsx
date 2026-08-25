@@ -12,6 +12,8 @@ import {
   ExternalLink,
   FileArchive,
   FolderPlus,
+  GitBranch,
+  KeyRound,
   Link2,
   ListRestart,
   Loader2,
@@ -23,7 +25,6 @@ import {
   Search,
   Settings,
   Square,
-  SquareTerminal,
   Trash2,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -93,19 +94,37 @@ type SystemStatus = {
   workspace_exists: boolean;
 };
 
+type BootstrapSnapshot = {
+  overview: Overview;
+  system_status: SystemStatus;
+  settings: ManagerSettings;
+  jobs: Job[];
+};
+
 type ManagerSettings = {
   version: number;
   workspace: string;
   execution_mode: "native" | "wsl" | string;
   wsl_distribution: string;
   docker_executable: string;
-  brainkeys_executable: string;
   traefik_directory: string;
-  terminal: string;
   docker_poll_interval: number;
+  onboarding_completed: boolean;
   config_file?: string;
   platform?: string;
   workspace_exists?: boolean;
+};
+
+type ProjectCreationPrerequisites = {
+  workspace: string;
+  workspace_exists: boolean;
+  workspace_ready: boolean;
+  git_available: boolean;
+  git_version: string;
+  ssh_key_present: boolean;
+  ssh_keys: string[];
+  gitlab_ssh_keys_url: string;
+  supported_versions: string[];
 };
 
 type Job = {
@@ -146,6 +165,27 @@ type DiagnosticIssue = {
   items?: string[];
 };
 
+type FilestoreStatus = {
+  path: string;
+  referenced: number;
+  referenced_unique: number;
+  actual: number;
+  physical_total?: number;
+  missing: number;
+  module_update_supported?: boolean;
+};
+
+type PendingModuleOperation = {
+  name: string;
+  state: string;
+  code_available: boolean;
+};
+
+type ZipInspection = {
+  modules: string[];
+  ignored_symlinks: number;
+};
+
 type ProjectDiagnostics = {
   project: string;
   docker_ok: boolean;
@@ -154,18 +194,20 @@ type ProjectDiagnostics = {
   issues: DiagnosticIssue[];
   databases?: Array<{
     name: string;
-    filestore?: {
-      path: string;
-      referenced: number;
-      referenced_unique: number;
-      actual: number;
-      missing: number;
-    };
+    filestore?: FilestoreStatus;
+    pending_modules?: PendingModuleOperation[];
+    pending_missing_modules?: string[];
+    ignored_missing_modules?: string[];
+    local_excluded_modules?: string[];
   }>;
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_ODOO_MANAGER_API?.replace(/\/$/, "") || "";
 const TAURI_API_RETRY_DELAYS_MS = [0, 250, 750, 1500, 2500];
+const BOOTSTRAP_RETRY_DELAYS_MS = [0, 500, 1000, 2000];
+const DOCKER_CONFIRM_DELAY_MS = 700;
+const API_TIMEOUT_MS = 20_000;
+const UPLOAD_TIMEOUT_MS = 120_000;
 
 class ApiUnavailableError extends Error {
   constructor(message = "Service local Odoo Manager indisponible. L'application n'arrive pas à joindre l'API locale sur 127.0.0.1:8765.") {
@@ -180,17 +222,29 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   try {
     for (const [index, delay] of retryDelays.entries()) {
       if (delay) await new Promise((resolve) => window.setTimeout(resolve, delay));
+      const controller = new AbortController();
+      let timedOut = false;
+      const timeout = window.setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, path.includes("/module-zip") ? UPLOAD_TIMEOUT_MS : API_TIMEOUT_MS);
       try {
         response = await fetch(`${API_BASE}${path}`, {
           ...init,
+          cache: "no-store",
           headers: init?.body instanceof FormData ? init.headers : { "Content-Type": "application/json", ...init?.headers },
+          signal: controller.signal,
         });
         break;
       } catch (error) {
+        if (timedOut) throw new ApiUnavailableError("Le service local ne répond pas dans le délai attendu.");
         if (index === retryDelays.length - 1) throw error;
+      } finally {
+        window.clearTimeout(timeout);
       }
     }
-  } catch {
+  } catch (error) {
+    if (error instanceof ApiUnavailableError) throw error;
     throw new ApiUnavailableError();
   }
   if (!response) throw new ApiUnavailableError();
@@ -200,6 +254,10 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(payload.error || response.statusText);
   }
   return payload as T;
+}
+
+function delay(milliseconds: number) {
+  return new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
 function isTauriRuntime() {
@@ -347,10 +405,9 @@ function fallbackManagerSettings(
     execution_mode: current?.execution_mode || systemStatus?.docker.execution_mode || "native",
     wsl_distribution: current?.wsl_distribution || "",
     docker_executable: current?.docker_executable || "docker",
-    brainkeys_executable: current?.brainkeys_executable || "brainkeys",
     traefik_directory: current?.traefik_directory || systemStatus?.traefik?.path || "",
-    terminal: current?.terminal || "auto",
     docker_poll_interval: current?.docker_poll_interval || 10,
+    onboarding_completed: current?.onboarding_completed ?? false,
     config_file: current?.config_file,
     platform: current?.platform || systemStatus?.docker.platform || "",
     workspace_exists: current?.workspace_exists ?? systemStatus?.workspace_exists,
@@ -363,6 +420,10 @@ export default function Home() {
   const [settings, setSettings] = useState<ManagerSettings | null>(null);
   const [settingsDraft, setSettingsDraft] = useState<ManagerSettings | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [onboardingOpen, setOnboardingOpen] = useState(false);
+  const [createProjectOpen, setCreateProjectOpen] = useState(false);
+  const [creationPrerequisites, setCreationPrerequisites] = useState<ProjectCreationPrerequisites | null>(null);
+  const [loadingCreationPrerequisites, setLoadingCreationPrerequisites] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
   const [projectsFilter, setProjectsFilter] = useState("");
   const [selectedProjectName, setSelectedProjectName] = useState("");
@@ -376,6 +437,8 @@ export default function Home() {
   const [externalLogView, setExternalLogView] = useState<{ title: string; content: string } | null>(null);
   const [loading, setLoading] = useState(false);
   const [initializing, setInitializing] = useState(true);
+  const [initializationMessage, setInitializationMessage] = useState("Démarrage du service local…");
+  const [initializationError, setInitializationError] = useState("");
   const [error, setError] = useState("");
   const [apiUnavailable, setApiUnavailable] = useState(false);
   const [desktopRuntime, setDesktopRuntime] = useState(false);
@@ -384,19 +447,40 @@ export default function Home() {
   const [createDbOpen, setCreateDbOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [updateAllDialogOpen, setUpdateAllDialogOpen] = useState(false);
+  const [updateFilestoreStatus, setUpdateFilestoreStatus] = useState<FilestoreStatus | null>(null);
+  const [updatePendingModules, setUpdatePendingModules] = useState<PendingModuleOperation[]>([]);
+  const [updateLocalExcludedModules, setUpdateLocalExcludedModules] = useState<string[]>([]);
+  const [missingModulesToIgnore, setMissingModulesToIgnore] = useState<Set<string>>(new Set());
+  const [allowMissingFilestore, setAllowMissingFilestore] = useState(false);
+  const [checkingUpdatePrerequisites, setCheckingUpdatePrerequisites] = useState(false);
   const [uninstallDialogOpen, setUninstallDialogOpen] = useState(false);
   const [deleteCodeDialogOpen, setDeleteCodeDialogOpen] = useState(false);
   const [replaceZipModules, setReplaceZipModules] = useState(true);
+  const [zipModuleCandidates, setZipModuleCandidates] = useState<string[]>([]);
+  const [selectedZipModules, setSelectedZipModules] = useState<Set<string>>(new Set());
+  const [inspectingZip, setInspectingZip] = useState(false);
   const [deleteCodeUninstallFirst, setDeleteCodeUninstallFirst] = useState(true);
   const [sourcePath, setSourcePath] = useState("");
   const [moduleNames, setModuleNames] = useState("");
   const [deleteConfirm, setDeleteConfirm] = useState("");
   const [pendingUninstallModules, setPendingUninstallModules] = useState<string[]>([]);
   const [pendingDeleteCodeModules, setPendingDeleteCodeModules] = useState<string[]>([]);
+  const [activeTab, setActiveTab] = useState("bases");
+  const [pendingCreatedProjectName, setPendingCreatedProjectName] = useState("");
   const zipInputRef = useRef<HTMLInputElement>(null);
   const toastId = useRef(1);
   const lastDockerState = useRef<string | null>(null);
+  const pendingDockerState = useRef<{ state: string; count: number } | null>(null);
+  const consecutiveApiFailures = useRef(0);
   const initializingRef = useRef(true);
+  const bootstrapGeneration = useRef(0);
+  const overviewRefreshInFlight = useRef(false);
+  const systemRefreshInFlight = useRef(false);
+  const jobsRefreshInFlight = useRef(false);
+  const modulesRequestGeneration = useRef(0);
+  const zipInspectionGeneration = useRef(0);
+  const scheduledTimeouts = useRef<Set<number>>(new Set());
+  const onboardingPrompted = useRef(false);
 
   const selectedProject = useMemo(
     () => overview?.projects.find((project) => project.name === selectedProjectName) || overview?.projects[0],
@@ -428,17 +512,123 @@ export default function Home() {
   const someFilteredModulesSelected = selectedFilteredModuleCount > 0 && !allFilteredModulesSelected;
   const fallbackDockerGuide = useMemo(() => offlineDockerGuide(), []);
 
+  const schedule = useCallback((callback: () => void | Promise<void>, delay: number) => {
+    const timeout = window.setTimeout(() => {
+      scheduledTimeouts.current.delete(timeout);
+      void callback();
+    }, delay);
+    scheduledTimeouts.current.add(timeout);
+  }, []);
+
   const pushToast = useCallback((kind: Toast["kind"], message: string) => {
     const id = toastId.current++;
     setToasts((current) => [...current, { id, kind, message }]);
-    window.setTimeout(() => setToasts((current) => current.filter((toast) => toast.id !== id)), 4200);
+    schedule(() => setToasts((current) => current.filter((toast) => toast.id !== id)), 4200);
+  }, [schedule]);
+
+  const markApiSuccess = useCallback(() => {
+    consecutiveApiFailures.current = 0;
+    setApiUnavailable(false);
   }, []);
 
+  const markApiFailure = useCallback((error: unknown) => {
+    if (!(error instanceof ApiUnavailableError)) return false;
+    consecutiveApiFailures.current += 1;
+    if (consecutiveApiFailures.current >= 2) setApiUnavailable(true);
+    return consecutiveApiFailures.current === 2;
+  }, []);
+
+  const applyBootstrapSnapshot = useCallback((payload: BootstrapSnapshot) => {
+    setOverview(payload.overview);
+    setSystemStatus(payload.system_status);
+    setSettings(payload.settings);
+    setSettingsDraft(payload.settings);
+    setJobs(payload.jobs);
+    setSelectedProjectName((currentName) => {
+      const project = payload.overview.projects.find((item) => item.name === currentName) || payload.overview.projects[0];
+      setSelectedDb((currentDb) => project?.databases?.includes(currentDb) ? currentDb : firstOdooDatabase(project));
+      return project?.name || "";
+    });
+    setSelectedJobId((currentId) => payload.jobs.some((job) => job.id === currentId) ? currentId : payload.jobs[0]?.id ?? null);
+    lastDockerState.current = payload.system_status.docker.state;
+    pendingDockerState.current = null;
+    markApiSuccess();
+    setError("");
+  }, [markApiSuccess]);
+
+  const commitSystemStatus = useCallback((payload: SystemStatus, immediate = false) => {
+    markApiSuccess();
+    const previous = lastDockerState.current;
+    const next = payload.docker.state;
+    const sameState = previous === next;
+    const recoverToReady = payload.docker.running;
+
+    if (!immediate && previous && !sameState && !recoverToReady) {
+      const pending = pendingDockerState.current;
+      const count = pending?.state === next ? pending.count + 1 : 1;
+      pendingDockerState.current = { state: next, count };
+      if (count < 2) return false;
+    }
+
+    pendingDockerState.current = null;
+    setSystemStatus(payload);
+    if (!immediate && previous && previous !== next) {
+      if (payload.docker.running) pushToast("success", "Docker est maintenant disponible.");
+      else pushToast("error", payload.docker.message || "Docker n'est plus disponible.");
+    }
+    lastDockerState.current = next;
+    return true;
+  }, [markApiSuccess, pushToast]);
+
+  const initializeApplication = useCallback(async () => {
+    const generation = ++bootstrapGeneration.current;
+    initializingRef.current = true;
+    setInitializing(true);
+    setInitializationError("");
+    markApiSuccess();
+
+    for (const [attempt, retryDelay] of BOOTSTRAP_RETRY_DELAYS_MS.entries()) {
+      if (retryDelay) await delay(retryDelay);
+      if (generation !== bootstrapGeneration.current) return;
+      setInitializationMessage(attempt === 0 ? "Démarrage du service local…" : "Connexion au service local…");
+      try {
+        let payload = await api<BootstrapSnapshot>("/api/bootstrap");
+        if (!payload.system_status.docker.running) {
+          setInitializationMessage("Vérification de Docker et des projets…");
+          await delay(DOCKER_CONFIRM_DELAY_MS);
+          const confirmation = await api<BootstrapSnapshot>("/api/bootstrap");
+          if (
+            confirmation.system_status.docker.state !== payload.system_status.docker.state &&
+            !confirmation.system_status.docker.running
+          ) {
+            await delay(DOCKER_CONFIRM_DELAY_MS);
+            payload = await api<BootstrapSnapshot>("/api/bootstrap");
+          } else {
+            payload = confirmation;
+          }
+        }
+        if (generation !== bootstrapGeneration.current) return;
+        applyBootstrapSnapshot(payload);
+        initializingRef.current = false;
+        setInitializing(false);
+        return;
+      } catch (err) {
+        if (generation !== bootstrapGeneration.current) return;
+        if (attempt === BOOTSTRAP_RETRY_DELAYS_MS.length - 1) {
+          setInitializationError(err instanceof Error ? err.message : "Le service local ne répond pas.");
+          setInitializationMessage("Le gestionnaire n’est pas encore prêt.");
+        }
+      }
+    }
+  }, [applyBootstrapSnapshot, markApiSuccess]);
+
   const refreshOverview = useCallback(async () => {
+    if (overviewRefreshInFlight.current) return;
+    overviewRefreshInFlight.current = true;
     try {
       const payload = await api<Overview>("/api/overview");
       setOverview(payload);
-      setApiUnavailable(false);
+      markApiSuccess();
       setError("");
       const current = payload.projects.find((project) => project.name === selectedProjectName) || payload.projects[0];
       if (current && current.name !== selectedProjectName) {
@@ -446,44 +636,42 @@ export default function Home() {
         setSelectedDb(firstOdooDatabase(current));
       }
     } catch (err) {
-      setApiUnavailable(err instanceof ApiUnavailableError);
+      markApiFailure(err);
       setError(!initializingRef.current && !(err instanceof ApiUnavailableError) ? err instanceof Error ? err.message : "Impossible de charger l'overview." : "");
+    } finally {
+      overviewRefreshInFlight.current = false;
     }
-  }, [selectedProjectName]);
+  }, [markApiFailure, markApiSuccess, selectedProjectName]);
 
   const refreshSystemStatus = useCallback(async () => {
+    if (systemRefreshInFlight.current) return;
+    systemRefreshInFlight.current = true;
     try {
       const payload = await api<SystemStatus>("/api/system/status");
-      setSystemStatus(payload);
-      setApiUnavailable(false);
-      const previous = lastDockerState.current;
-      if (previous && previous !== payload.docker.state) {
-        if (payload.docker.running) pushToast("success", "Docker est maintenant disponible.");
-        else pushToast("error", payload.docker.message || "Docker n'est plus disponible.");
-      }
-      lastDockerState.current = payload.docker.state;
+      commitSystemStatus(payload);
     } catch (err) {
-      setSystemStatus(null);
-      setApiUnavailable(err instanceof ApiUnavailableError);
-      if (!initializingRef.current && lastDockerState.current !== "api-error") {
+      const newlyUnavailable = markApiFailure(err);
+      if (!initializingRef.current && (newlyUnavailable || !(err instanceof ApiUnavailableError))) {
         pushToast("error", err instanceof Error ? err.message : "État système indisponible.");
-        lastDockerState.current = "api-error";
       }
+    } finally {
+      systemRefreshInFlight.current = false;
     }
-  }, [pushToast]);
+  }, [commitSystemStatus, markApiFailure, pushToast]);
 
   const loadSettings = useCallback(async () => {
     try {
       const payload = await api<{ settings: ManagerSettings }>("/api/settings");
       setSettings(payload.settings);
       setSettingsDraft(payload.settings);
-      setApiUnavailable(false);
+      markApiSuccess();
     } catch (err) {
+      markApiFailure(err);
       if (!initializingRef.current && !(err instanceof ApiUnavailableError)) {
         pushToast("error", err instanceof Error ? err.message : "Paramètres indisponibles.");
       }
     }
-  }, [pushToast]);
+  }, [markApiFailure, markApiSuccess, pushToast]);
 
   const openSettingsDialog = useCallback(() => {
     setSettingsDraft(fallbackManagerSettings(settings, overview, systemStatus));
@@ -491,64 +679,134 @@ export default function Home() {
     void loadSettings();
   }, [loadSettings, overview, settings, systemStatus]);
 
+  const loadCreationPrerequisites = useCallback(async () => {
+    setLoadingCreationPrerequisites(true);
+    try {
+      const payload = await api<ProjectCreationPrerequisites>("/api/system/project-creation-prerequisites");
+      setCreationPrerequisites(payload);
+      markApiSuccess();
+      return payload;
+    } catch (err) {
+      markApiFailure(err);
+      pushToast("error", err instanceof Error ? err.message : "Vérification GitLab impossible.");
+      return null;
+    } finally {
+      setLoadingCreationPrerequisites(false);
+    }
+  }, [markApiFailure, markApiSuccess, pushToast]);
+
+  const openCreateProjectDialog = useCallback(() => {
+    setCreateProjectOpen(true);
+    void loadCreationPrerequisites();
+  }, [loadCreationPrerequisites]);
+
+  const completeOnboarding = useCallback(async () => {
+    try {
+      const payload = await api<{ settings: ManagerSettings }>("/api/settings", {
+        method: "POST",
+        body: JSON.stringify({ onboarding_completed: true, create_workspace: true }),
+      });
+      setSettings(payload.settings);
+      setSettingsDraft(payload.settings);
+    } catch (err) {
+      pushToast("error", err instanceof Error ? err.message : "Enregistrement impossible.");
+    }
+  }, [pushToast]);
+
   const refreshJobs = useCallback(async () => {
+    if (jobsRefreshInFlight.current) return;
+    jobsRefreshInFlight.current = true;
     try {
       const payload = await api<{ jobs: Job[] }>("/api/jobs");
       setJobs(payload.jobs);
-      setApiUnavailable(false);
+      markApiSuccess();
       if (!selectedJobId && payload.jobs[0]) setSelectedJobId(payload.jobs[0].id);
     } catch (err) {
-      if (err instanceof ApiUnavailableError) setApiUnavailable(true);
+      markApiFailure(err);
       // Jobs polling should not break the whole screen.
+    } finally {
+      jobsRefreshInFlight.current = false;
     }
-  }, [selectedJobId]);
+  }, [markApiFailure, markApiSuccess, selectedJobId]);
 
   const refreshModules = useCallback(async () => {
-    if (!selectedProject || !selectedDb) return;
+    const projectName = selectedProject?.name;
+    const generation = ++modulesRequestGeneration.current;
+    if (!projectName || !selectedDb || selectedDb === "postgres") {
+      setModules([]);
+      return;
+    }
     try {
       const payload = await api<{ modules: ModuleInfo[] }>(
-        `/api/projects/${encodeURIComponent(selectedProject.name)}/modules?db=${encodeURIComponent(selectedDb)}`,
+        `/api/projects/${encodeURIComponent(projectName)}/modules?db=${encodeURIComponent(selectedDb)}`,
       );
+      if (generation !== modulesRequestGeneration.current) return;
       setModules(payload.modules);
       setSelectedModules((current) => {
         const available = new Set(payload.modules.map((module) => module.name));
         return new Set(Array.from(current).filter((name) => available.has(name)));
       });
     } catch (err) {
+      if (generation !== modulesRequestGeneration.current) return;
       pushToast("error", err instanceof Error ? err.message : "Impossible de charger les modules.");
     }
-  }, [pushToast, selectedDb, selectedProject]);
+  }, [pushToast, selectedDb, selectedProject?.name]);
+
+  useEffect(() => () => {
+    for (const timeout of scheduledTimeouts.current) window.clearTimeout(timeout);
+    scheduledTimeouts.current.clear();
+  }, []);
 
   useEffect(() => {
     setDesktopRuntime(isTauriRuntime());
-    let active = true;
-    Promise.allSettled([refreshOverview(), refreshJobs(), refreshSystemStatus(), loadSettings()]).finally(() => {
-      if (!active) return;
-      initializingRef.current = false;
-      setInitializing(false);
-    });
+    void initializeApplication();
     return () => {
-      active = false;
+      bootstrapGeneration.current += 1;
     };
   }, []);
 
   useEffect(() => {
+    if (
+      initializing ||
+      onboardingPrompted.current ||
+      !overview ||
+      !settings ||
+      settings.onboarding_completed ||
+      overview.projects.length > 0
+    ) return;
+    onboardingPrompted.current = true;
+    setOnboardingOpen(true);
+    void loadCreationPrerequisites();
+  }, [initializing, loadCreationPrerequisites, overview, settings]);
+
+  useEffect(() => {
+    if (!pendingCreatedProjectName || !overview) return;
+    const created = overview.projects.find((project) => project.name === pendingCreatedProjectName);
+    if (!created) return;
+    setSelectedProjectName(created.name);
+    setSelectedDb(firstOdooDatabase(created));
+    setPendingCreatedProjectName("");
+  }, [overview, pendingCreatedProjectName]);
+
+  useEffect(() => {
+    if (initializing) return;
     const timer = window.setInterval(() => {
       refreshOverview();
       refreshJobs();
     }, 5000);
     return () => window.clearInterval(timer);
-  }, [refreshJobs, refreshOverview]);
+  }, [initializing, refreshJobs, refreshOverview]);
 
   useEffect(() => {
+    if (initializing) return;
     const interval = Math.max(3, settings?.docker_poll_interval || 10) * 1000;
     const timer = window.setInterval(refreshSystemStatus, interval);
     return () => window.clearInterval(timer);
-  }, [refreshSystemStatus, settings?.docker_poll_interval]);
+  }, [initializing, refreshSystemStatus, settings?.docker_poll_interval]);
 
   useEffect(() => {
     if (selectedProject) {
-      setSelectedDb((current) => current || firstOdooDatabase(selectedProject));
+      setSelectedDb((current) => selectedProject.databases?.includes(current) ? current : firstOdooDatabase(selectedProject));
     }
   }, [selectedProject]);
 
@@ -581,14 +839,14 @@ export default function Home() {
     try {
       const result = await api<{ ok: boolean; message: string }>("/api/system/docker/start", { method: "POST" });
       pushToast("info", result.message || "Démarrage de Docker demandé.");
-      window.setTimeout(refreshSystemStatus, 1500);
-      window.setTimeout(refreshSystemStatus, 5000);
+      schedule(refreshSystemStatus, 1500);
+      schedule(refreshSystemStatus, 5000);
     } catch (err) {
       if (err instanceof ApiUnavailableError && isTauriRuntime()) {
         try {
           await openDockerDesktopNative();
           pushToast("info", "Ouverture de Docker Desktop demandée.");
-          window.setTimeout(refreshSystemStatus, 3000);
+          schedule(refreshSystemStatus, 3000);
           return;
         } catch (nativeError) {
           pushToast("error", nativeError instanceof Error ? nativeError.message : "Impossible d'ouvrir Docker Desktop.");
@@ -617,9 +875,21 @@ export default function Home() {
     }
     const job = await createJob("install_traefik");
     if (job) {
-      window.setTimeout(refreshSystemStatus, 2500);
-      window.setTimeout(refreshOverview, 4000);
+      schedule(refreshSystemStatus, 2500);
+      schedule(refreshOverview, 4000);
     }
+  }
+
+  async function requestProjectCreation(payload: Record<string, unknown>) {
+    const projectName = String(payload.name || "").trim();
+    const job = await createJob("create_project", payload);
+    if (!job) return;
+    setPendingCreatedProjectName(projectName);
+    setCreateProjectOpen(false);
+    setOnboardingOpen(false);
+    setActiveTab("logs");
+    await completeOnboarding();
+    schedule(refreshOverview, 2500);
   }
 
   async function saveSettings() {
@@ -661,22 +931,84 @@ export default function Home() {
     const db = selectedDatabaseOrNotify("la MAJ addons projet");
     if (!db || !selectedProject) return;
     await createJob("update_local_modules", { project: selectedProject.name, db });
-    window.setTimeout(refreshModules, 2500);
+    schedule(refreshModules, 2500);
   }
 
-  function requestUpdateAllOdooModules() {
+  async function requestUpdateAllOdooModules() {
     const db = selectedDatabaseOrNotify("la MAJ complète Odoo");
-    if (!db) return;
-    setUpdateAllDialogOpen(true);
+    if (!db || !selectedProject) return;
+    setAllowMissingFilestore(false);
+    setUpdateFilestoreStatus(null);
+    setUpdatePendingModules([]);
+    setUpdateLocalExcludedModules([]);
+    setMissingModulesToIgnore(new Set());
+    setCheckingUpdatePrerequisites(true);
+    try {
+      const diagnostics = await api<ProjectDiagnostics>(`/api/projects/${encodeURIComponent(selectedProject.name)}/diagnostics`);
+      const database = diagnostics.databases?.find((item) => item.name === db);
+      setUpdateFilestoreStatus(database?.filestore || null);
+      setUpdatePendingModules(
+        database?.pending_modules ||
+          (database?.pending_missing_modules || []).map((name) => ({ name, state: "en attente", code_available: false })),
+      );
+      setUpdateLocalExcludedModules(database?.local_excluded_modules || database?.ignored_missing_modules || []);
+    } catch (err) {
+      pushToast("info", err instanceof Error ? err.message : "Précontrôle du filestore indisponible.");
+    } finally {
+      setCheckingUpdatePrerequisites(false);
+      setUpdateAllDialogOpen(true);
+    }
+  }
+
+  function toggleMissingModuleToIgnore(moduleName: string, checked: boolean) {
+    setMissingModulesToIgnore((current) => {
+      const next = new Set(current);
+      if (checked) next.add(moduleName);
+      else next.delete(moduleName);
+      return next;
+    });
+  }
+
+  async function ignoreSelectedMissingModulesLocally() {
+    const db = selectedDatabaseOrNotify("l'annulation locale des opérations module");
+    if (!db || !selectedProject || !missingModulesToIgnore.size) return;
+    const modulesToIgnore = Array.from(missingModulesToIgnore).sort();
+    const job = await createJob("ignore_missing_modules_locally", {
+      project: selectedProject.name,
+      db,
+      modules: modulesToIgnore.join(","),
+    });
+    if (job) {
+      setUpdateAllDialogOpen(false);
+      schedule(refreshModules, 1500);
+    }
+  }
+
+  async function restoreLocalModuleExclusions() {
+    const db = selectedDatabaseOrNotify("la réactivation des mises à jour module");
+    if (!db || !selectedProject || !updateLocalExcludedModules.length) return;
+    const job = await createJob("restore_module_update_exclusions", {
+      project: selectedProject.name,
+      db,
+      modules: updateLocalExcludedModules.join(","),
+    });
+    if (job) {
+      setUpdateAllDialogOpen(false);
+      schedule(refreshModules, 1500);
+    }
   }
 
   async function confirmUpdateAllOdooModules() {
     const db = selectedDatabaseOrNotify("la MAJ complète Odoo");
     if (!db || !selectedProject) return;
-    const job = await createJob("update_all_modules", { project: selectedProject.name, db });
+    const job = await createJob("update_all_modules", {
+      project: selectedProject.name,
+      db,
+      allow_missing_filestore: allowMissingFilestore,
+    });
     if (job) {
       setUpdateAllDialogOpen(false);
-      window.setTimeout(refreshModules, 2500);
+      schedule(refreshModules, 2500);
     }
   }
 
@@ -770,7 +1102,7 @@ export default function Home() {
       setUninstallDialogOpen(false);
       setPendingUninstallModules([]);
       setSelectedModules(new Set());
-      window.setTimeout(refreshModules, 2500);
+      schedule(refreshModules, 2500);
     }
   }
 
@@ -800,7 +1132,7 @@ export default function Home() {
       setDeleteCodeDialogOpen(false);
       setPendingDeleteCodeModules([]);
       setSelectedModules(new Set());
-      window.setTimeout(refreshModules, 2500);
+      schedule(refreshModules, 2500);
     }
   }
 
@@ -811,9 +1143,15 @@ export default function Home() {
       pushToast("error", "Sélectionne un fichier ZIP.");
       return;
     }
+    const selected = Array.from(selectedZipModules).sort();
+    if (!selected.length) {
+      pushToast("error", "Sélectionne au moins un module à importer.");
+      return;
+    }
     const form = new FormData();
     form.append("zip", file);
     form.append("replace_existing", replaceZipModules ? "1" : "0");
+    form.append("modules", selected.join(","));
     setLoading(true);
     try {
       const result = await api<{ job: Job }>(`/api/projects/${encodeURIComponent(selectedProject.name)}/module-zip`, {
@@ -823,14 +1161,72 @@ export default function Home() {
       setSelectedJobId(result.job.id);
       setExternalLogView(null);
       setZipDialogOpen(false);
-      pushToast("success", "Import ZIP lancé.");
-      window.setTimeout(refreshModules, 1800);
+      resetZipImport();
+      pushToast("success", `Import de ${selected.length} module(s) lancé.`);
+      schedule(refreshModules, 1800);
       await refreshJobs();
     } catch (err) {
       pushToast("error", err instanceof Error ? err.message : "Import ZIP impossible.");
     } finally {
       setLoading(false);
     }
+  }
+
+  function resetZipImport() {
+    zipInspectionGeneration.current += 1;
+    setZipModuleCandidates([]);
+    setSelectedZipModules(new Set());
+    setInspectingZip(false);
+    if (zipInputRef.current) zipInputRef.current.value = "";
+  }
+
+  async function inspectZipFile(file?: File) {
+    const generation = ++zipInspectionGeneration.current;
+    setZipModuleCandidates([]);
+    setSelectedZipModules(new Set());
+    if (!file || !selectedProject) {
+      setInspectingZip(false);
+      return;
+    }
+
+    const form = new FormData();
+    form.append("zip", file);
+    setInspectingZip(true);
+    try {
+      const result = await api<ZipInspection>(
+        `/api/projects/${encodeURIComponent(selectedProject.name)}/module-zip/inspect`,
+        { method: "POST", body: form },
+      );
+      if (generation !== zipInspectionGeneration.current) return;
+      setZipModuleCandidates(result.modules);
+      setSelectedZipModules(new Set(result.modules));
+      if (!result.modules.length) {
+        pushToast("error", "Aucun module Odoo détecté dans cette archive.");
+      } else if (result.ignored_symlinks) {
+        pushToast(
+          "info",
+          `${result.modules.length} module(s) détecté(s). ${result.ignored_symlinks} lien(s) de packaging ignoré(s).`,
+        );
+      }
+    } catch (err) {
+      if (generation !== zipInspectionGeneration.current) return;
+      pushToast("error", err instanceof Error ? err.message : "Analyse du ZIP impossible.");
+    } finally {
+      if (generation === zipInspectionGeneration.current) setInspectingZip(false);
+    }
+  }
+
+  function toggleZipModule(moduleName: string, checked: boolean) {
+    setSelectedZipModules((current) => {
+      const next = new Set(current);
+      if (checked) next.add(moduleName);
+      else next.delete(moduleName);
+      return next;
+    });
+  }
+
+  function toggleAllZipModules(checked: boolean) {
+    setSelectedZipModules(checked ? new Set(zipModuleCandidates) : new Set());
   }
 
   const selectedModuleList = useMemo(() => Array.from(selectedModules), [selectedModules]);
@@ -847,6 +1243,18 @@ export default function Home() {
     selectedProject &&
       [selectedProject.odoo_status, selectedProject.postgres_status].some((status) => status && status !== "absent" && status !== "docker off"),
   );
+  const selectedProjectLifecycleJob = useMemo(
+    () =>
+      jobs.find(
+        (job) =>
+          job.status === "running" &&
+          selectedProject &&
+          (job.title === `Démarrer ${selectedProject.name}` || job.title === `Arrêter ${selectedProject.name}`),
+      ),
+    [jobs, selectedProject],
+  );
+  const selectedProjectStarting = selectedProjectLifecycleJob?.title.startsWith("Démarrer ") ?? false;
+  const selectedProjectStopping = selectedProjectLifecycleJob?.title.startsWith("Arrêter ") ?? false;
   const canUseDb = Boolean(selectedDb && selectedDb !== "postgres");
   const selectedOdooUrl = odooAccessUrl(selectedProject, selectedDb);
   const outputTitle = externalLogView?.title || selectedJob?.title || "Aucune action sélectionnée";
@@ -879,8 +1287,8 @@ export default function Home() {
     if (!selectedProject) return;
     const job = await createJob("start_project", { project: selectedProject.name });
     if (job) {
-      window.setTimeout(refreshOverview, 1800);
-      window.setTimeout(refreshSystemStatus, 2200);
+      schedule(refreshOverview, 1800);
+      schedule(refreshSystemStatus, 2200);
     }
   }
 
@@ -888,8 +1296,8 @@ export default function Home() {
     if (!selectedProject) return;
     const job = await createJob("stop_project", { project: selectedProject.name });
     if (job) {
-      window.setTimeout(refreshOverview, 1200);
-      window.setTimeout(refreshSystemStatus, 1600);
+      schedule(refreshOverview, 1200);
+      schedule(refreshSystemStatus, 1600);
     }
   }
 
@@ -897,11 +1305,26 @@ export default function Home() {
     return (
       <main className="grid min-h-screen place-items-center bg-background px-6">
         <div className="w-full max-w-md rounded-lg border bg-card p-6 text-center shadow-sm">
-          <Loader2 className="mx-auto h-8 w-8 animate-spin text-primary" />
+          {initializationError ? (
+            <AlertTriangle className="mx-auto h-8 w-8 text-amber-600" />
+          ) : (
+            <Loader2 className="mx-auto h-8 w-8 animate-spin text-primary" />
+          )}
           <h1 className="mt-4 text-lg font-semibold">Chargement du gestionnaire</h1>
           <p className="mt-2 text-sm text-muted-foreground">
-            Connexion à l’API locale et lecture des projets Odoo.
+            {initializationMessage}
           </p>
+          {initializationError && (
+            <div className="mt-4 space-y-3">
+              <p className="break-words rounded-md border border-amber-200 bg-amber-50 p-3 text-left text-xs text-amber-900">
+                {initializationError}
+              </p>
+              <Button className="w-full" onClick={initializeApplication}>
+                <RefreshCcw className="h-4 w-4" />
+                Réessayer
+              </Button>
+            </div>
+          )}
         </div>
       </main>
     );
@@ -934,7 +1357,7 @@ export default function Home() {
                 />
               </div>
             </div>
-            <div className="min-h-0 flex-1 overflow-auto p-2">
+            <div className="min-h-0 max-h-[45vh] flex-1 overflow-auto p-2 sm:max-h-[50vh] lg:max-h-none">
               {filteredProjects.map((project) => (
                 <button
                   key={project.name}
@@ -968,7 +1391,7 @@ export default function Home() {
               ))}
             </div>
             <div className="grid gap-2 border-t p-3">
-              <Button className="w-full" variant="outline" onClick={() => createJob("create_project_terminal")}>
+              <Button className="w-full" variant="outline" onClick={openCreateProjectDialog}>
                 <FolderPlus className="h-4 w-4" />
                 Nouveau projet
               </Button>
@@ -1007,36 +1430,22 @@ export default function Home() {
                   <RefreshCcw className="h-4 w-4" />
                   Actualiser
                 </Button>
-                <Button className="w-full sm:w-auto" disabled={!selectedProjectReady || loading} onClick={requestStartProject}>
-                  <Play className="h-4 w-4" />
-                  Démarrer
+                <Button
+                  className="w-full sm:w-auto"
+                  disabled={!selectedProjectReady || loading || Boolean(selectedProjectLifecycleJob)}
+                  onClick={requestStartProject}
+                >
+                  {selectedProjectStarting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                  {selectedProjectStarting ? "Démarrage…" : "Démarrer"}
                 </Button>
                 <Button
                   className="w-full sm:w-auto"
                   variant="outline"
-                  disabled={!selectedProjectReady || !selectedProjectHasContainers || loading}
+                  disabled={!selectedProjectReady || !selectedProjectHasContainers || loading || Boolean(selectedProjectLifecycleJob)}
                   onClick={requestStopProject}
                 >
-                  <Square className="h-4 w-4" />
-                  Arrêter
-                </Button>
-                <Button
-                  className="w-full sm:w-auto"
-                  variant="outline"
-                  disabled={!selectedProjectReady || loading}
-                  onClick={requestUpdateLocalModules}
-                >
-                  <ListRestart className="h-4 w-4" />
-                  MAJ addons projet
-                </Button>
-                <Button
-                  className="w-full sm:w-auto"
-                  variant="outline"
-                  disabled={!selectedProjectReady || loading}
-                  onClick={requestUpdateAllOdooModules}
-                >
-                  <RefreshCcw className="h-4 w-4" />
-                  MAJ complète Odoo (-u all)
+                  {selectedProjectStopping ? <Loader2 className="h-4 w-4 animate-spin" /> : <Square className="h-4 w-4" />}
+                  {selectedProjectStopping ? "Arrêt…" : "Arrêter"}
                 </Button>
                 {selectedProject && (
                   <Button className="w-full sm:w-auto" variant="outline" onClick={() => openUrl(selectedOdooUrl)}>
@@ -1176,7 +1585,7 @@ export default function Home() {
               </div>
             )}
 
-            <Tabs defaultValue="bases">
+            <Tabs value={activeTab} onValueChange={setActiveTab}>
               <TabsList className="w-full justify-start overflow-x-auto lg:w-auto">
                 <TabsTrigger value="bases">
                   <Database className="mr-2 h-4 w-4" />
@@ -1454,42 +1863,42 @@ export default function Home() {
               </TabsContent>
 
               <TabsContent value="logs">
-                <div className="grid gap-4 xl:grid-cols-[minmax(280px,420px)_minmax(0,1fr)]">
-                  <Card>
+                <div className="grid min-w-0 gap-4 min-[1500px]:grid-cols-[minmax(300px,360px)_minmax(0,1fr)]">
+                  <Card className="min-w-0">
                     <CardHeader className="gap-3 sm:flex-row sm:items-center sm:justify-between">
-                      <div>
+                      <div className="min-w-0">
                         <CardTitle>Historique</CardTitle>
                         <CardDescription>Actions lancées depuis le gestionnaire.</CardDescription>
                       </div>
-                      <Button variant="outline" size="sm" onClick={clearJobs}>
+                      <Button className="w-full shrink-0 sm:w-auto" variant="outline" size="sm" onClick={clearJobs}>
                         <Trash2 className="h-4 w-4" />
                         Effacer
                       </Button>
                     </CardHeader>
-                    <CardContent className="max-h-[min(58vh,620px)] space-y-2 overflow-auto">
+                    <CardContent className="max-h-[min(58vh,620px)] min-w-0 space-y-2 overflow-y-auto">
                       {jobs.map((job) => (
                         <div
                           key={job.id}
                           className={cn(
-                            "group grid grid-cols-1 gap-2 rounded-md border p-2 transition-colors hover:bg-muted sm:grid-cols-[minmax(0,1fr)_auto]",
+                            "group min-w-0 rounded-md border p-2 transition-colors hover:bg-muted",
                             !externalLogView && selectedJob?.id === job.id && "border-primary bg-primary/8",
                           )}
                         >
                           <button
                             type="button"
-                            className="min-w-0 rounded-md p-2 text-left outline-none transition-colors hover:bg-card/70 focus-visible:ring-2 focus-visible:ring-ring"
+                            className="w-full min-w-0 rounded-md p-2 text-left outline-none transition-colors hover:bg-card/70 focus-visible:ring-2 focus-visible:ring-ring"
                             onClick={() => selectJob(job.id)}
                           >
                             <div className="flex items-start justify-between gap-2">
                               <div className="min-w-0 flex-1">
-                                <div className="break-words font-medium">{job.title}</div>
+                                <div className="break-words font-medium leading-snug">{job.title}</div>
                                 <div className="mt-1 text-xs text-muted-foreground">{job.started_at}</div>
                               </div>
                               <Badge className="shrink-0" variant={statusVariant(job.status)}>{job.status}</Badge>
                             </div>
                           </button>
                           <Button
-                            className="relative z-10 w-full shrink-0 border-red-200 text-red-700 hover:border-red-300 hover:bg-red-50 hover:text-red-800 active:bg-red-100 focus-visible:ring-red-500 sm:w-auto sm:self-start"
+                            className="relative z-10 mt-1 w-full shrink-0 border-red-200 text-red-700 hover:border-red-300 hover:bg-red-50 hover:text-red-800 active:bg-red-100 focus-visible:ring-red-500"
                             variant="outline"
                             size="sm"
                             title={`Supprimer l'historique ${job.title}`}
@@ -1506,22 +1915,23 @@ export default function Home() {
                       ))}
                     </CardContent>
                   </Card>
-                  <Card>
-                    <CardHeader className="gap-3 sm:flex-row sm:items-center sm:justify-between">
-                      <div>
+                  <Card className="min-w-0">
+                    <CardHeader className="min-w-0 gap-3 min-[1900px]:flex-row min-[1900px]:items-start min-[1900px]:justify-between">
+                      <div className="min-w-0 flex-1">
                         <CardTitle>Sortie</CardTitle>
                         <CardDescription className="break-words">{outputTitle}</CardDescription>
                       </div>
-                      <div className="grid w-full grid-cols-1 gap-2 sm:grid-cols-3 xl:w-auto">
-                        <Button className="justify-start sm:justify-center" variant="outline" size="sm" onClick={showDiagnostics} disabled={!selectedProjectReady}>
+                      <div className="grid w-full min-w-0 grid-cols-1 gap-2 sm:grid-cols-3 min-[1900px]:w-auto min-[1900px]:shrink-0">
+                        <Button className="w-full justify-start sm:justify-center" variant="outline" size="sm" onClick={showDiagnostics} disabled={!selectedProjectReady}>
                           <Activity className="h-4 w-4" />
                           Diagnostic
                         </Button>
-                        <Button className="justify-start sm:justify-center" variant="outline" size="sm" onClick={showLogs} disabled={!selectedProjectReady}>
+                        <Button className="w-full justify-start sm:justify-center" variant="outline" size="sm" onClick={showLogs} disabled={!selectedProjectReady}>
                           <Logs className="h-4 w-4" />
                           Logs Odoo
                         </Button>
                         <Button
+                          className="w-full justify-start sm:justify-center"
                           variant="outline"
                           size="sm"
                           onClick={copyOutput}
@@ -1531,8 +1941,8 @@ export default function Home() {
                         </Button>
                       </div>
                     </CardHeader>
-                    <CardContent>
-                      <pre className="min-h-[260px] max-h-[min(58vh,620px)] overflow-auto whitespace-pre-wrap break-words rounded-md bg-slate-950 p-4 text-xs leading-relaxed text-emerald-100">
+                    <CardContent className="min-w-0">
+                      <pre className="min-h-[260px] max-h-[min(58vh,620px)] max-w-full overflow-auto whitespace-pre-wrap break-words rounded-md bg-slate-950 p-3 text-xs leading-relaxed text-emerald-100 sm:p-4">
                         {outputContent}
                       </pre>
                     </CardContent>
@@ -1552,8 +1962,12 @@ export default function Home() {
                         <ListRestart className="h-4 w-4" />
                         MAJ addons projet
                       </Button>
-                      <Button className="w-full" disabled={!selectedProjectReady || loading} onClick={requestUpdateAllOdooModules}>
-                        <RefreshCcw className="h-4 w-4" />
+                      <Button
+                        className="w-full"
+                        disabled={!selectedProjectReady || loading || checkingUpdatePrerequisites}
+                        onClick={requestUpdateAllOdooModules}
+                      >
+                        {checkingUpdatePrerequisites ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
                         MAJ complète Odoo (-u all)
                       </Button>
                     </CardContent>
@@ -1590,13 +2004,9 @@ export default function Home() {
                   <Card>
                     <CardHeader>
                       <CardTitle>Zone sensible</CardTitle>
-                      <CardDescription>Actions irréversibles ou externes.</CardDescription>
+                      <CardDescription>Suppression du projet local sélectionné.</CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-2">
-                      <Button className="w-full" variant="outline" onClick={() => createJob("create_project_terminal")}>
-                        <SquareTerminal className="h-4 w-4" />
-                        Nouveau projet via Terminal
-                      </Button>
                       <Button className="w-full" variant="destructive" disabled={!selectedProjectReady} onClick={() => setDeleteDialogOpen(true)}>
                         <Trash2 className="h-4 w-4" />
                         Supprimer projet
@@ -1609,6 +2019,117 @@ export default function Home() {
           </div>
         </section>
       </div>
+
+      <Dialog open={onboardingOpen} onOpenChange={setOnboardingOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Préparer le gestionnaire Odoo</DialogTitle>
+            <DialogDescription>
+              Vérifie les prérequis une seule fois, puis crée ton premier environnement depuis l’application.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="divide-y rounded-md border">
+            <PrerequisiteRow
+              ready={Boolean(creationPrerequisites?.workspace_ready)}
+              icon={FolderPlus}
+              title="Dossier des projets"
+              detail={creationPrerequisites?.workspace || overview?.workspace || "Vérification en cours…"}
+            />
+            <PrerequisiteRow
+              ready={Boolean(systemStatus?.docker.running)}
+              icon={Boxes}
+              title="Docker"
+              detail={systemStatus?.docker.message || "Vérification en cours…"}
+              action={
+                systemStatus?.docker.running ? undefined : (
+                  <Button size="sm" variant="outline" onClick={requestDockerStart} disabled={loading}>
+                    {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                    Ouvrir
+                  </Button>
+                )
+              }
+            />
+            <PrerequisiteRow
+              ready={Boolean(systemStatus?.traefik?.installed)}
+              icon={Activity}
+              title="Traefik"
+              detail={systemStatus?.traefik?.message || "Vérification en cours…"}
+              action={
+                systemStatus?.traefik?.can_install ? (
+                  <Button size="sm" variant="outline" onClick={requestTraefikInstall}>Installer</Button>
+                ) : undefined
+              }
+            />
+            <PrerequisiteRow
+              ready={Boolean(creationPrerequisites?.git_available)}
+              icon={GitBranch}
+              title="Git"
+              detail={creationPrerequisites?.git_version || "Git doit être disponible sur la machine."}
+            />
+            <PrerequisiteRow
+              ready={Boolean(creationPrerequisites?.ssh_key_present)}
+              icon={KeyRound}
+              title="Clé SSH GitLab"
+              detail={
+                creationPrerequisites?.ssh_key_present
+                  ? creationPrerequisites.ssh_keys.join(", ")
+                  : "Ajoute ta clé publique dans ton profil GitLab avant la première création."
+              }
+              action={
+                creationPrerequisites?.gitlab_ssh_keys_url ? (
+                  <Button size="sm" variant="outline" onClick={() => openUrl(creationPrerequisites.gitlab_ssh_keys_url)}>
+                    <ExternalLink className="h-4 w-4" />
+                    GitLab
+                  </Button>
+                ) : undefined
+              }
+            />
+          </div>
+          {loadingCreationPrerequisites && (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Vérification de Git et de la clé SSH…
+            </div>
+          )}
+          <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+            <Button
+              variant="outline"
+              onClick={async () => {
+                await completeOnboarding();
+                setOnboardingOpen(false);
+              }}
+            >
+              Configurer plus tard
+            </Button>
+            <Button
+              disabled={
+                loadingCreationPrerequisites ||
+                !creationPrerequisites?.workspace_ready ||
+                !creationPrerequisites.git_available ||
+                !creationPrerequisites.ssh_key_present
+              }
+              onClick={async () => {
+                await completeOnboarding();
+                setOnboardingOpen(false);
+                openCreateProjectDialog();
+              }}
+            >
+              <FolderPlus className="h-4 w-4" />
+              Créer mon premier projet
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <CreateProjectDialog
+        open={createProjectOpen}
+        onOpenChange={setCreateProjectOpen}
+        prerequisites={creationPrerequisites}
+        dockerReady={Boolean(systemStatus?.docker.running)}
+        loading={loading}
+        onRefreshPrerequisites={loadCreationPrerequisites}
+        onSubmit={requestProjectCreation}
+      />
 
       <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
         <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
@@ -1657,24 +2178,14 @@ export default function Home() {
                 </label>
               </div>
 
-              <div className="grid gap-4 md:grid-cols-2">
-                <label className="grid gap-1.5 text-sm font-medium">
-                  Commande Docker
-                  <Input
-                    value={settingsDraft.docker_executable}
-                    onChange={(event) => setSettingsDraft({ ...settingsDraft, docker_executable: event.target.value })}
-                    placeholder="docker"
-                  />
-                </label>
-                <label className="grid gap-1.5 text-sm font-medium">
-                  Commande Brainkeys
-                  <Input
-                    value={settingsDraft.brainkeys_executable}
-                    onChange={(event) => setSettingsDraft({ ...settingsDraft, brainkeys_executable: event.target.value })}
-                    placeholder="brainkeys"
-                  />
-                </label>
-              </div>
+              <label className="grid gap-1.5 text-sm font-medium">
+                Commande Docker
+                <Input
+                  value={settingsDraft.docker_executable}
+                  onChange={(event) => setSettingsDraft({ ...settingsDraft, docker_executable: event.target.value })}
+                  placeholder="docker"
+                />
+              </label>
 
               <label className="grid min-w-0 gap-1.5 text-sm font-medium">
                 Dossier Traefik
@@ -1685,26 +2196,16 @@ export default function Home() {
                 />
               </label>
 
-              <div className="grid gap-4 md:grid-cols-2">
-                <label className="grid gap-1.5 text-sm font-medium">
-                  Terminal
-                  <Input
-                    value={settingsDraft.terminal}
-                    onChange={(event) => setSettingsDraft({ ...settingsDraft, terminal: event.target.value })}
-                    placeholder="auto"
-                  />
-                </label>
-                <label className="grid gap-1.5 text-sm font-medium">
-                  Vérification Docker (secondes)
-                  <Input
-                    type="number"
-                    min={3}
-                    max={60}
-                    value={settingsDraft.docker_poll_interval}
-                    onChange={(event) => setSettingsDraft({ ...settingsDraft, docker_poll_interval: Number(event.target.value) })}
-                  />
-                </label>
-              </div>
+              <label className="grid gap-1.5 text-sm font-medium">
+                Vérification Docker (secondes)
+                <Input
+                  type="number"
+                  min={3}
+                  max={60}
+                  value={settingsDraft.docker_poll_interval}
+                  onChange={(event) => setSettingsDraft({ ...settingsDraft, docker_poll_interval: Number(event.target.value) })}
+                />
+              </label>
 
               <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
                 <div>Plateforme : {settingsDraft.platform || systemStatus?.docker.platform || "-"}</div>
@@ -1728,15 +2229,72 @@ export default function Home() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={zipDialogOpen} onOpenChange={setZipDialogOpen}>
-        <DialogContent>
+      <Dialog
+        open={zipDialogOpen}
+        onOpenChange={(open) => {
+          setZipDialogOpen(open);
+          if (!open) resetZipImport();
+        }}
+      >
+        <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Importer un ZIP de modules</DialogTitle>
             <DialogDescription>
-              Le backend détecte les dossiers contenant un manifeste Odoo, extrait le ZIP puis crée les liens symboliques.
+              Analyse l’archive, choisis les modules à copier dans addons-store, puis confirme l’import.
             </DialogDescription>
           </DialogHeader>
-          <Input ref={zipInputRef} type="file" accept=".zip" />
+          <Input
+            ref={zipInputRef}
+            type="file"
+            accept=".zip"
+            disabled={loading || inspectingZip}
+            onChange={(event) => void inspectZipFile(event.target.files?.[0])}
+          />
+          {inspectingZip && (
+            <div className="flex items-center gap-2 rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Analyse sécurisée de l’archive…
+            </div>
+          )}
+          {!inspectingZip && zipModuleCandidates.length > 0 && (
+            <div className="min-w-0 rounded-md border">
+              <label className="flex cursor-pointer items-start gap-3 border-b bg-muted/40 p-3 text-sm">
+                <input
+                  className="mt-0.5 h-4 w-4 shrink-0"
+                  type="checkbox"
+                  checked={selectedZipModules.size === zipModuleCandidates.length}
+                  ref={(input) => {
+                    if (input) {
+                      input.indeterminate = selectedZipModules.size > 0 && selectedZipModules.size < zipModuleCandidates.length;
+                    }
+                  }}
+                  onChange={(event) => toggleAllZipModules(event.target.checked)}
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="block font-medium">Sélectionner tous les modules détectés</span>
+                  <span className="block text-xs text-muted-foreground">
+                    {selectedZipModules.size}/{zipModuleCandidates.length} module(s) sélectionné(s)
+                  </span>
+                </span>
+              </label>
+              <div className="max-h-64 overflow-y-auto p-2">
+                {zipModuleCandidates.map((moduleName) => (
+                  <label
+                    key={moduleName}
+                    className="flex min-w-0 cursor-pointer items-start gap-3 rounded-md p-2 text-sm hover:bg-muted"
+                  >
+                    <input
+                      className="mt-0.5 h-4 w-4 shrink-0"
+                      type="checkbox"
+                      checked={selectedZipModules.has(moduleName)}
+                      onChange={(event) => toggleZipModule(moduleName, event.target.checked)}
+                    />
+                    <span className="min-w-0 break-all font-mono">{moduleName}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
           <label className="flex items-start gap-2 rounded-md border bg-muted/40 p-3 text-sm">
             <input
               className="mt-1"
@@ -1751,9 +2309,9 @@ export default function Home() {
               </span>
             </span>
           </label>
-          <Button onClick={importZip} disabled={loading}>
+          <Button onClick={importZip} disabled={loading || inspectingZip || !selectedZipModules.size}>
             {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileArchive className="h-4 w-4" />}
-            Importer
+            Importer {selectedZipModules.size || ""} module(s)
           </Button>
         </DialogContent>
       </Dialog>
@@ -1790,8 +2348,20 @@ export default function Home() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={updateAllDialogOpen} onOpenChange={setUpdateAllDialogOpen}>
-        <DialogContent>
+      <Dialog
+        open={updateAllDialogOpen}
+        onOpenChange={(open) => {
+          setUpdateAllDialogOpen(open);
+          if (!open) {
+            setAllowMissingFilestore(false);
+            setUpdateFilestoreStatus(null);
+            setUpdatePendingModules([]);
+            setUpdateLocalExcludedModules([]);
+            setMissingModulesToIgnore(new Set());
+          }
+        }}
+      >
+        <DialogContent className="max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>MAJ complète Odoo</DialogTitle>
             <DialogDescription>
@@ -1810,15 +2380,109 @@ export default function Home() {
             <div className="grid gap-1">
               <span className="text-xs font-medium uppercase text-muted-foreground">Commande</span>
               <code className="break-all rounded bg-slate-950 px-2 py-1 text-xs text-emerald-100">
-                odoo -d {selectedDb || "BASE"} -u all --stop-after-init
+                odoo -d {selectedDb || "BASE"} -u {updateLocalExcludedModules.length ? "<modules disponibles non exclus>" : "all"} --stop-after-init
               </code>
             </div>
           </div>
+          {updateLocalExcludedModules.length ? (
+            <div className="grid gap-2 rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-950">
+              <div className="font-medium">Mode avec exceptions locales</div>
+              <p>
+                Le gestionnaire utilisera une liste explicite des modules dont le code est disponible. Les modules suivants ne seront pas remis en
+                attente par un nouvel appel à <code>-u all</code> :
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {updateLocalExcludedModules.map((moduleName) => (
+                  <Badge key={moduleName} variant="outline" className="border-blue-300 bg-white font-mono text-blue-950">
+                    {moduleName}
+                  </Badge>
+                ))}
+              </div>
+              <Button variant="outline" className="border-blue-300 bg-white hover:bg-blue-100" onClick={restoreLocalModuleExclusions} disabled={loading}>
+                <RefreshCcw className="h-4 w-4" />
+                Réactiver toutes les exclusions
+              </Button>
+            </div>
+          ) : null}
+          {updatePendingModules.length ? (
+            <div className="grid gap-3 rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-950">
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-600" />
+                <div className="grid gap-1">
+                  <span className="font-medium">Opérations de modules en attente</span>
+                  <span>
+                    Sélectionne uniquement les modules que tu ne veux pas mettre à jour pour tes tests. Le gestionnaire annulera leur opération sur cette
+                    copie locale sans les désinstaller. Une dépendance nécessaire à un module actif non sélectionné sera automatiquement refusée.
+                  </span>
+                </div>
+              </div>
+              <div className="max-h-48 space-y-2 overflow-y-auto rounded-md border border-red-200 bg-white p-2">
+                {updatePendingModules.map((module) => (
+                  <label key={module.name} className="flex cursor-pointer items-center gap-3 rounded px-2 py-2 hover:bg-red-50">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 shrink-0 accent-red-600"
+                      checked={missingModulesToIgnore.has(module.name)}
+                      onChange={(event) => toggleMissingModuleToIgnore(module.name, event.target.checked)}
+                    />
+                    <span className="min-w-0 flex-1 break-all font-mono text-xs">{module.name}</span>
+                    <Badge className="shrink-0" variant={module.code_available ? "outline" : "destructive"}>
+                      {module.code_available ? module.state : "code absent"}
+                    </Badge>
+                  </label>
+                ))}
+              </div>
+              <Button
+                variant="destructive"
+                disabled={!missingModulesToIgnore.size || loading}
+                onClick={ignoreSelectedMissingModulesLocally}
+              >
+                {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <PackageX className="h-4 w-4" />}
+                Ignorer la sélection sur cette copie locale
+              </Button>
+              <p className="text-xs text-red-800">
+                Relance ensuite cette fenêtre. Les modules non exclus dont le code manque devront être restaurés avant la mise à jour.
+              </p>
+            </div>
+          ) : null}
+          {updateFilestoreStatus && updateFilestoreStatus.missing > 0 ? (
+            <div className="grid gap-3 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                <div className="grid gap-1">
+                  <span className="font-medium">Filestore incomplet</span>
+                  <span>
+                    {updateFilestoreStatus.missing.toLocaleString("fr-FR")} fichier(s) manquent. Leur téléchargement n&apos;est pas nécessaire pour
+                    mettre à jour les modules : aucune référence ne sera supprimée, mais les médias absents resteront indisponibles.
+                  </span>
+                </div>
+              </div>
+              <label className="flex cursor-pointer items-start gap-3 rounded-md border border-amber-300 bg-white p-3 hover:bg-amber-100/60">
+                <input
+                  type="checkbox"
+                  className="mt-0.5 h-4 w-4 shrink-0 accent-blue-600"
+                  checked={allowMissingFilestore}
+                  onChange={(event) => setAllowMissingFilestore(event.target.checked)}
+                />
+                <span className="font-medium">Continuer sans télécharger le filestore</span>
+              </label>
+            </div>
+          ) : null}
           <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
             <Button variant="outline" onClick={() => setUpdateAllDialogOpen(false)}>
               Annuler
             </Button>
-            <Button disabled={!selectedProjectReady || !canUseDb || loading} onClick={confirmUpdateAllOdooModules}>
+            <Button
+              disabled={
+                !selectedProjectReady ||
+                !canUseDb ||
+                loading ||
+                checkingUpdatePrerequisites ||
+                Boolean(updatePendingModules.length) ||
+                Boolean(updateFilestoreStatus?.missing && !allowMissingFilestore)
+              }
+              onClick={confirmUpdateAllOdooModules}
+            >
               {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
               Lancer la MAJ complète
             </Button>
@@ -1898,6 +2562,210 @@ export default function Home() {
         ))}
       </div>
     </main>
+  );
+}
+
+function PrerequisiteRow({
+  ready,
+  icon: Icon,
+  title,
+  detail,
+  action,
+}: {
+  ready: boolean;
+  icon: React.ComponentType<{ className?: string }>;
+  title: string;
+  detail: string;
+  action?: React.ReactNode;
+}) {
+  return (
+    <div className="flex min-w-0 flex-col gap-3 p-3 sm:flex-row sm:items-center">
+      <div className="flex min-w-0 flex-1 items-start gap-3">
+        <div className={cn("mt-0.5 rounded-md p-2", ready ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700")}>
+          <Icon className="h-4 w-4" />
+        </div>
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 font-medium">
+            {title}
+            {ready ? <CheckCircle2 className="h-4 w-4 text-emerald-600" /> : <AlertTriangle className="h-4 w-4 text-amber-600" />}
+          </div>
+          <div className="mt-0.5 break-words text-xs leading-5 text-muted-foreground">{detail}</div>
+        </div>
+      </div>
+      {action && <div className="shrink-0 pl-11 sm:pl-0">{action}</div>}
+    </div>
+  );
+}
+
+function CreateProjectDialog({
+  open,
+  onOpenChange,
+  prerequisites,
+  dockerReady,
+  loading,
+  onRefreshPrerequisites,
+  onSubmit,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  prerequisites: ProjectCreationPrerequisites | null;
+  dockerReady: boolean;
+  loading: boolean;
+  onRefreshPrerequisites: () => Promise<ProjectCreationPrerequisites | null>;
+  onSubmit: (payload: Record<string, unknown>) => Promise<void>;
+}) {
+  const [name, setName] = useState("");
+  const [version, setVersion] = useState("19.0");
+  const [sourceType, setSourceType] = useState<"standard" | "gitlab">("standard");
+  const [repositoryUrl, setRepositoryUrl] = useState("");
+  const [repositoryBranch, setRepositoryBranch] = useState("master");
+  const [startAfterCreation, setStartAfterCreation] = useState(true);
+
+  useEffect(() => {
+    if (!open) return;
+    setStartAfterCreation(dockerReady);
+    if (prerequisites?.supported_versions?.length && !prerequisites.supported_versions.includes(version)) {
+      setVersion(prerequisites.supported_versions.at(-1) || "19.0");
+    }
+  }, [dockerReady, open, prerequisites?.supported_versions, version]);
+
+  const prerequisitesReady = Boolean(
+    prerequisites?.workspace_ready && prerequisites.git_available && prerequisites.ssh_key_present,
+  );
+  const gitlabFieldsReady = sourceType === "standard" || Boolean(repositoryUrl.trim() && repositoryBranch.trim());
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Créer un projet Odoo local</DialogTitle>
+          <DialogDescription>
+            Le gestionnaire prépare Odoo, Enterprise, Docker et les liens d’addons sans ouvrir de terminal.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="grid gap-5">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="grid gap-1.5 text-sm font-medium">
+              Nom du projet
+              <Input
+                value={name}
+                maxLength={63}
+                onChange={(event) => setName(event.target.value)}
+                placeholder="CLIENT_V19"
+                autoFocus
+              />
+              <span className="text-xs font-normal text-muted-foreground">Lettres, chiffres, tirets, points et underscores.</span>
+            </label>
+            <label className="grid gap-1.5 text-sm font-medium">
+              Version Odoo
+              <Select value={version} onValueChange={setVersion}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {(prerequisites?.supported_versions || ["15.0", "16.0", "17.0", "18.0", "19.0"]).map((item) => (
+                    <SelectItem key={item} value={item}>Odoo {item}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </label>
+          </div>
+
+          <fieldset className="grid gap-2">
+            <legend className="mb-1 text-sm font-medium">Source du projet</legend>
+            <div className="grid gap-2 sm:grid-cols-2">
+              <button
+                type="button"
+                className={cn(
+                  "min-h-20 rounded-md border p-3 text-left transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                  sourceType === "standard" && "border-primary bg-primary/5",
+                )}
+                onClick={() => setSourceType("standard")}
+              >
+                <span className="block font-medium">Odoo standard</span>
+                <span className="mt-1 block text-xs leading-5 text-muted-foreground">Odoo Community et Enterprise Sudokeys.</span>
+              </button>
+              <button
+                type="button"
+                className={cn(
+                  "min-h-20 rounded-md border p-3 text-left transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                  sourceType === "gitlab" && "border-primary bg-primary/5",
+                )}
+                onClick={() => setSourceType("gitlab")}
+              >
+                <span className="block font-medium">Dépôt d’addons GitLab</span>
+                <span className="mt-1 block text-xs leading-5 text-muted-foreground">Ajoute le dépôt client au socle standard.</span>
+              </button>
+            </div>
+          </fieldset>
+
+          {sourceType === "gitlab" && (
+            <div className="grid gap-3 border-l-2 border-primary pl-4 sm:grid-cols-[minmax(0,1fr)_10rem]">
+              <label className="grid min-w-0 gap-1.5 text-sm font-medium">
+                URL SSH du dépôt d’addons
+                <Input
+                  value={repositoryUrl}
+                  onChange={(event) => setRepositoryUrl(event.target.value)}
+                  placeholder="ssh://git@gitlab.sudokeys.com:10022/sudokeys/client-addons.git"
+                />
+              </label>
+              <label className="grid gap-1.5 text-sm font-medium">
+                Branche
+                <Input value={repositoryBranch} onChange={(event) => setRepositoryBranch(event.target.value)} placeholder="master" />
+              </label>
+            </div>
+          )}
+
+          <label className={cn("flex items-start gap-3 rounded-md border p-3 text-sm", !dockerReady && "bg-muted/40")}>
+            <input
+              className="mt-0.5 h-4 w-4 shrink-0 accent-blue-600"
+              type="checkbox"
+              checked={startAfterCreation}
+              disabled={!dockerReady}
+              onChange={(event) => setStartAfterCreation(event.target.checked)}
+            />
+            <span>
+              <span className="block font-medium">Démarrer le projet après la création</span>
+              <span className="block text-xs leading-5 text-muted-foreground">
+                {dockerReady
+                  ? "Traefik sera installé automatiquement s’il manque."
+                  : "Docker n’est pas démarré. Le projet pourra être créé puis démarré plus tard."}
+              </span>
+            </span>
+          </label>
+
+          {!prerequisitesReady && (
+            <div className="flex flex-col gap-3 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex min-w-0 items-start gap-2">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                <span>Git, le workspace et une clé SSH publique sont requis pour récupérer les dépôts privés.</span>
+              </div>
+              <Button size="sm" variant="outline" onClick={() => void onRefreshPrerequisites()}>
+                <RefreshCcw className="h-4 w-4" />
+                Revérifier
+              </Button>
+            </div>
+          )}
+
+          <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+            <Button variant="outline" onClick={() => onOpenChange(false)}>Annuler</Button>
+            <Button
+              disabled={loading || !name.trim() || !prerequisitesReady || !gitlabFieldsReady}
+              onClick={() => onSubmit({
+                name: name.trim(),
+                version,
+                source_type: sourceType,
+                repository_url: repositoryUrl.trim(),
+                repository_branch: repositoryBranch.trim(),
+                start_after_creation: startAfterCreation,
+              })}
+            >
+              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <FolderPlus className="h-4 w-4" />}
+              Créer le projet
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

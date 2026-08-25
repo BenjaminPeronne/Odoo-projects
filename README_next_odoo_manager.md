@@ -42,16 +42,53 @@ ODOO_MANAGER_API=http://127.0.0.1:8765 npm run dev -- --hostname 127.0.0.1 --por
 
 Premiere tranche disponible :
 
+- premier lancement guide avec verification du workspace, de Docker, de Traefik, de Git et de la cle SSH publique ;
+- creation native d'un projet Odoo standard ou d'un socle standard complete par un depot d'addons GitLab ;
 - sidebar projets avec recherche et statuts ;
 - onglets Bases, Modules, Logs, Actions ;
 - recherche/filtres modules ;
 - selection multiple de modules ;
 - import ZIP avec copie dans `PROJET/odoo/addons-store/` et lien relatif dans `PROJET/odoo/addons/` ;
+- mise a jour sans filestore complet et annulation locale securisee des operations de modules dont le code est absent ;
 - creation de base ;
 - historique des jobs ;
 - actions principales projet ;
 - notification Docker et tentative de demarrage de Docker Desktop ;
-- parametres workspace, Docker, Brainkeys, Traefik, terminal et WSL 2.
+- parametres workspace, Docker, Traefik et WSL 2.
+
+### Creation d'un projet
+
+Le bouton `Nouveau projet` ouvre un formulaire integre. Le backend Python
+recupere le modele Docker, Odoo Community et Odoo Enterprise depuis GitLab,
+configure le projet puis cree les liens relatifs des modules dans
+`PROJET/odoo/addons/`. Un depot d'addons client peut etre ajoute pendant la
+creation ; il est conserve dans `PROJET/odoo/addons-store/`.
+
+La creation utilise Git en arguments structures, sans terminal interactif et
+sans demander les identifiants GitLab. L'utilisateur doit seulement disposer
+d'une cle SSH publique deja enregistree sur GitLab. Le projet est prepare dans
+un dossier temporaire du workspace puis deplace a son emplacement final en une
+operation, afin qu'un clone interrompu ne laisse pas de projet partiel.
+
+Le parcours `brainkeys riplika` reste disponible uniquement dans le client CLI
+historique pour les environnements Rika non couverts par l'interface graphique.
+
+### Modules absents sur une copie locale
+
+Avant une mise a jour complete, le gestionnaire detecte tous les modules en
+etat `to install`, `to upgrade` ou `to remove`, que leur code soit disponible
+ou absent. Il est possible de selectionner les modules inutiles pour la recette
+locale et d'annuler uniquement leur operation en attente. Cette action ne
+desinstalle pas le module et ne supprime aucune donnee. Les exclusions peuvent
+etre reactivees depuis la meme fenetre.
+
+Le backend refuse l'exception lorsqu'un module actif dont le code est present
+depend du module selectionne. Les exceptions acceptees sont conservees dans la
+configuration locale du gestionnaire et apparaissent ensuite comme des
+avertissements dans le diagnostic. Tant qu'une exception locale existe, la MAJ
+complete utilise une liste explicite des modules installes dont le code est
+disponible au lieu de `-u all`, afin de ne pas remettre les modules absents en
+etat `to upgrade`.
 
 ## Application de bureau Tauri
 
@@ -107,23 +144,38 @@ Un script lance toute la procedure depuis le poste local :
 sh scripts/build_all_platforms.sh
 ```
 
-Il verifie le backend, les tests et le build Next.js, cree un tag `app-v*`, le
-pousse sur GitHub et laisse GitHub Actions compiler macOS, Linux et Windows. Si
+Il verifie le backend, les tests et le build Next.js, calcule automatiquement
+le prochain numero `app-v<version>-buildN`, pousse ce tag sur GitHub et laisse
+GitHub Actions compiler macOS, Linux et Windows. Par exemple, apres
+`app-v0.1.1-build19`, la commande suivante produit `app-v0.1.1-build20`. Si
 GitHub CLI est installe et authentifie (`gh auth login`), le script attend la
 fin du workflow puis telecharge les artefacts dans `dist/all-platforms/<tag>/`.
 
 Exemples utiles :
 
 ```sh
-sh scripts/build_all_platforms.sh --tag app-v0.1.1
+sh scripts/build_all_platforms.sh
+sh scripts/build_all_platforms.sh --tag app-v0.1.2
 sh scripts/build_all_platforms.sh --local
 sh scripts/build_all_platforms.sh --no-wait --no-download
 ```
 
-Pour une version stable, utilise un tag sans suffixe, par exemple
-`app-v0.1.1`. Les suffixes comme `app-v0.1.1-build2` restent possibles pour des
-builds intermediaires, mais ils ne doivent pas etre utilises comme version de
-diffusion stable.
+`--tag` reste disponible pour publier explicitement une nouvelle version
+fonctionnelle. Le numero automatique distingue les compilations successives
+sans modifier la version de l'application dans `package.json`, `Cargo.toml` et
+`tauri.conf.json`.
+
+Pour publier une vraie evolution fonctionnelle, synchronise d'abord sa version :
+
+```sh
+python3 scripts/set_app_version.py 0.1.2
+git add -A
+git commit -m "Release Odoo Manager 0.1.2"
+git push origin main
+sh scripts/build_all_platforms.sh
+```
+
+La derniere commande repart automatiquement sur `app-v0.1.2-build1`.
 
 Chaque runner reconstruit le sidecar Python de sa plateforme avant de produire
 l'installateur. Cette etape est necessaire : un Mac ne produit pas de maniere

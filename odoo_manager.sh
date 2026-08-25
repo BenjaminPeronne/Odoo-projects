@@ -294,28 +294,94 @@ start_traefik() {
   )
 }
 
+stale_compose_networks() {
+  local path="$1"
+  local container_id
+  local network_rows
+  local network_name
+  local network_id
+  local network_error
+
+  (
+    cd "$path"
+    docker compose ps -aq
+  ) | while IFS= read -r container_id; do
+    [ -n "$container_id" ] || continue
+    network_rows="$(
+      docker inspect -f '{{range $name, $network := .NetworkSettings.Networks}}{{$name}}|{{$network.NetworkID}};{{end}}' "$container_id" 2>/dev/null || true
+    )"
+    printf '%s' "$network_rows" | tr ';' '\n' | while IFS='|' read -r network_name network_id; do
+      [ -n "$network_id" ] || continue
+      if network_error="$(docker network inspect "$network_id" 2>&1)"; then
+        continue
+      fi
+      case "$network_error" in
+        *"not found"*|*"No such network"*)
+          printf '%s|%s|%s\n' "$container_id" "$network_name" "$network_id"
+          ;;
+      esac
+    done
+  done
+}
+
 compose_up_project() {
   local project="$1"
   local path="$2"
   local code
+  local stale_networks
 
-  set +e
-  (
-    cd "$path"
-    if [ "$(container_status "odoo-$project")" != "absent" ] || [ "$(container_status "postgresql-$project")" != "absent" ]; then
-      echo "Conteneurs existants detectes, demarrage sans recreation..."
-      docker compose up -d --no-recreate
-    else
-      docker compose up --pull always -d
+  stale_networks="$(stale_compose_networks "$path")"
+  if [ -n "$stale_networks" ]; then
+    echo "Anomalie Docker detectee avant demarrage."
+    echo "Ancien reseau Docker supprime detecte dans les conteneurs."
+    printf '%s\n' "$stale_networks" | while IFS='|' read -r container_id network_name network_id; do
+      echo " - $(printf '%s' "$container_id" | cut -c1-12): $network_name ($(printf '%s' "$network_id" | cut -c1-12))"
+    done
+    echo "Recreation controlee des conteneurs; les volumes et dossiers de donnees sont conserves."
+    set +e
+    (
+      cd "$path"
+      docker compose up -d --force-recreate
+    )
+    code=$?
+    set -e
+  else
+    set +e
+    (
+      cd "$path"
+      if [ "$(container_status "odoo-$project")" != "absent" ] || [ "$(container_status "postgresql-$project")" != "absent" ]; then
+        echo "Conteneurs existants detectes, demarrage sans recreation..."
+        docker compose up -d --no-recreate
+      else
+        docker compose up --pull always -d
+      fi
+    )
+    code=$?
+    set -e
+  fi
+
+  if [ "$code" -ne 0 ]; then
+    stale_networks="$(stale_compose_networks "$path")"
+    if [ -n "$stale_networks" ]; then
+      echo ""
+      echo "Ancien réseau Docker supprimé détecté dans les conteneurs."
+      printf '%s\n' "$stale_networks" | while IFS='|' read -r container_id network_name network_id; do
+        echo " - $(printf '%s' "$container_id" | cut -c1-12): $network_name ($(printf '%s' "$network_id" | cut -c1-12))"
+      done
+      echo "Recréation contrôlée des conteneurs; les dossiers de données sont conservés."
+
+      set +e
+      (
+        cd "$path"
+        docker compose up -d --force-recreate
+      )
+      code=$?
+      set -e
+    elif is_running "odoo-$project"; then
+      echo "Docker Compose a retourne une erreur, mais odoo-$project est deja running."
+      echo "Le gestionnaire continue avec le conteneur existant."
+      return 0
     fi
-  )
-  code=$?
-  set -e
-
-  if [ "$code" -ne 0 ] && is_running "odoo-$project"; then
-    echo "Docker Compose a retourne une erreur, mais odoo-$project est deja running."
-    echo "Le gestionnaire continue avec le conteneur existant."
-    return 0
   fi
 
   return "$code"
@@ -671,6 +737,7 @@ PY
 update_all_odoo_modules() {
   local project="$1"
   local db_name="$2"
+  local allow_missing_filestore="${3:-false}"
 
   require_docker
   if [ -z "$db_name" ] || [ "$db_name" = "postgres" ]; then
@@ -680,6 +747,10 @@ update_all_odoo_modules() {
   echo ""
   echo "Mise a jour de tous les modules Odoo"
   echo "Equivalent: odoo -d $db_name -u all --stop-after-init"
+  if [ "$allow_missing_filestore" = "true" ]; then
+    echo "Mode sans filestore complet: actif"
+    echo "Les references ir_attachment sont conservees. Les medias absents resteront indisponibles."
+  fi
   run_odoo_module_command "$project" "$db_name" "all" "-u"
 }
 
@@ -1125,6 +1196,7 @@ usage() {
   echo "  ./odoo_manager.sh --uninstall-module PROJET BASE MODULE"
   echo "  ./odoo_manager.sh --update-local-modules PROJET BASE"
   echo "  ./odoo_manager.sh --update-all-modules PROJET BASE"
+  echo "  ./odoo_manager.sh --update-all-modules-without-filestore PROJET BASE"
   echo "  ./odoo_manager.sh --update PROJET"
   echo "  ./odoo_manager.sh --update-all"
   echo "  ./odoo_manager.sh --create-project"
@@ -1182,6 +1254,11 @@ main() {
       [ -n "${2:-}" ] || die "Nom de projet manquant."
       [ -n "${3:-}" ] || die "Nom de base manquant."
       update_all_odoo_modules "$2" "$3"
+      ;;
+    --update-all-modules-without-filestore)
+      [ -n "${2:-}" ] || die "Nom de projet manquant."
+      [ -n "${3:-}" ] || die "Nom de base manquant."
+      update_all_odoo_modules "$2" "$3" true
       ;;
     --update-local-modules)
       [ -n "${2:-}" ] || die "Nom de projet manquant."
