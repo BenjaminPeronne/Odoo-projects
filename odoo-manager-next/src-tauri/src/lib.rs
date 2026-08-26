@@ -106,6 +106,7 @@ fn run_command(command: &str, args: &[&str]) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![open_external_url, open_docker_desktop])
         .setup(|app| {

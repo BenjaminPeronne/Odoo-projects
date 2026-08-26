@@ -11,6 +11,7 @@ import {
   Database,
   ExternalLink,
   FileArchive,
+  FolderOpen,
   FolderPlus,
   GitBranch,
   KeyRound,
@@ -282,6 +283,19 @@ async function openDockerDesktopNative() {
   await invokeDesktop<void>("open_docker_desktop");
 }
 
+async function pickDirectory(defaultPath?: string) {
+  if (!isTauriRuntime()) return null;
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const selected = await open({
+    directory: true,
+    multiple: false,
+    canCreateDirectories: true,
+    defaultPath: defaultPath || undefined,
+    title: "Choisir le dossier des projets Odoo",
+  });
+  return typeof selected === "string" ? selected : null;
+}
+
 function offlineDockerGuide(): InstallGuide {
   const platform = typeof navigator === "undefined" ? "" : navigator.userAgent.toLowerCase();
   if (platform.includes("windows")) {
@@ -425,6 +439,7 @@ export default function Home() {
   const [creationPrerequisites, setCreationPrerequisites] = useState<ProjectCreationPrerequisites | null>(null);
   const [loadingCreationPrerequisites, setLoadingCreationPrerequisites] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
+  const [selectingWorkspace, setSelectingWorkspace] = useState(false);
   const [projectsFilter, setProjectsFilter] = useState("");
   const [selectedProjectName, setSelectedProjectName] = useState("");
   const [selectedDb, setSelectedDb] = useState("");
@@ -912,6 +927,21 @@ export default function Home() {
       pushToast("error", err instanceof Error ? err.message : "Enregistrement impossible.");
     } finally {
       setSavingSettings(false);
+    }
+  }
+
+  async function selectWorkspaceDirectory() {
+    if (!settingsDraft || !desktopRuntime) return;
+    setSelectingWorkspace(true);
+    try {
+      const selected = await pickDirectory(settingsDraft.workspace);
+      if (selected) {
+        setSettingsDraft({ ...settingsDraft, workspace: selected });
+      }
+    } catch (err) {
+      pushToast("error", err instanceof Error ? err.message : "Impossible d’ouvrir le sélecteur de dossier.");
+    } finally {
+      setSelectingWorkspace(false);
     }
   }
 
@@ -2141,17 +2171,32 @@ export default function Home() {
           </DialogHeader>
           {settingsDraft ? (
             <div className="grid gap-4">
-              <label className="grid min-w-0 gap-1.5 text-sm font-medium">
-                Dossier des projets
-                <Input
-                  value={settingsDraft.workspace}
-                  onChange={(event) => setSettingsDraft({ ...settingsDraft, workspace: event.target.value })}
-                  placeholder="/chemin/vers/Odoo-projects"
-                />
+              <div className="grid min-w-0 gap-1.5 text-sm font-medium">
+                <label htmlFor="projects-workspace">Dossier des projets</label>
+                <div className="flex min-w-0 flex-col gap-2 sm:flex-row">
+                  <Input
+                    id="projects-workspace"
+                    className="min-w-0 flex-1"
+                    value={settingsDraft.workspace}
+                    onChange={(event) => setSettingsDraft({ ...settingsDraft, workspace: event.target.value })}
+                    placeholder="/chemin/vers/Odoo-projects"
+                  />
+                  <Button
+                    className="shrink-0"
+                    type="button"
+                    variant="outline"
+                    disabled={!desktopRuntime || selectingWorkspace}
+                    title={desktopRuntime ? "Choisir un dossier" : "Disponible dans l’application installée"}
+                    onClick={selectWorkspaceDirectory}
+                  >
+                    {selectingWorkspace ? <Loader2 className="h-4 w-4 animate-spin" /> : <FolderOpen className="h-4 w-4" />}
+                    Choisir
+                  </Button>
+                </div>
                 <span className="break-all text-xs font-normal text-muted-foreground">
-                  Le dossier est créé s’il n’existe pas encore.
+                  Le dossier est créé s’il n’existe pas encore. Dans l’application installée, « Choisir » ouvre le sélecteur du système.
                 </span>
-              </label>
+              </div>
 
               <div className="grid gap-4 md:grid-cols-2">
                 <label className="grid gap-1.5 text-sm font-medium">
@@ -2645,29 +2690,31 @@ function CreateProjectDialog({
         </DialogHeader>
 
         <div className="grid gap-5">
-          <div className="grid gap-3 sm:grid-cols-2">
-            <label className="grid gap-1.5 text-sm font-medium">
-              Nom du projet
+          <div className="grid items-start gap-3 sm:grid-cols-2">
+            <div className="grid content-start gap-1.5 text-sm font-medium">
+              <label htmlFor="new-project-name">Nom du projet</label>
               <Input
+                id="new-project-name"
                 value={name}
                 maxLength={63}
                 onChange={(event) => setName(event.target.value)}
                 placeholder="CLIENT_V19"
                 autoFocus
               />
-              <span className="text-xs font-normal text-muted-foreground">Lettres, chiffres, tirets, points et underscores.</span>
-            </label>
-            <label className="grid gap-1.5 text-sm font-medium">
-              Version Odoo
+              <span className="min-h-4 text-xs font-normal text-muted-foreground">Lettres, chiffres, tirets, points et underscores.</span>
+            </div>
+            <div className="grid content-start gap-1.5 text-sm font-medium">
+              <label htmlFor="new-project-version">Version Odoo</label>
               <Select value={version} onValueChange={setVersion}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectTrigger id="new-project-version"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {(prerequisites?.supported_versions || ["15.0", "16.0", "17.0", "18.0", "19.0"]).map((item) => (
                     <SelectItem key={item} value={item}>Odoo {item}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
-            </label>
+              <span aria-hidden="true" className="min-h-4 text-xs font-normal">&nbsp;</span>
+            </div>
           </div>
 
           <fieldset className="grid gap-2">
