@@ -155,11 +155,25 @@ fn request_backend_shutdown() {
     }
 }
 
-fn backend_is_reachable() -> bool {
+fn backend_health_is_ready() -> bool {
     let Ok(address) = "127.0.0.1:8765".parse::<SocketAddr>() else {
         return false;
     };
-    TcpStream::connect_timeout(&address, Duration::from_millis(300)).is_ok()
+    let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(500)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    let request = b"GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:8765\r\nConnection: close\r\n\r\n";
+    if stream.write_all(request).is_err() {
+        return false;
+    }
+    let mut response = String::new();
+    if stream.read_to_string(&mut response).is_err() {
+        return false;
+    }
+    (response.starts_with("HTTP/1.0 200") || response.starts_with("HTTP/1.1 200"))
+        && response.contains("\"ok\": true")
 }
 
 fn terminate_child(child: &mut Child) {
@@ -275,10 +289,10 @@ pub fn run() {
             let probe_log_path = log_path.clone();
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_secs(8));
-                let status = if backend_is_reachable() {
-                    "API locale joignable après le lancement."
+                let status = if backend_health_is_ready() {
+                    "API /api/health opérationnelle après le lancement."
                 } else {
-                    "API locale toujours injoignable 8 secondes après le lancement du sidecar."
+                    "API /api/health toujours indisponible 8 secondes après le lancement du sidecar."
                 };
                 append_backend_log(&probe_log_path, status);
             });

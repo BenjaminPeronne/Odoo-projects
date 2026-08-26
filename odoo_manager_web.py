@@ -176,6 +176,7 @@ def add_cors_headers(handler):
     allowed = {
         "http://127.0.0.1:3000",
         "http://localhost:3000",
+        "http://tauri.localhost",
         "tauri://localhost",
         "https://tauri.localhost",
     }

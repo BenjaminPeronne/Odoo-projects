@@ -15,11 +15,30 @@ import urllib.request
 from pathlib import Path
 
 
-def request(url: str, *, method: str = "GET", timeout: float = 2.0) -> bytes:
-    return urllib.request.urlopen(  # noqa: S310 - loopback smoke test only
-        urllib.request.Request(url, method=method),
+TAURI_WINDOWS_ORIGIN = "http://tauri.localhost"
+
+
+def request(
+    url: str,
+    *,
+    method: str = "GET",
+    timeout: float = 2.0,
+    origin: str | None = None,
+) -> tuple[bytes, dict[str, str]]:
+    headers = {"Origin": origin} if origin else {}
+    if method == "OPTIONS":
+        headers.update(
+            {
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "content-type",
+            }
+        )
+    with urllib.request.urlopen(  # noqa: S310 - loopback smoke test only
+        urllib.request.Request(url, method=method, headers=headers),
         timeout=timeout,
-    ).read()
+    ) as response:
+        response_headers = {key.lower(): value for key, value in response.headers.items()}
+        return response.read(), response_headers
 
 
 def backend_log() -> Path:
@@ -57,9 +76,37 @@ def wait_for_health(process: subprocess.Popen[bytes], timeout: float) -> None:
             failure = f"L'application installée s'est arrêtée (code {exit_code})."
             break
         try:
-            payload = json.loads(request("http://127.0.0.1:8765/api/health"))
+            body, _headers = request("http://127.0.0.1:8765/api/health")
+            payload = json.loads(body)
             if payload.get("ok") is True:
-                return
+                _preflight_body, preflight_headers = request(
+                    "http://127.0.0.1:8765/api/bootstrap",
+                    method="OPTIONS",
+                    origin=TAURI_WINDOWS_ORIGIN,
+                )
+                bootstrap_body, bootstrap_headers = request(
+                    "http://127.0.0.1:8765/api/bootstrap",
+                    timeout=12.0,
+                    origin=TAURI_WINDOWS_ORIGIN,
+                )
+                bootstrap = json.loads(bootstrap_body)
+                cors_origin = bootstrap_headers.get("access-control-allow-origin", "")
+                preflight_origin = preflight_headers.get("access-control-allow-origin", "")
+                allowed_headers = preflight_headers.get("access-control-allow-headers", "").lower()
+                if (
+                    cors_origin != TAURI_WINDOWS_ORIGIN
+                    or preflight_origin != TAURI_WINDOWS_ORIGIN
+                    or "content-type" not in allowed_headers
+                ):
+                    failure = (
+                        "L'API ne permet pas les appels de la WebView Windows "
+                        "(prévalidation CORS incomplète)."
+                    )
+                    break
+                if {"overview", "system_status", "settings", "jobs"} <= bootstrap.keys():
+                    return
+                failure = f"Réponse bootstrap incomplète: {sorted(bootstrap.keys())}"
+                break
         except (OSError, urllib.error.URLError, json.JSONDecodeError):
             time.sleep(0.25)
     raise RuntimeError(failure)

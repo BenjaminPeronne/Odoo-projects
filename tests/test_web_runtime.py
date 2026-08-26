@@ -2,9 +2,29 @@ import time
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import odoo_manager_web as web
+
+
+class CorsTests(unittest.TestCase):
+    def test_allows_windows_tauri_webview_origin(self):
+        handler = Mock()
+        handler.headers = {"Origin": "http://tauri.localhost"}
+
+        web.add_cors_headers(handler)
+
+        handler.send_header.assert_any_call(
+            "Access-Control-Allow-Origin", "http://tauri.localhost"
+        )
+
+    def test_rejects_unknown_origin(self):
+        handler = Mock()
+        handler.headers = {"Origin": "https://example.invalid"}
+
+        web.add_cors_headers(handler)
+
+        handler.send_header.assert_not_called()
 
 
 class ServerRuntimeTests(unittest.TestCase):
