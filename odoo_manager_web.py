@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.parse
 import urllib.request
 import urllib.error
@@ -253,11 +254,23 @@ def parse_multipart_form(content_type, body):
 
 
 def run_capture(args, cwd=None, timeout=12):
-    cwd = cwd or WORKSPACE
+    requested_cwd = Path(cwd) if cwd is not None else None
+    if requested_cwd is not None and not requested_cwd.is_dir():
+        return 2, f"Dossier de travail introuvable: {requested_cwd}"
+    command_cwd = requested_cwd
+    if command_cwd is None:
+        command_cwd = next(
+            (
+                candidate
+                for candidate in (WORKSPACE, WORKSPACE.parent, Path.home(), ROOT)
+                if candidate.is_dir()
+            ),
+            Path.cwd(),
+        )
     try:
         result = subprocess.run(
             args,
-            cwd=str(cwd),
+            cwd=str(command_cwd),
             env=command_env(),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -265,7 +278,7 @@ def run_capture(args, cwd=None, timeout=12):
             timeout=timeout,
         )
         return result.returncode, result.stdout.strip()
-    except FileNotFoundError as exc:
+    except OSError as exc:
         return 127, str(exc)
     except subprocess.TimeoutExpired as exc:
         return 124, (exc.stdout or "").strip()
@@ -415,6 +428,8 @@ def container_status(name):
 
 def container_statuses(names):
     names = tuple(names)
+    if not names:
+        return {}
     code, output = run_capture(
         docker_command(SETTINGS, "ps", "-a", "--format", "{{.Names}}|{{.State}}"),
         timeout=8,
@@ -432,9 +447,13 @@ def container_statuses(names):
 
 def project_dirs():
     projects = []
-    if not WORKSPACE.exists():
+    if not WORKSPACE.is_dir():
         return projects
-    for item in WORKSPACE.iterdir():
+    try:
+        items = tuple(WORKSPACE.iterdir())
+    except OSError:
+        return projects
+    for item in items:
         if not item.is_dir():
             continue
         if any((item / name).exists() for name in ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml")):
@@ -2319,6 +2338,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as exc:
             return json_response(self, {"error": str(exc)}, status=400)
         except Exception as exc:
+            traceback.print_exc()
             return json_response(self, {"error": str(exc)}, status=500)
 
     def do_POST(self):

@@ -119,6 +119,11 @@ class JobResourceTests(unittest.TestCase):
 
 class ContainerStatusBatchTests(unittest.TestCase):
     @patch("odoo_manager_web.run_capture")
+    def test_skips_docker_probe_when_there_are_no_projects(self, run_capture):
+        self.assertEqual(web.container_statuses(()), {})
+        run_capture.assert_not_called()
+
+    @patch("odoo_manager_web.run_capture")
     def test_reads_all_container_states_with_one_docker_call(self, run_capture):
         run_capture.return_value = (0, "odoo-DEMO|running\npostgresql-DEMO|exited\n")
 
@@ -131,7 +136,64 @@ class ContainerStatusBatchTests(unittest.TestCase):
         self.assertEqual(run_capture.call_count, 1)
 
 
+class CommandWorkingDirectoryTests(unittest.TestCase):
+    @patch("odoo_manager_web.subprocess.run")
+    def test_missing_default_workspace_uses_existing_parent(self, run):
+        run.return_value = Mock(returncode=0, stdout="ok")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            previous_workspace = web.WORKSPACE
+            try:
+                web.WORKSPACE = root / "not-created-yet"
+                code, output = web.run_capture(["docker", "ps"])
+            finally:
+                web.WORKSPACE = previous_workspace
+
+        self.assertEqual((code, output), (0, "ok"))
+        self.assertEqual(Path(run.call_args.kwargs["cwd"]), root)
+
+    @patch("odoo_manager_web.subprocess.run")
+    def test_missing_explicit_working_directory_is_reported_without_execution(self, run):
+        with tempfile.TemporaryDirectory() as temporary:
+            missing = Path(temporary) / "missing-project"
+            code, output = web.run_capture(["docker", "compose", "ps"], cwd=missing)
+
+        self.assertEqual(code, 2)
+        self.assertIn("Dossier de travail introuvable", output)
+        run.assert_not_called()
+
+
 class BootstrapSnapshotTests(unittest.TestCase):
+    @patch("odoo_manager_web.jobs_snapshot", return_value=[])
+    @patch("odoo_manager_web.container_status", return_value="absent")
+    @patch("odoo_manager_web.docker_status")
+    def test_first_start_succeeds_before_default_workspace_exists(
+        self,
+        docker_status,
+        _container_status,
+        _jobs_snapshot,
+    ):
+        docker_status.return_value = {
+            "state": "ready",
+            "installed": True,
+            "running": True,
+            "message": "Docker est opérationnel.",
+            "platform": "windows",
+            "execution_mode": "native",
+            "can_start": False,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            previous_workspace = web.WORKSPACE
+            try:
+                web.WORKSPACE = Path(temporary) / "Odoo-projects"
+                payload = web.bootstrap_snapshot()
+            finally:
+                web.WORKSPACE = previous_workspace
+
+        self.assertEqual(payload["overview"]["projects"], [])
+        self.assertFalse(payload["system_status"]["workspace_exists"])
+        self.assertFalse(payload["settings"]["workspace_exists"])
+
     @patch("odoo_manager_web.jobs_snapshot", return_value=[])
     @patch("odoo_manager_web.project_dirs", return_value=[])
     @patch("odoo_manager_web.traefik_status")

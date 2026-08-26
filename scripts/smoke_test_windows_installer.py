@@ -135,9 +135,9 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="odoo-manager-installed-") as temporary:
         root = Path(temporary)
         install_dir = root / "app"
+        # Reproduce a real first launch: the configured workspace may not exist yet.
         workspace = root / "workspace"
         config_dir = root / "config"
-        workspace.mkdir()
         subprocess.run([str(installer), "/S", f"/D={install_dir}"], check=True, timeout=90)
 
         application = next(

@@ -105,7 +105,7 @@ class ProjectService:
             if result.returncode == 0:
                 return result.returncode, stdout or stderr
             return result.returncode, "\n".join(part for part in (stdout, stderr) if part)
-        except FileNotFoundError as exc:
+        except OSError as exc:
             return 127, str(exc)
         except subprocess.TimeoutExpired as exc:
             return 124, (exc.stdout or "").strip()
