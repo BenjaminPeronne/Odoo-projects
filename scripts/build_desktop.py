@@ -110,6 +110,18 @@ def main() -> None:
         if cargo_target_dir
         else (FRONTEND / "src-tauri" / "target" / "release" / "bundle")
     )
+    if platform.system() == "Windows":
+        installers = sorted((bundle_dir / "nsis").glob("*.exe"))
+        if not installers:
+            raise SystemExit(f"Installateur NSIS introuvable dans {bundle_dir / 'nsis'}")
+        run(
+            [
+                sys.executable,
+                str(ROOT / "scripts" / "smoke_test_windows_installer.py"),
+                "--installer",
+                str(installers[-1]),
+            ]
+        )
     print(f"Paquets créés dans: {bundle_dir}")
 
 

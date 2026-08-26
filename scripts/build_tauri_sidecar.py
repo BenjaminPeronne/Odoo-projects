@@ -11,6 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 TAURI_ROOT = ROOT / "odoo-manager-next" / "src-tauri"
 BINARIES = TAURI_ROOT / "binaries"
+WINDOWS_RUNTIME_NAME = "odoo-manager-backend-runtime"
 
 
 def target_triple():
@@ -63,13 +64,19 @@ def main():
     build_root.mkdir(parents=True, exist_ok=True)
     BINARIES.mkdir(parents=True, exist_ok=True)
 
-    extension = ".exe" if os.name == "nt" else ""
+    is_windows = os.name == "nt"
+    extension = ".exe" if is_windows else ""
     base_name = f"odoo-manager-backend-{target_triple()}"
     output = BINARIES / f"{base_name}{extension}"
+    windows_runtime = BINARIES / WINDOWS_RUNTIME_NAME
+    if output.exists():
+        output.unlink()
+    if windows_runtime.exists():
+        shutil.rmtree(windows_runtime)
     data_separator = os.pathsep
     pyinstaller_args = [
         str(ROOT / "odoo_manager_web.py"),
-        "--onefile",
+        "--onedir" if is_windows else "--onefile",
         "--noconfirm",
         "--clean",
         "--name",
@@ -85,10 +92,19 @@ def main():
         "--add-data",
         f"{ROOT / 'odoo_manager_core'}{data_separator}odoo_manager_core",
     ]
-    if os.name == "nt":
-        pyinstaller_args.append("--noconsole")
+    if is_windows:
+        pyinstaller_args.extend(["--noconsole", "--contents-directory", WINDOWS_RUNTIME_NAME])
 
     PyInstaller.__main__.run(pyinstaller_args)
+    if is_windows:
+        onedir_output = BINARIES / base_name
+        built_executable = onedir_output / f"{base_name}.exe"
+        built_runtime = onedir_output / WINDOWS_RUNTIME_NAME
+        if not built_executable.is_file() or not built_runtime.is_dir():
+            raise SystemExit(f"Sortie PyInstaller Windows incomplète: {onedir_output}")
+        shutil.copy2(built_executable, output)
+        shutil.copytree(built_runtime, windows_runtime)
+        shutil.rmtree(onedir_output)
     print(f"Sidecar créé: {output}")
 
 

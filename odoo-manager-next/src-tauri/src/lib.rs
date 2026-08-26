@@ -2,17 +2,13 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::Manager;
-use tauri_plugin_shell::{
-    process::{CommandChild, CommandEvent},
-    ShellExt,
-};
 
 struct BackendProcess {
-    child: Mutex<Option<CommandChild>>,
+    child: Mutex<Option<Child>>,
     log_path: PathBuf,
 }
 
@@ -39,6 +35,79 @@ fn prepare_backend_log(log_path: &Path) -> std::io::Result<()> {
 fn append_backend_log(log_path: &Path, message: &str) {
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
         let _ = writeln!(file, "{message}");
+    }
+}
+
+fn backend_executable_path() -> Result<PathBuf, String> {
+    let current = std::env::current_exe()
+        .map_err(|error| format!("Chemin de l'application introuvable: {error}"))?;
+    let directory = current
+        .parent()
+        .ok_or_else(|| "Dossier de l'application introuvable.".to_string())?;
+    let executable = if cfg!(windows) {
+        "odoo-manager-backend.exe"
+    } else {
+        "odoo-manager-backend"
+    };
+    Ok(directory.join(executable))
+}
+
+fn launch_backend(log_dir: &Path, log_path: &Path) -> Option<Child> {
+    let executable = match backend_executable_path() {
+        Ok(executable) => executable,
+        Err(error) => {
+            append_backend_log(log_path, &error);
+            return None;
+        }
+    };
+    append_backend_log(
+        log_path,
+        &format!("Sidecar attendu: {}", executable.display()),
+    );
+    if !executable.is_file() {
+        append_backend_log(log_path, "Le fichier du sidecar est absent.");
+        return None;
+    }
+
+    let stdout = match OpenOptions::new().create(true).append(true).open(log_path) {
+        Ok(file) => file,
+        Err(error) => {
+            append_backend_log(log_path, &format!("Journal stdout indisponible: {error}"));
+            return None;
+        }
+    };
+    let stderr = match stdout.try_clone() {
+        Ok(file) => file,
+        Err(error) => {
+            append_backend_log(log_path, &format!("Journal stderr indisponible: {error}"));
+            return None;
+        }
+    };
+
+    let mut command = Command::new(&executable);
+    command
+        .env("ODOO_MANAGER_LOG_DIR", log_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+
+    match command.spawn() {
+        Ok(child) => {
+            append_backend_log(log_path, &format!("Sidecar démarré, PID {}.", child.id()));
+            Some(child)
+        }
+        Err(error) => {
+            append_backend_log(
+                log_path,
+                &format!("Impossible de démarrer le sidecar: {error}"),
+            );
+            None
+        }
     }
 }
 
@@ -76,11 +145,18 @@ fn request_backend_shutdown() {
     }
 }
 
+fn backend_is_reachable() -> bool {
+    let Ok(address) = "127.0.0.1:8765".parse::<SocketAddr>() else {
+        return false;
+    };
+    TcpStream::connect_timeout(&address, Duration::from_millis(300)).is_ok()
+}
+
 fn stop_backend(app: &tauri::AppHandle) {
     request_backend_shutdown();
     let state = app.state::<BackendProcess>();
     if let Ok(mut process) = state.child.lock() {
-        if let Some(child) = process.take() {
+        if let Some(mut child) = process.take() {
             let _ = child.kill();
         }
     };
@@ -166,7 +242,6 @@ fn run_command(command: &str, args: &[&str]) -> Result<(), String> {
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![backend_diagnostics, open_external_url, open_docker_desktop])
         .setup(|app| {
             let log_dir = app.path().app_log_dir()?;
@@ -174,48 +249,17 @@ pub fn run() {
             let log_path = log_dir.join("backend.log");
             let _ = prepare_backend_log(&log_path);
 
-            let child = match app.shell().sidecar("odoo-manager-backend") {
-                Ok(command) => match command.env("ODOO_MANAGER_LOG_DIR", &log_dir).spawn() {
-                    Ok((mut events, child)) => {
-                        let event_log_path = log_path.clone();
-                        tauri::async_runtime::spawn(async move {
-                            let mut log_file = OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open(&event_log_path)
-                                .ok();
-                            while let Some(event) = events.recv().await {
-                                let message = match event {
-                                    CommandEvent::Stdout(bytes) => {
-                                        String::from_utf8_lossy(&bytes).into_owned()
-                                    }
-                                    CommandEvent::Stderr(bytes) => {
-                                        format!("[stderr] {}", String::from_utf8_lossy(&bytes))
-                                    }
-                                    CommandEvent::Error(error) => format!("[sidecar error] {error}"),
-                                    CommandEvent::Terminated(payload) => format!("[sidecar terminé] {payload:?}"),
-                                    _ => continue,
-                                };
-                                if let Some(file) = log_file.as_mut() {
-                                    let _ = writeln!(file, "{message}");
-                                }
-                            }
-                        });
-                        Some(child)
-                    }
-                    Err(error) => {
-                        append_backend_log(
-                            &log_path,
-                            &format!("Impossible de démarrer le sidecar: {error}"),
-                        );
-                        None
-                    }
-                },
-                Err(error) => {
-                    append_backend_log(&log_path, &format!("Sidecar introuvable: {error}"));
-                    None
-                }
-            };
+            let child = launch_backend(&log_dir, &log_path);
+            let probe_log_path = log_path.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(8));
+                let status = if backend_is_reachable() {
+                    "API locale joignable après le lancement."
+                } else {
+                    "API locale toujours injoignable 8 secondes après le lancement du sidecar."
+                };
+                append_backend_log(&probe_log_path, status);
+            });
             app.manage(BackendProcess {
                 child: Mutex::new(child),
                 log_path,

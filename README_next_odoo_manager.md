@@ -179,10 +179,13 @@ La derniere commande repart automatiquement sur `app-v0.1.2-build1`.
 
 Chaque runner reconstruit le sidecar Python de sa plateforme puis le demarre sur
 un port local temporaire et controle `/api/health` avant de produire
-l'installateur. Un backend Windows qui quitte au demarrage fait donc echouer le
-build au lieu de produire un installateur inutilisable. Cette etape est
-necessaire : un Mac ne produit pas de maniere fiable un installateur Windows ou
-Linux complet.
+l'installateur. Sur Windows, le pipeline installe ensuite silencieusement le
+paquet NSIS, lance l'application installee et controle une seconde fois cette
+API. Un backend Windows qui quitte au demarrage fait donc echouer le build au
+lieu de produire un installateur inutilisable. Le runtime Windows est livre en
+repertoire pour eviter toute extraction d'executable Python dans `%TEMP%`.
+Cette etape est necessaire : un Mac ne produit pas de maniere fiable un
+installateur Windows ou Linux complet.
 
 Les paquets macOS privés sont signés ad hoc afin que le bundle `.app` soit
 coherent localement, mais ils ne sont pas notarizes par Apple. Apres un
