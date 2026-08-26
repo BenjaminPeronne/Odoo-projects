@@ -48,6 +48,31 @@ def stop_process_tree(process: subprocess.Popen[bytes]) -> None:
         process.kill()
 
 
+def wait_for_health(process: subprocess.Popen[bytes], timeout: float) -> None:
+    deadline = time.monotonic() + timeout
+    failure = "L'application installée n'a pas exposé son API locale."
+    while time.monotonic() < deadline:
+        exit_code = process.poll()
+        if exit_code is not None:
+            failure = f"L'application installée s'est arrêtée (code {exit_code})."
+            break
+        try:
+            payload = json.loads(request("http://127.0.0.1:8765/api/health"))
+            if payload.get("ok") is True:
+                return
+        except (OSError, urllib.error.URLError, json.JSONDecodeError):
+            time.sleep(0.25)
+    raise RuntimeError(failure)
+
+
+def shutdown_application(process: subprocess.Popen[bytes]) -> None:
+    try:
+        request("http://127.0.0.1:8765/api/system/shutdown", method="POST")
+    except (OSError, urllib.error.URLError):
+        pass
+    stop_process_tree(process)
+
+
 def main() -> None:
     if os.name != "nt":
         raise SystemExit("Ce test doit être exécuté sur Windows.")
@@ -89,29 +114,39 @@ def main() -> None:
             }
         )
         process = subprocess.Popen([str(application)], env=env)
-        deadline = time.monotonic() + args.timeout
-        failure = "L'application installée n'a pas exposé son API locale."
         try:
-            while time.monotonic() < deadline:
-                exit_code = process.poll()
-                if exit_code is not None:
-                    failure = f"L'application installée s'est arrêtée (code {exit_code})."
-                    break
-                try:
-                    payload = json.loads(request("http://127.0.0.1:8765/api/health"))
-                    if payload.get("ok") is True:
-                        print("Application Windows installée opérationnelle: http://127.0.0.1:8765/api/health")
-                        return
-                except (OSError, urllib.error.URLError, json.JSONDecodeError):
-                    time.sleep(0.25)
-        finally:
+            wait_for_health(process, args.timeout)
+            print("Première installation Windows opérationnelle.")
+
+            # Exercise the exact user workflow: update while the previous app
+            # and its backend still own files in the installation directory.
+            subprocess.run(
+                [str(installer), "/S", f"/D={install_dir}"],
+                check=True,
+                timeout=90,
+            )
             try:
-                request("http://127.0.0.1:8765/api/system/shutdown", method="POST")
-            except (OSError, urllib.error.URLError):
-                pass
+                process.wait(timeout=15)
+            except subprocess.TimeoutExpired as error:
+                raise RuntimeError(
+                    "La mise à niveau n'a pas arrêté l'ancienne application."
+                ) from error
+        except (RuntimeError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            raise SystemExit(
+                f"Échec du test de mise à niveau Windows: {error}\n"
+                f"--- backend.log ---\n{log_tail(backend_log())}"
+            ) from error
+        finally:
             stop_process_tree(process)
 
-        raise SystemExit(f"{failure}\n--- backend.log ---\n{log_tail(backend_log())}")
+        process = subprocess.Popen([str(application)], env=env)
+        try:
+            wait_for_health(process, args.timeout)
+            print("Mise à niveau Windows opérationnelle: http://127.0.0.1:8765/api/health")
+        except RuntimeError as error:
+            raise SystemExit(f"{error}\n--- backend.log ---\n{log_tail(backend_log())}") from error
+        finally:
+            shutdown_application(process)
 
 
 if __name__ == "__main__":

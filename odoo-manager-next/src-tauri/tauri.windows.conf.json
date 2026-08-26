@@ -3,6 +3,11 @@
   "bundle": {
     "resources": {
       "binaries/odoo-manager-backend-runtime/": "odoo-manager-backend-runtime/"
+    },
+    "windows": {
+      "nsis": {
+        "installerHooks": "windows/installer-hooks.nsh"
+      }
     }
   }
 }

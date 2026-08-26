@@ -12,6 +12,16 @@ struct BackendProcess {
     log_path: PathBuf,
 }
 
+impl Drop for BackendProcess {
+    fn drop(&mut self) {
+        if let Ok(process) = self.child.get_mut() {
+            if let Some(mut child) = process.take() {
+                terminate_child(&mut child);
+            }
+        }
+    }
+}
+
 #[derive(serde::Serialize)]
 struct BackendDiagnostics {
     log_path: String,
@@ -152,12 +162,24 @@ fn backend_is_reachable() -> bool {
     TcpStream::connect_timeout(&address, Duration::from_millis(300)).is_ok()
 }
 
+fn terminate_child(child: &mut Child) {
+    for _ in 0..20 {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(_) => break,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn stop_backend(app: &tauri::AppHandle) {
     request_backend_shutdown();
     let state = app.state::<BackendProcess>();
     if let Ok(mut process) = state.child.lock() {
         if let Some(mut child) = process.take() {
-            let _ = child.kill();
+            terminate_child(&mut child);
         }
     };
 }
@@ -268,6 +290,7 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
+                stop_backend(window.app_handle());
                 window.app_handle().exit(0);
             }
         })

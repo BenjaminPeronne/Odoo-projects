@@ -184,6 +184,9 @@ paquet NSIS, lance l'application installee et controle une seconde fois cette
 API. Un backend Windows qui quitte au demarrage fait donc echouer le build au
 lieu de produire un installateur inutilisable. Le runtime Windows est livre en
 repertoire pour eviter toute extraction d'executable Python dans `%TEMP%`.
+Le test relance aussi l'installateur pendant que l'application est ouverte afin
+de verifier que la mise a niveau ferme l'ancien backend avant de remplacer les
+fichiers verrouilles par Windows.
 Cette etape est necessaire : un Mac ne produit pas de maniere fiable un
 installateur Windows ou Linux complet.
 
