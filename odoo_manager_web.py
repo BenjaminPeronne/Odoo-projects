@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import errno
 import html
 import json
 import os
@@ -17,6 +18,11 @@ import urllib.error
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+from odoo_manager_runtime import initialize_runtime_streams
+
+
+RUNTIME_LOG_PATH, _RUNTIME_STREAMS = initialize_runtime_streams()
 
 from odoo_manager_core import ManagerSettings, ProjectCreator, SettingsStore, ProjectService, docker_status, start_docker
 from odoo_manager_core.platform import command_prefix, executable_search_path, execution_path, platform_id
@@ -2254,6 +2260,15 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/":
                 return html_response(self, INDEX_HTML)
+            if path == "/api/health":
+                return json_response(
+                    self,
+                    {
+                        "ok": True,
+                        "pid": os.getpid(),
+                        "log_file": str(RUNTIME_LOG_PATH),
+                    },
+                )
             if path == "/api/bootstrap":
                 return json_response(self, bootstrap_snapshot())
             if path == "/api/overview":
@@ -2578,6 +2593,10 @@ class ManagerHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
 
+def address_is_already_in_use(error):
+    return error.errno in {errno.EADDRINUSE, 48, 98, 10048}
+
+
 def main():
     if not MANAGER.exists():
         raise SystemExit(f"Script introuvable: {MANAGER}")
@@ -2585,7 +2604,7 @@ def main():
     try:
         server = ManagerHTTPServer((HOST, PORT), Handler)
     except OSError as exc:
-        if exc.errno == 48:
+        if address_is_already_in_use(exc):
             print(f"Interface deja lancee ou port occupe: {url}")
             print("Utilise ./odoo_next_gui.sh --stop puis ./odoo_next_gui.sh --background pour recharger.")
             return

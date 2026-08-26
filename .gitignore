@@ -15,6 +15,7 @@
 !/README_odoo_manager.md
 !/odoo_gui.sh
 !/odoo_manager.sh
+!/odoo_manager_runtime.py
 !/odoo_manager_web.py
 !/odoo_next_gui.sh
 

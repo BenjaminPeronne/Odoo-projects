@@ -88,6 +88,7 @@ def main() -> None:
     if not args.no_clean:
         sidecar_command.append("--clean")
     run(sidecar_command)
+    run([sys.executable, str(ROOT / "scripts" / "smoke_test_sidecar.py")])
 
     env = os.environ.copy()
     env["CI"] = "true"

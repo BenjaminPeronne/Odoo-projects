@@ -7,6 +7,15 @@ from unittest.mock import patch
 import odoo_manager_web as web
 
 
+class ServerRuntimeTests(unittest.TestCase):
+    def test_recognizes_address_in_use_on_supported_platforms(self):
+        for error_number in (48, 98, 10048):
+            with self.subTest(error_number=error_number):
+                self.assertTrue(web.address_is_already_in_use(OSError(error_number, "port occupé")))
+
+        self.assertFalse(web.address_is_already_in_use(OSError(2, "fichier absent")))
+
+
 class DatabaseNameValidationTests(unittest.TestCase):
     def test_accepts_existing_odoo_database_name_with_hash(self):
         self.assertEqual(web.validate_db("sodial_recette#1"), "sodial_recette#1")

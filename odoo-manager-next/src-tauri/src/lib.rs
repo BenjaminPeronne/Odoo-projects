@@ -1,12 +1,62 @@
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::Manager;
-use tauri_plugin_shell::{process::CommandChild, ShellExt};
+use tauri_plugin_shell::{
+    process::{CommandChild, CommandEvent},
+    ShellExt,
+};
 
-struct BackendProcess(Mutex<Option<CommandChild>>);
+struct BackendProcess {
+    child: Mutex<Option<CommandChild>>,
+    log_path: PathBuf,
+}
+
+#[derive(serde::Serialize)]
+struct BackendDiagnostics {
+    log_path: String,
+    details: String,
+}
+
+fn prepare_backend_log(log_path: &Path) -> std::io::Result<()> {
+    if log_path
+        .metadata()
+        .map(|metadata| metadata.len() > 2_000_000)
+        .unwrap_or(false)
+    {
+        let previous = log_path.with_file_name("backend.previous.log");
+        let _ = fs::remove_file(&previous);
+        fs::rename(log_path, previous)?;
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(log_path)?;
+    writeln!(file, "\n=== Démarrage de l'application Odoo Manager ===")
+}
+
+fn append_backend_log(log_path: &Path, message: &str) {
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
+        let _ = writeln!(file, "{message}");
+    }
+}
+
+fn read_backend_log(log_path: &Path) -> String {
+    let Ok(mut file) = File::open(log_path) else {
+        return "Le journal du backend n'a pas encore été créé.".into();
+    };
+    let mut content = String::new();
+    if file.read_to_string(&mut content).is_err() {
+        return "Le journal du backend est illisible.".into();
+    }
+    let target = content.len().saturating_sub(16_000);
+    let start = content
+        .char_indices()
+        .find_map(|(index, _)| (index >= target).then_some(index))
+        .unwrap_or(0);
+    content[start..].to_string()
+}
 
 fn request_backend_shutdown() {
     let address: SocketAddr = match "127.0.0.1:8765".parse() {
@@ -29,11 +79,20 @@ fn request_backend_shutdown() {
 fn stop_backend(app: &tauri::AppHandle) {
     request_backend_shutdown();
     let state = app.state::<BackendProcess>();
-    if let Ok(mut process) = state.0.lock() {
+    if let Ok(mut process) = state.child.lock() {
         if let Some(child) = process.take() {
             let _ = child.kill();
         }
     };
+}
+
+#[tauri::command]
+fn backend_diagnostics(app: tauri::AppHandle) -> BackendDiagnostics {
+    let state = app.state::<BackendProcess>();
+    BackendDiagnostics {
+        log_path: state.log_path.display().to_string(),
+        details: read_backend_log(&state.log_path),
+    }
 }
 
 #[tauri::command]
@@ -108,14 +167,59 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![open_external_url, open_docker_desktop])
+        .invoke_handler(tauri::generate_handler![backend_diagnostics, open_external_url, open_docker_desktop])
         .setup(|app| {
-            let command = app.shell().sidecar("odoo-manager-backend")?;
-            let (mut events, child) = command.spawn()?;
-            tauri::async_runtime::spawn(async move {
-                while events.recv().await.is_some() {}
+            let log_dir = app.path().app_log_dir()?;
+            fs::create_dir_all(&log_dir)?;
+            let log_path = log_dir.join("backend.log");
+            let _ = prepare_backend_log(&log_path);
+
+            let child = match app.shell().sidecar("odoo-manager-backend") {
+                Ok(command) => match command.env("ODOO_MANAGER_LOG_DIR", &log_dir).spawn() {
+                    Ok((mut events, child)) => {
+                        let event_log_path = log_path.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let mut log_file = OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(&event_log_path)
+                                .ok();
+                            while let Some(event) = events.recv().await {
+                                let message = match event {
+                                    CommandEvent::Stdout(bytes) => {
+                                        String::from_utf8_lossy(&bytes).into_owned()
+                                    }
+                                    CommandEvent::Stderr(bytes) => {
+                                        format!("[stderr] {}", String::from_utf8_lossy(&bytes))
+                                    }
+                                    CommandEvent::Error(error) => format!("[sidecar error] {error}"),
+                                    CommandEvent::Terminated(payload) => format!("[sidecar terminé] {payload:?}"),
+                                    _ => continue,
+                                };
+                                if let Some(file) = log_file.as_mut() {
+                                    let _ = writeln!(file, "{message}");
+                                }
+                            }
+                        });
+                        Some(child)
+                    }
+                    Err(error) => {
+                        append_backend_log(
+                            &log_path,
+                            &format!("Impossible de démarrer le sidecar: {error}"),
+                        );
+                        None
+                    }
+                },
+                Err(error) => {
+                    append_backend_log(&log_path, &format!("Sidecar introuvable: {error}"));
+                    None
+                }
+            };
+            app.manage(BackendProcess {
+                child: Mutex::new(child),
+                log_path,
             });
-            app.manage(BackendProcess(Mutex::new(Some(child))));
             Ok(())
         })
         .on_window_event(|window, event| {

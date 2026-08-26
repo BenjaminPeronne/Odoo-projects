@@ -187,6 +187,11 @@ type ZipInspection = {
   ignored_symlinks: number;
 };
 
+type BackendDiagnostics = {
+  log_path: string;
+  details: string;
+};
+
 type ProjectDiagnostics = {
   project: string;
   docker_ok: boolean;
@@ -454,6 +459,7 @@ export default function Home() {
   const [initializing, setInitializing] = useState(true);
   const [initializationMessage, setInitializationMessage] = useState("Démarrage du service local…");
   const [initializationError, setInitializationError] = useState("");
+  const [backendDiagnostics, setBackendDiagnostics] = useState<BackendDiagnostics | null>(null);
   const [error, setError] = useState("");
   const [apiUnavailable, setApiUnavailable] = useState(false);
   const [desktopRuntime, setDesktopRuntime] = useState(false);
@@ -600,6 +606,7 @@ export default function Home() {
     initializingRef.current = true;
     setInitializing(true);
     setInitializationError("");
+    setBackendDiagnostics(null);
     markApiSuccess();
 
     for (const [attempt, retryDelay] of BOOTSTRAP_RETRY_DELAYS_MS.entries()) {
@@ -632,6 +639,13 @@ export default function Home() {
         if (attempt === BOOTSTRAP_RETRY_DELAYS_MS.length - 1) {
           setInitializationError(err instanceof Error ? err.message : "Le service local ne répond pas.");
           setInitializationMessage("Le gestionnaire n’est pas encore prêt.");
+          if (isTauriRuntime()) {
+            try {
+              setBackendDiagnostics(await invokeDesktop<BackendDiagnostics>("backend_diagnostics"));
+            } catch {
+              setBackendDiagnostics(null);
+            }
+          }
         }
       }
     }
@@ -1349,6 +1363,15 @@ export default function Home() {
               <p className="break-words rounded-md border border-amber-200 bg-amber-50 p-3 text-left text-xs text-amber-900">
                 {initializationError}
               </p>
+              {backendDiagnostics && (
+                <details className="rounded-md border bg-muted/40 p-3 text-left text-xs">
+                  <summary className="cursor-pointer font-medium">Détails techniques</summary>
+                  <div className="mt-2 break-all text-muted-foreground">Journal : {backendDiagnostics.log_path}</div>
+                  <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-slate-950 p-2 text-[11px] text-slate-100">
+                    {backendDiagnostics.details}
+                  </pre>
+                </details>
+              )}
               <Button className="w-full" onClick={initializeApplication}>
                 <RefreshCcw className="h-4 w-4" />
                 Réessayer

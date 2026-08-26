@@ -177,9 +177,12 @@ sh scripts/build_all_platforms.sh
 
 La derniere commande repart automatiquement sur `app-v0.1.2-build1`.
 
-Chaque runner reconstruit le sidecar Python de sa plateforme avant de produire
-l'installateur. Cette etape est necessaire : un Mac ne produit pas de maniere
-fiable un installateur Windows ou Linux complet.
+Chaque runner reconstruit le sidecar Python de sa plateforme puis le demarre sur
+un port local temporaire et controle `/api/health` avant de produire
+l'installateur. Un backend Windows qui quitte au demarrage fait donc echouer le
+build au lieu de produire un installateur inutilisable. Cette etape est
+necessaire : un Mac ne produit pas de maniere fiable un installateur Windows ou
+Linux complet.
 
 Les paquets macOS privés sont signés ad hoc afin que le bundle `.app` soit
 coherent localement, mais ils ne sont pas notarizes par Apple. Apres un
