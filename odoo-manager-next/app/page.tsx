@@ -122,10 +122,18 @@ type ProjectCreationPrerequisites = {
   workspace_ready: boolean;
   git_available: boolean;
   git_version: string;
+  git_install_supported: boolean;
+  git_install_message: string;
   ssh_key_present: boolean;
   ssh_keys: string[];
+  ssh_keygen_available: boolean;
   gitlab_ssh_keys_url: string;
   supported_versions: string[];
+};
+
+type SshPublicKey = {
+  name: string;
+  public_key: string;
 };
 
 type Job = {
@@ -443,6 +451,11 @@ export default function Home() {
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
   const [creationPrerequisites, setCreationPrerequisites] = useState<ProjectCreationPrerequisites | null>(null);
   const [loadingCreationPrerequisites, setLoadingCreationPrerequisites] = useState(false);
+  const [sshDialogOpen, setSshDialogOpen] = useState(false);
+  const [sshKeys, setSshKeys] = useState<SshPublicKey[]>([]);
+  const [selectedSshKeyName, setSelectedSshKeyName] = useState("");
+  const [sshComment, setSshComment] = useState("");
+  const [generatingSshKey, setGeneratingSshKey] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
   const [selectingWorkspace, setSelectingWorkspace] = useState(false);
   const [projectsFilter, setProjectsFilter] = useState("");
@@ -509,6 +522,12 @@ export default function Home() {
   );
 
   const selectedJob = useMemo(() => jobs.find((job) => job.id === selectedJobId) || jobs[0], [jobs, selectedJobId]);
+  const gitInstallRunning = jobs.some((job) => job.status === "running" && job.title === "Installer Git pour Windows");
+  const traefikInstallRunning = jobs.some((job) => job.status === "running" && job.title === "Installer Traefik");
+  const selectedSshKey = useMemo(
+    () => sshKeys.find((key) => key.name === selectedSshKeyName) || sshKeys[0] || null,
+    [selectedSshKeyName, sshKeys],
+  );
 
   const filteredProjects = useMemo(() => {
     const query = projectsFilter.trim().toLowerCase();
@@ -898,14 +917,79 @@ export default function Home() {
   }
 
   async function requestTraefikInstall() {
+    if (traefikInstallRunning) return;
     if (!systemStatus?.docker.running) {
       pushToast("error", "Installe et démarre Docker avant d'installer Traefik.");
+      return;
+    }
+    const prerequisites = creationPrerequisites || await loadCreationPrerequisites();
+    if (!prerequisites?.git_available) {
+      pushToast("error", "Installe Git avant d'installer Traefik.");
       return;
     }
     const job = await createJob("install_traefik");
     if (job) {
       schedule(refreshSystemStatus, 2500);
       schedule(refreshOverview, 4000);
+    }
+  }
+
+  async function requestGitInstall() {
+    if (gitInstallRunning) return;
+    const job = await createJob("install_git");
+    if (!job) return;
+    const refreshPrerequisites = async () => { await loadCreationPrerequisites(); };
+    schedule(refreshPrerequisites, 3000);
+    schedule(refreshPrerequisites, 10000);
+    schedule(refreshPrerequisites, 25000);
+  }
+
+  async function loadSshKeys() {
+    try {
+      const payload = await api<{ keys: SshPublicKey[] }>("/api/system/ssh-keys");
+      setSshKeys(payload.keys);
+      setSelectedSshKeyName((current) => {
+        if (payload.keys.some((key) => key.name === current)) return current;
+        return payload.keys.find((key) => key.name === "id_ed25519.pub")?.name || payload.keys[0]?.name || "";
+      });
+      return payload.keys;
+    } catch (err) {
+      pushToast("error", err instanceof Error ? err.message : "Impossible de lire les clés SSH.");
+      return [];
+    }
+  }
+
+  async function openSshAssistant() {
+    setSshDialogOpen(true);
+    await loadSshKeys();
+  }
+
+  async function requestSshKeyGeneration() {
+    setGeneratingSshKey(true);
+    try {
+      const key = await api<SshPublicKey & { created: boolean; message: string }>("/api/system/ssh-key/generate", {
+        method: "POST",
+        body: JSON.stringify({ comment: sshComment }),
+      });
+      pushToast("success", key.message);
+      await loadSshKeys();
+      setSelectedSshKeyName(key.name);
+      await loadCreationPrerequisites();
+    } catch (err) {
+      pushToast("error", err instanceof Error ? err.message : "Impossible de générer la clé SSH.");
+    } finally {
+      setGeneratingSshKey(false);
+    }
+  }
+
+  async function copySshPublicKey() {
+    const key = sshKeys.find((item) => item.name === selectedSshKeyName);
+    if (!key) return;
+    try {
+      await navigator.clipboard.writeText(key.public_key);
+      pushToast("success", "Clé publique copiée.");
+    } catch {
+      pushToast("error", "Impossible de copier la clé publique.");
     }
   }
 
@@ -2103,21 +2187,18 @@ export default function Home() {
               }
             />
             <PrerequisiteRow
-              ready={Boolean(systemStatus?.traefik?.installed)}
-              icon={Activity}
-              title="Traefik"
-              detail={systemStatus?.traefik?.message || "Vérification en cours…"}
-              action={
-                systemStatus?.traefik?.can_install ? (
-                  <Button size="sm" variant="outline" onClick={requestTraefikInstall}>Installer</Button>
-                ) : undefined
-              }
-            />
-            <PrerequisiteRow
               ready={Boolean(creationPrerequisites?.git_available)}
               icon={GitBranch}
               title="Git"
-              detail={creationPrerequisites?.git_version || "Git doit être disponible sur la machine."}
+              detail={creationPrerequisites?.git_version || creationPrerequisites?.git_install_message || "Git doit être disponible sur la machine."}
+              action={
+                !creationPrerequisites?.git_available && creationPrerequisites?.git_install_supported ? (
+                  <Button size="sm" variant="outline" onClick={requestGitInstall} disabled={loading || gitInstallRunning}>
+                    {gitInstallRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <CloudDownload className="h-4 w-4" />}
+                    {gitInstallRunning ? "Installation…" : "Installer"}
+                  </Button>
+                ) : undefined
+              }
             />
             <PrerequisiteRow
               ready={Boolean(creationPrerequisites?.ssh_key_present)}
@@ -2129,10 +2210,30 @@ export default function Home() {
                   : "Ajoute ta clé publique dans ton profil GitLab avant la première création."
               }
               action={
-                creationPrerequisites?.gitlab_ssh_keys_url ? (
-                  <Button size="sm" variant="outline" onClick={() => openUrl(creationPrerequisites.gitlab_ssh_keys_url)}>
-                    <ExternalLink className="h-4 w-4" />
-                    GitLab
+                creationPrerequisites?.ssh_keygen_available || creationPrerequisites?.ssh_key_present ? (
+                  <Button size="sm" variant="outline" onClick={openSshAssistant}>
+                    <KeyRound className="h-4 w-4" />
+                    {creationPrerequisites.ssh_key_present ? "Voir la clé" : "Générer"}
+                  </Button>
+                ) : undefined
+              }
+            />
+            <PrerequisiteRow
+              ready={Boolean(systemStatus?.traefik?.running)}
+              icon={Activity}
+              title="Traefik"
+              detail={systemStatus?.traefik?.message || "Vérification en cours…"}
+              action={
+                systemStatus?.traefik && !systemStatus.traefik.running && !systemStatus.traefik.requires_docker ? (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={requestTraefikInstall}
+                    disabled={!creationPrerequisites?.git_available || loading || traefikInstallRunning}
+                    title={!creationPrerequisites?.git_available ? "Installe Git avant Traefik" : undefined}
+                  >
+                    {traefikInstallRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : systemStatus.traefik.installed ? <Play className="h-4 w-4" /> : <CloudDownload className="h-4 w-4" />}
+                    {traefikInstallRunning ? "Installation…" : systemStatus.traefik.installed ? "Démarrer" : "Installer"}
                   </Button>
                 ) : undefined
               }
@@ -2171,6 +2272,75 @@ export default function Home() {
               Créer mon premier projet
             </Button>
           </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={sshDialogOpen} onOpenChange={setSshDialogOpen}>
+        <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Clé SSH GitLab</DialogTitle>
+            <DialogDescription>
+              Le gestionnaire génère la clé sur cette machine. Seule la clé publique est affichée et peut être copiée.
+            </DialogDescription>
+          </DialogHeader>
+          {sshKeys.length === 0 ? (
+            <div className="space-y-4">
+              <div className="grid gap-1.5">
+                <label className="text-sm font-medium" htmlFor="ssh-key-comment">E-mail professionnel ou commentaire</label>
+                <Input
+                  id="ssh-key-comment"
+                  value={sshComment}
+                  onChange={(event) => setSshComment(event.target.value)}
+                  placeholder="prenom.nom@sudokeys.com"
+                  autoComplete="email"
+                />
+                <p className="text-xs text-muted-foreground">Ce texte sert uniquement à identifier la clé dans GitLab.</p>
+              </div>
+              <Button className="w-full" onClick={requestSshKeyGeneration} disabled={generatingSshKey}>
+                {generatingSshKey ? <Loader2 className="h-4 w-4 animate-spin" /> : <KeyRound className="h-4 w-4" />}
+                Générer une clé Ed25519
+              </Button>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {sshKeys.length > 1 && (
+                <div className="grid gap-1.5">
+                  <label className="text-sm font-medium" htmlFor="ssh-public-key-select">Clé publique</label>
+                  <Select value={selectedSshKey?.name || ""} onValueChange={setSelectedSshKeyName}>
+                    <SelectTrigger id="ssh-public-key-select"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {sshKeys.map((key) => <SelectItem key={key.name} value={key.name}>{key.name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+              <div className="grid gap-1.5">
+                <label className="text-sm font-medium" htmlFor="ssh-public-key">Clé publique à ajouter dans GitLab</label>
+                <Textarea
+                  id="ssh-public-key"
+                  className="min-h-32 resize-y break-all font-mono text-xs"
+                  readOnly
+                  value={selectedSshKey?.public_key || ""}
+                />
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <Button variant="outline" onClick={copySshPublicKey} disabled={!selectedSshKey}>
+                  <Copy className="h-4 w-4" />
+                  Copier la clé
+                </Button>
+                <Button
+                  onClick={() => openUrl(creationPrerequisites?.gitlab_ssh_keys_url)}
+                  disabled={!creationPrerequisites?.gitlab_ssh_keys_url}
+                >
+                  <ExternalLink className="h-4 w-4" />
+                  Ouvrir GitLab
+                </Button>
+              </div>
+              <p className="text-xs leading-5 text-muted-foreground">
+                Dans GitLab, colle cette valeur dans le champ Clé SSH, donne-lui un titre correspondant à cet ordinateur, puis valide.
+              </p>
+            </div>
+          )}
         </DialogContent>
       </Dialog>
 

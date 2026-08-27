@@ -25,6 +25,43 @@ COMMON_EXECUTABLE_PATHS = {
 }
 
 
+def windows_executable_paths():
+    if platform.system() != "Windows":
+        return []
+    program_files = os.environ.get("ProgramFiles", "")
+    local_app_data = os.environ.get("LOCALAPPDATA", "")
+    windows_root = os.environ.get("SystemRoot", r"C:\Windows")
+    candidates = [
+        Path(windows_root) / "System32",
+        Path(windows_root) / "System32" / "OpenSSH",
+    ]
+    if program_files:
+        candidates.extend(
+            [
+                Path(program_files) / "Git" / "cmd",
+                Path(program_files) / "Git" / "bin",
+                Path(program_files) / "Git" / "usr" / "bin",
+            ]
+        )
+    if local_app_data:
+        candidates.extend(
+            [
+                Path(local_app_data) / "Microsoft" / "WindowsApps",
+                Path(local_app_data) / "Programs" / "Git" / "cmd",
+                Path(local_app_data) / "Programs" / "Git" / "bin",
+                Path(local_app_data) / "Programs" / "Git" / "usr" / "bin",
+            ]
+        )
+    return [str(path) for path in candidates]
+
+
+def hidden_process_kwargs():
+    if platform.system() != "Windows":
+        return {}
+    creation_flag = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    return {"creationflags": creation_flag}
+
+
 @dataclass(frozen=True)
 class LaunchResult:
     ok: bool
@@ -55,6 +92,9 @@ def executable_search_path(extra_paths=None):
     for path in COMMON_EXECUTABLE_PATHS.get(platform.system(), []):
         if path not in paths:
             paths.append(path)
+    for path in windows_executable_paths():
+        if path not in paths:
+            paths.append(path)
     for path in extra_paths or []:
         if path and path not in paths:
             paths.append(path)
@@ -75,7 +115,14 @@ def execution_path(path, settings):
     if settings.execution_mode != "wsl":
         return path
     command = [*command_prefix(settings), "wslpath", "-a", "-u", path]
-    result = subprocess.run(command, capture_output=True, text=True, timeout=8, check=False)
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=8,
+        check=False,
+        **hidden_process_kwargs(),
+    )
     translated = result.stdout.strip()
     if result.returncode != 0 or not translated:
         detail = (result.stderr or result.stdout or "wslpath a échoué").strip()
@@ -110,7 +157,12 @@ def start_docker_desktop(settings):
             executable = next((path for path in candidates if path and path.exists()), None)
             if not executable:
                 return LaunchResult(False, "Docker Desktop est introuvable. Vérifie son installation.")
-            subprocess.Popen([str(executable)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen(
+                [str(executable)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                **hidden_process_kwargs(),
+            )
             return LaunchResult(True, "Docker Desktop est en cours d'ouverture.")
 
         systemctl = shutil.which("systemctl")

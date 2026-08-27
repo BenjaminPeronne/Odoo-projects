@@ -267,8 +267,14 @@ fn open_with_system(url: &str) -> Result<(), String> {
 }
 
 fn run_command(command: &str, args: &[&str]) -> Result<(), String> {
-    Command::new(command)
-        .args(args)
+    let mut process = Command::new(command);
+    process.args(args);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        process.creation_flags(0x0800_0000);
+    }
+    process
         .spawn()
         .map(|_| ())
         .map_err(|error| format!("Impossible d'exécuter {command}: {error}"))

@@ -256,6 +256,87 @@ class ProjectCreationPrerequisitesTests(unittest.TestCase):
         self.assertTrue(payload["ssh_key_present"])
         self.assertEqual(payload["ssh_keys"], ["id_ed25519.pub"])
 
+    @patch("odoo_manager_web.run_capture")
+    @patch("odoo_manager_web.resolve_executable", return_value="ssh-keygen")
+    @patch("odoo_manager_web.executable_available", return_value=True)
+    @patch("odoo_manager_web.Path.home")
+    def test_generates_ed25519_key_and_returns_only_public_material(
+        self,
+        home,
+        _available,
+        _resolve,
+        run_capture,
+    ):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            home.return_value = root
+
+            def generate(command, **_kwargs):
+                key_path = Path(command[command.index("-f") + 1])
+                key_path.write_text("PRIVATE", encoding="utf-8")
+                key_path.with_suffix(".pub").write_text(
+                    "ssh-ed25519 AAAATEST chef.projet@sudokeys.com\n",
+                    encoding="utf-8",
+                )
+                return 0, "generated"
+
+            run_capture.side_effect = generate
+            payload = web.generate_ssh_key("chef.projet@sudokeys.com")
+
+        self.assertTrue(payload["created"])
+        self.assertEqual(payload["name"], "id_ed25519.pub")
+        self.assertTrue(payload["public_key"].startswith("ssh-ed25519 "))
+        self.assertNotIn("PRIVATE", str(payload))
+
+    @patch("odoo_manager_web.run_capture")
+    @patch("odoo_manager_web.Path.home")
+    def test_existing_private_key_is_never_overwritten(self, home, run_capture):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ssh = root / ".ssh"
+            ssh.mkdir()
+            (ssh / "id_ed25519").write_text("PRIVATE", encoding="utf-8")
+            home.return_value = root
+
+            with self.assertRaisesRegex(RuntimeError, "Aucun fichier n'a été écrasé"):
+                web.generate_ssh_key()
+
+        run_capture.assert_not_called()
+
+
+class GitInstallationTests(unittest.TestCase):
+    class LogJob:
+        def __init__(self):
+            self.lines = []
+
+        def add(self, line):
+            self.lines.append(line)
+
+    @patch("odoo_manager_web.run_stream", return_value=0)
+    @patch("odoo_manager_web.run_capture")
+    @patch("odoo_manager_web.resolve_executable")
+    @patch("odoo_manager_web.executable_available", return_value=True)
+    @patch("odoo_manager_web.platform_id", return_value="windows")
+    def test_installs_git_with_noninteractive_winget_command(
+        self,
+        _platform,
+        _available,
+        resolve,
+        capture,
+        stream,
+    ):
+        resolve.side_effect = lambda executable, _settings: executable
+        capture.side_effect = [(127, "missing"), (0, "git version 2.51.0")]
+        job = self.LogJob()
+
+        web.install_git_job(job)
+
+        command = stream.call_args.args[1]
+        self.assertEqual(command[:5], ["winget", "install", "--id", "Git.Git", "--exact"])
+        self.assertIn("--silent", command)
+        self.assertIn("--disable-interactivity", command)
+        self.assertIn("git version 2.51.0", job.lines)
+
 
 class DiagnosticModuleTests(unittest.TestCase):
     class LogJob:

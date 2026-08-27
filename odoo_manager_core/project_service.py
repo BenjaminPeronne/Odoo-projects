@@ -4,10 +4,11 @@ import shutil
 import subprocess
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from .system import docker_command
-from .platform import executable_search_path
+from .platform import executable_search_path, hidden_process_kwargs, resolve_executable
 
 
 COMPOSE_FILENAMES = ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml")
@@ -50,7 +51,10 @@ class ProjectService:
         env = os.environ.copy()
         env["PATH"] = executable_search_path()
         env["GIT_TERMINAL_PROMPT"] = "0"
-        env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=10")
+        env.setdefault(
+            "GIT_SSH_COMMAND",
+            "ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new",
+        )
         return env
 
     def log(self, callback, message):
@@ -71,6 +75,7 @@ class ProjectService:
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            **hidden_process_kwargs(),
         )
         with ACTIVE_PROCESSES_LOCK:
             ACTIVE_PROCESSES.add(process)
@@ -99,6 +104,7 @@ class ProjectService:
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                **hidden_process_kwargs(),
             )
             stdout = (result.stdout or "").strip()
             stderr = (result.stderr or "").strip()
@@ -196,6 +202,49 @@ class ProjectService:
         code = self.stream(self.docker("compose", "up", "-d"), cwd=self.traefik_dir, log=log)
         if code != 0:
             raise RuntimeError("Impossible de démarrer Traefik.")
+
+    def install_traefik(self, repository, log=None):
+        if not self.traefik_dir:
+            raise RuntimeError("Le dossier Traefik n'est pas configuré.")
+        if self.traefik_dir.name != "traefik":
+            raise RuntimeError("Le dossier Traefik doit se terminer par docker-local-tools/traefik.")
+
+        tools_dir = self.traefik_dir.parent
+        parent_dir = tools_dir.parent
+        compose_ready = any((self.traefik_dir / name).is_file() for name in COMPOSE_FILENAMES)
+        git = resolve_executable("git", self.settings)
+
+        if compose_ready and not (tools_dir / ".git").is_dir():
+            self.log(log, f"Traefik déjà présent: {self.traefik_dir}")
+            self.start_traefik(log=log)
+            return
+
+        if tools_dir.exists():
+            if not (tools_dir / ".git").is_dir():
+                raise RuntimeError(f"Le dossier {tools_dir} existe mais n'est pas un dépôt Git exploitable.")
+            self.log(log, "Mise à jour de docker-local-tools...")
+            code = self.stream([git, "pull", "--ff-only"], cwd=tools_dir, log=log)
+            if code != 0:
+                raise RuntimeError("Impossible de mettre à jour docker-local-tools.")
+        else:
+            parent_dir.mkdir(parents=True, exist_ok=True)
+            temporary = parent_dir / f".{tools_dir.name}.odoo-manager-{uuid.uuid4().hex}"
+            self.log(log, "Installation de docker-local-tools...")
+            try:
+                code = self.stream([git, "clone", repository, str(temporary)], cwd=parent_dir, log=log)
+                if code != 0:
+                    raise RuntimeError("Impossible de cloner docker-local-tools. Vérifie Git et ta clé SSH GitLab.")
+                temporary_traefik = temporary / "traefik"
+                if not any((temporary_traefik / name).is_file() for name in COMPOSE_FILENAMES):
+                    raise RuntimeError("Le dépôt docker-local-tools ne contient pas de configuration Traefik valide.")
+                temporary.replace(tools_dir)
+            finally:
+                if temporary.exists():
+                    shutil.rmtree(temporary, ignore_errors=True)
+
+        if not any((self.traefik_dir / name).is_file() for name in COMPOSE_FILENAMES):
+            raise RuntimeError(f"Configuration Traefik introuvable après installation: {self.traefik_dir}")
+        self.start_traefik(log=log)
 
     def compose_container_ids(self, path):
         code, output = self.capture(self.docker("compose", "ps", "-aq"), cwd=path, timeout=10)

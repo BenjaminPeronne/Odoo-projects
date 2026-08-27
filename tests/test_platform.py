@@ -2,7 +2,7 @@ import unittest
 from unittest import mock
 
 from odoo_manager_core.config import ManagerSettings
-from odoo_manager_core.platform import open_terminal_script
+from odoo_manager_core.platform import executable_search_path, hidden_process_kwargs, open_terminal_script
 
 
 class TerminalLaunchTests(unittest.TestCase):
@@ -36,6 +36,31 @@ class TerminalLaunchTests(unittest.TestCase):
         result = open_terminal_script(settings, "/tmp/create_project.sh")
         self.assertFalse(result.ok)
         self.assertIn("terminal graphique", result.message)
+
+
+class WindowsProcessTests(unittest.TestCase):
+    @mock.patch("odoo_manager_core.platform.platform.system", return_value="Windows")
+    def test_background_commands_never_create_a_console_window(self, _system):
+        self.assertEqual(hidden_process_kwargs()["creationflags"], 0x08000000)
+
+    @mock.patch.dict(
+        "odoo_manager_core.platform.os.environ",
+        {
+            "PATH": "",
+            "ProgramFiles": r"C:\Program Files",
+            "LOCALAPPDATA": r"C:\Users\Demo\AppData\Local",
+            "SystemRoot": r"C:\Windows",
+        },
+        clear=False,
+    )
+    @mock.patch("odoo_manager_core.platform.platform.system", return_value="Windows")
+    def test_windows_search_path_includes_git_openssh_and_winget(self, _system):
+        search_path = executable_search_path()
+
+        self.assertIn(r"C:\Program Files/Git/cmd", search_path)
+        self.assertIn(r"C:\Program Files/Git/usr/bin", search_path)
+        self.assertIn(r"C:\Windows/System32/OpenSSH", search_path)
+        self.assertIn(r"C:\Users\Demo\AppData\Local/Microsoft/WindowsApps", search_path)
 
 
 if __name__ == "__main__":

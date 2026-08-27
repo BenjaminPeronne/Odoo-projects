@@ -7,6 +7,7 @@ from .platform import (
     executable_available,
     executable_search_path,
     execution_path,
+    hidden_process_kwargs,
     open_terminal_script,
     platform_id,
     resolve_executable,
@@ -97,7 +98,15 @@ def docker_status(settings, timeout=6):
     try:
         env = os.environ.copy()
         env["PATH"] = executable_search_path()
-        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False, env=env)
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            env=env,
+            **hidden_process_kwargs(),
+        )
     except subprocess.TimeoutExpired:
         return docker_status_payload(
             settings,

@@ -26,7 +26,15 @@ from odoo_manager_runtime import initialize_runtime_streams
 RUNTIME_LOG_PATH, _RUNTIME_STREAMS = initialize_runtime_streams()
 
 from odoo_manager_core import ManagerSettings, ProjectCreator, SettingsStore, ProjectService, docker_status, start_docker
-from odoo_manager_core.platform import command_prefix, executable_search_path, execution_path, platform_id
+from odoo_manager_core.platform import (
+    command_prefix,
+    executable_available,
+    executable_search_path,
+    execution_path,
+    hidden_process_kwargs,
+    platform_id,
+    resolve_executable,
+)
 from odoo_manager_core.project_creator import (
     SUPPORTED_ODOO_VERSIONS,
     validate_git_ref,
@@ -276,6 +284,7 @@ def run_capture(args, cwd=None, timeout=12):
             stderr=subprocess.STDOUT,
             text=True,
             timeout=timeout,
+            **hidden_process_kwargs(),
         )
         return result.returncode, result.stdout.strip()
     except OSError as exc:
@@ -398,6 +407,21 @@ def project_creation_prerequisites():
         ssh_dir = Path.home() / ".ssh"
         ssh_keys = sorted(path.name for path in ssh_dir.glob("*.pub") if path.is_file()) if ssh_dir.exists() else []
 
+    if SETTINGS.execution_mode == "wsl":
+        keygen_code, _keygen_output = run_capture(
+            [*command_prefix(SETTINGS), "sh", "-lc", "command -v ssh-keygen >/dev/null 2>&1"],
+            timeout=6,
+        )
+        ssh_keygen_available = keygen_code == 0
+    else:
+        ssh_keygen_available = executable_available("ssh-keygen", SETTINGS)
+
+    git_install_supported = (
+        platform_id() == "windows"
+        and SETTINGS.execution_mode == "native"
+        and executable_available("winget", SETTINGS)
+    )
+
     workspace_exists = WORKSPACE.exists() and WORKSPACE.is_dir()
     writable_parent = WORKSPACE.parent
     while not writable_parent.exists() and writable_parent != writable_parent.parent:
@@ -412,11 +436,129 @@ def project_creation_prerequisites():
         "workspace_ready": workspace_ready,
         "git_available": git_code == 0,
         "git_version": git_output.splitlines()[0] if git_code == 0 and git_output else "",
+        "git_install_supported": git_install_supported,
+        "git_install_message": (
+            "Git peut être installé automatiquement avec Windows Package Manager."
+            if git_install_supported
+            else "Installe Git manuellement ou rends winget disponible sur Windows."
+        ),
         "ssh_key_present": bool(ssh_keys),
         "ssh_keys": ssh_keys,
+        "ssh_keygen_available": ssh_keygen_available,
         "gitlab_ssh_keys_url": "https://gitlab.sudokeys.com/-/user_settings/ssh_keys",
         "supported_versions": list(SUPPORTED_ODOO_VERSIONS),
     }
+
+
+def ssh_public_keys_snapshot():
+    if SETTINGS.execution_mode == "wsl":
+        script = (
+            'for key in "$HOME"/.ssh/*.pub; do '
+            '[ -f "$key" ] || continue; '
+            'printf "%s\\t" "${key##*/}"; tr -d "\\r\\n" < "$key"; printf "\\n"; '
+            "done"
+        )
+        code, output = run_capture([*command_prefix(SETTINGS), "sh", "-lc", script], timeout=8)
+        if code != 0:
+            raise RuntimeError("Impossible de lire les clés SSH dans WSL.")
+        keys = []
+        for line in output.splitlines():
+            name, separator, public_key = line.partition("\t")
+            if separator and public_key.startswith(("ssh-ed25519 ", "ssh-rsa ", "ecdsa-")):
+                keys.append({"name": name, "public_key": public_key})
+        return {"keys": keys}
+
+    ssh_dir = Path.home() / ".ssh"
+    keys = []
+    if ssh_dir.is_dir():
+        for path in sorted(ssh_dir.glob("*.pub")):
+            try:
+                public_key = path.read_text(encoding="utf-8").strip()
+            except OSError:
+                continue
+            if public_key.startswith(("ssh-ed25519 ", "ssh-rsa ", "ecdsa-")):
+                keys.append({"name": path.name, "public_key": public_key})
+    return {"keys": keys}
+
+
+def validate_ssh_comment(value):
+    comment = str(value or "").strip()
+    if len(comment) > 254 or any(ord(character) < 32 for character in comment):
+        raise ValueError("Le commentaire de la clé SSH est invalide.")
+    return comment
+
+
+def generate_ssh_key(comment=""):
+    comment = validate_ssh_comment(comment)
+    existing = ssh_public_keys_snapshot()["keys"]
+    default_existing = next((key for key in existing if key["name"] == "id_ed25519.pub"), None)
+    if default_existing:
+        return {**default_existing, "created": False, "message": "La clé Ed25519 existe déjà."}
+
+    if SETTINGS.execution_mode == "wsl":
+        comment_argument = f" -C {shlex.quote(comment)}" if comment else ""
+        script = (
+            'mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh" && '
+            'if [ -e "$HOME/.ssh/id_ed25519" ]; then '
+            'echo "Une clé privée id_ed25519 existe déjà sans clé publique." >&2; exit 3; fi; '
+            f'ssh-keygen -t ed25519 -f "$HOME/.ssh/id_ed25519" -N ""{comment_argument}'
+        )
+        code, output = run_capture([*command_prefix(SETTINGS), "sh", "-lc", script], timeout=30)
+        if code != 0:
+            raise RuntimeError(output or "Impossible de générer la clé SSH dans WSL.")
+    else:
+        if not executable_available("ssh-keygen", SETTINGS):
+            raise RuntimeError("ssh-keygen est introuvable. Installe Git avant de générer la clé SSH.")
+        ssh_dir = Path.home() / ".ssh"
+        ssh_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        private_key = ssh_dir / "id_ed25519"
+        if private_key.exists():
+            raise RuntimeError("Une clé privée id_ed25519 existe déjà sans clé publique. Aucun fichier n'a été écrasé.")
+        command = [resolve_executable("ssh-keygen", SETTINGS), "-t", "ed25519", "-f", str(private_key), "-N", ""]
+        if comment:
+            command.extend(["-C", comment])
+        code, output = run_capture(command, cwd=Path.home(), timeout=30)
+        if code != 0:
+            raise RuntimeError(output or "Impossible de générer la clé SSH.")
+
+    generated = ssh_public_keys_snapshot()["keys"]
+    public_key = next((key for key in generated if key["name"] == "id_ed25519.pub"), None)
+    if not public_key:
+        raise RuntimeError("La clé a été générée mais sa partie publique reste introuvable.")
+    return {**public_key, "created": True, "message": "Clé SSH Ed25519 générée."}
+
+
+def install_git_job(job):
+    if platform_id() != "windows" or SETTINGS.execution_mode != "native":
+        raise RuntimeError("L'installation automatique de Git est disponible sous Windows en mode natif.")
+    if not executable_available("winget", SETTINGS):
+        raise RuntimeError("Windows Package Manager (winget) est introuvable. Mets Windows à jour ou installe App Installer.")
+
+    current_code, current_output = run_capture([resolve_executable("git", SETTINGS), "--version"], timeout=8)
+    if current_code == 0:
+        job.add(current_output or "Git est déjà installé.")
+        return
+
+    winget = resolve_executable("winget", SETTINGS)
+    command = [
+        winget,
+        "install",
+        "--id",
+        "Git.Git",
+        "--exact",
+        "--source",
+        "winget",
+        "--silent",
+        "--accept-source-agreements",
+        "--accept-package-agreements",
+        "--disable-interactivity",
+    ]
+    job.add("Installation silencieuse de Git pour Windows avec winget...")
+    code = run_stream(job, command, cwd=WORKSPACE.parent if WORKSPACE.parent.is_dir() else Path.home())
+    git_code, git_output = run_capture([resolve_executable("git", SETTINGS), "--version"], timeout=12)
+    if code != 0 or git_code != 0:
+        raise RuntimeError("Git n'a pas été détecté après l'installation. Consulte les détails du job puis réessaie.")
+    job.add(git_output or "Git installé.")
 
 
 def container_status(name):
@@ -1333,6 +1475,7 @@ def run_stream(job, args, cwd=None):
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        **hidden_process_kwargs(),
     )
     with ACTIVE_PROCESSES_LOCK:
         ACTIVE_PROCESSES.add(process)
@@ -1504,7 +1647,17 @@ def install_traefik_job(job):
     status = docker_status(SETTINGS)
     if not status["running"]:
         raise RuntimeError("Docker doit être installé et démarré avant l'installation de Traefik.")
-    manager_job(job, "--install-traefik")
+    git_code, git_output = run_capture(
+        [*command_prefix(SETTINGS), resolve_executable("git", SETTINGS), "--version"],
+        timeout=8,
+    )
+    if git_code != 0:
+        raise RuntimeError("Git doit être installé avant Traefik. Utilise le bouton Installer dans l'étape Git.")
+    job.add(git_output.splitlines()[0] if git_output else "Git détecté.")
+    if SETTINGS.execution_mode == "wsl":
+        manager_job(job, "--install-traefik")
+        return
+    project_service().install_traefik(TRAEFIK_REPO, log=job.add)
 
 
 def start_project_job(job, project):
@@ -2299,6 +2452,8 @@ class Handler(BaseHTTPRequestHandler):
                 return json_response(self, system_status_snapshot())
             if path == "/api/system/project-creation-prerequisites":
                 return json_response(self, project_creation_prerequisites())
+            if path == "/api/system/ssh-keys":
+                return json_response(self, ssh_public_keys_snapshot())
             if path == "/api/jobs":
                 return json_response(self, {"jobs": jobs_snapshot()})
 
@@ -2371,6 +2526,13 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/system/docker/start":
             result = start_docker(SETTINGS)
             return json_response(self, result, status=200 if result.get("ok") else 400)
+
+        if parsed.path == "/api/system/ssh-key/generate":
+            try:
+                payload = self.read_json()
+                return json_response(self, generate_ssh_key(payload.get("comment", "")), status=201)
+            except (ValueError, RuntimeError, OSError) as exc:
+                return json_response(self, {"error": str(exc)}, status=400)
 
         zip_inspect_match = re.match(r"^/api/projects/([^/]+)/module-zip/inspect$", parsed.path)
         if zip_inspect_match:
@@ -2526,6 +2688,8 @@ class Handler(BaseHTTPRequestHandler):
                 )
             elif action == "install_traefik":
                 job = Job("Installer Traefik", install_traefik_job)
+            elif action == "install_git":
+                job = Job("Installer Git pour Windows", install_git_job)
             elif action == "create_database":
                 project = validate_project(payload.get("project", ""))
                 db_name = validate_new_db(payload.get("db", ""))

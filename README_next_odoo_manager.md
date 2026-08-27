@@ -42,7 +42,9 @@ ODOO_MANAGER_API=http://127.0.0.1:8765 npm run dev -- --hostname 127.0.0.1 --por
 
 Premiere tranche disponible :
 
-- premier lancement guide avec verification du workspace, de Docker, de Traefik, de Git et de la cle SSH publique ;
+- premier lancement guide avec verification du workspace, de Docker, de Git, de la cle SSH publique et de Traefik ;
+- installation silencieuse de Git avec `winget` sous Windows, generation Ed25519 et copie de la cle publique vers GitLab ;
+- installation native de Traefik par clone Git atomique puis demarrage Docker Compose, sans terminal externe ;
 - creation native d'un projet Odoo standard ou d'un socle standard complete par un depot d'addons GitLab ;
 - sidebar projets avec recherche et statuts ;
 - onglets Bases, Modules, Logs, Actions ;
@@ -65,8 +67,10 @@ configure le projet puis cree les liens relatifs des modules dans
 creation ; il est conserve dans `PROJET/odoo/addons-store/`.
 
 La creation utilise Git en arguments structures, sans terminal interactif et
-sans demander les identifiants GitLab. L'utilisateur doit seulement disposer
-d'une cle SSH publique deja enregistree sur GitLab. Le projet est prepare dans
+sans demander les identifiants GitLab. Sous Windows, l'assistant peut installer
+Git avec Windows Package Manager, generer une cle Ed25519 locale, afficher
+uniquement sa partie publique et ouvrir la page des cles SSH GitLab. L'utilisateur
+doit ensuite enregistrer cette cle publique dans GitLab. Le projet est prepare dans
 un dossier temporaire du workspace puis deplace a son emplacement final en une
 operation, afin qu'un clone interrompu ne laisse pas de projet partiel.
 

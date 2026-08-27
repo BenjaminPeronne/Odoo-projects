@@ -220,7 +220,7 @@ class ProjectServiceTests(unittest.TestCase):
         self.service.update_project("DEMO", log=lambda _line: None)
 
         commands = [command for command, _cwd in self.runner.streams]
-        self.assertIn(["git", "pull", "--ff-only"], commands)
+        self.assertTrue(any(Path(command[0]).name == "git" and command[1:] == ["pull", "--ff-only"] for command in commands))
         self.assertTrue(has_command_tail(commands, ["compose", "pull"]))
         self.assertTrue(has_command_tail(commands, ["compose", "up", "-d", "--no-recreate"]))
 
@@ -233,6 +233,43 @@ class ProjectServiceTests(unittest.TestCase):
 
         compose_cwds = [cwd.name for command, cwd in self.runner.streams if command[-2:] == ["compose", "pull"]]
         self.assertEqual(compose_cwds, ["DEMO", "OTHER"])
+
+    def test_install_traefik_updates_repository_and_starts_compose_without_shell(self):
+        tools = self.root / "docker-local-tools"
+        traefik = tools / "traefik"
+        (tools / ".git").mkdir(parents=True)
+        traefik.mkdir()
+        (traefik / "compose.yml").write_text("services: {}\n", encoding="utf-8")
+        service = ProjectService(self.settings, self.root, traefik_dir=traefik, runner=self.runner)
+
+        service.install_traefik("ssh://git@example.invalid/tools.git", log=lambda _line: None)
+
+        commands = [command for command, _cwd in self.runner.streams]
+        self.assertTrue(any(Path(command[0]).name == "git" and command[1:] == ["pull", "--ff-only"] for command in commands))
+        self.assertTrue(has_command_tail(commands, ["compose", "up", "-d"]))
+        self.assertFalse(any(command[0] == "sh" for command in commands))
+
+    def test_install_traefik_clones_missing_repository_atomically(self):
+        class CloneRunner(FakeRunner):
+            def stream(self, command, cwd=None, log=None):
+                code = super().stream(command, cwd=cwd, log=log)
+                if len(command) >= 4 and command[1] == "clone":
+                    destination = Path(command[-1])
+                    (destination / ".git").mkdir(parents=True)
+                    (destination / "traefik").mkdir()
+                    (destination / "traefik" / "compose.yml").write_text("services: {}\n", encoding="utf-8")
+                return code
+
+        runner = CloneRunner()
+        traefik = self.root / "docker-local-tools" / "traefik"
+        service = ProjectService(self.settings, self.root, traefik_dir=traefik, runner=runner)
+
+        service.install_traefik("ssh://git@example.invalid/tools.git", log=lambda _line: None)
+
+        self.assertTrue((traefik / "compose.yml").is_file())
+        commands = [command for command, _cwd in runner.streams]
+        self.assertTrue(any(len(command) >= 4 and command[1] == "clone" for command in commands))
+        self.assertTrue(has_command_tail(commands, ["compose", "up", "-d"]))
 
 
 if __name__ == "__main__":

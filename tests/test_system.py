@@ -30,6 +30,16 @@ class DockerStatusTests(unittest.TestCase):
         self.assertEqual(status["version"], "28.0.0")
         self.assertFalse(status["can_start"])
 
+    @mock.patch("odoo_manager_core.platform.platform.system", return_value="Windows")
+    @mock.patch("odoo_manager_core.system.executable_available", return_value=True)
+    @mock.patch("odoo_manager_core.system.subprocess.run")
+    def test_windows_docker_probe_is_hidden(self, run, _available, _system):
+        run.return_value = mock.Mock(returncode=0, stdout='"28.0.0"\n', stderr="")
+
+        docker_status(self.settings)
+
+        self.assertEqual(run.call_args.kwargs["creationflags"], 0x08000000)
+
     @mock.patch("odoo_manager_core.system.subprocess.run")
     @mock.patch("odoo_manager_core.platform.shutil.which")
     @mock.patch("odoo_manager_core.platform.platform.system", return_value="Darwin")

@@ -41,7 +41,14 @@ plus exposee par le backend ; son HTML est archive dans
 La creation d'un nouveau projet se fait directement dans l'application. Le
 formulaire permet de choisir la version Odoo et un environnement standard ou
 un depot d'addons client GitLab. Aucun terminal et aucun mot de passe GitLab ne
-sont demandes : Git utilise la cle SSH deja configuree sur la machine.
+sont demandes. Sous Windows, le premier lancement peut installer Git avec
+`winget`, generer une cle SSH Ed25519, copier sa partie publique et ouvrir la
+page GitLab. La cle privee ne quitte jamais la machine.
+
+Une fois Docker, Git et la cle SSH disponibles, le bouton `Installer Traefik`
+clone ou met a jour `docker-local-tools`, valide le fichier Compose puis demarre
+Traefik directement depuis le backend Python. Aucun terminal externe n'est
+necessaire en mode natif.
 
 Le bandeau Docker indique si le moteur est arrete ou absent. Sur macOS et
 Windows, le bouton `Ouvrir Docker` tente de lancer Docker Desktop. Le bouton
@@ -150,4 +157,4 @@ Repondez `Non`. Le gestionnaire detectera ensuite le nouveau projet, lancera lui
 - Pour mettre a jour tous les modules d'une base, utilisez l'option `6` du menu ou lancez `--update-all-modules PROJET BASE`.
 - Le master password documente pour les bases locales est `odoo`.
 - Par defaut, le workspace est le dossier ou se trouve le script. Il peut etre surcharge avec `ODOO_WORKSPACE=/chemin/vers/Odoo-projects`.
-- Sous Windows, le mode supporte est Windows 10/11 avec WSL 2 et Docker Desktop. MS-DOS n'est pas un environnement d'execution compatible avec Docker et Odoo.
+- Sous Windows 10/11, l'application graphique fonctionne en mode natif avec Docker Desktop. WSL 2 reste disponible pour les anciens parcours shell ou Brainkeys. MS-DOS n'est pas un environnement d'execution compatible avec Docker et Odoo.
