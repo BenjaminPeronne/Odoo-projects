@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from odoo_manager_core.config import ManagerSettings
@@ -57,10 +58,13 @@ class WindowsProcessTests(unittest.TestCase):
     def test_windows_search_path_includes_git_openssh_and_winget(self, _system):
         search_path = executable_search_path()
 
-        self.assertIn(r"C:\Program Files/Git/cmd", search_path)
-        self.assertIn(r"C:\Program Files/Git/usr/bin", search_path)
-        self.assertIn(r"C:\Windows/System32/OpenSSH", search_path)
-        self.assertIn(r"C:\Users\Demo\AppData\Local/Microsoft/WindowsApps", search_path)
+        self.assertIn(str(Path(r"C:\Program Files") / "Git" / "cmd"), search_path)
+        self.assertIn(str(Path(r"C:\Program Files") / "Git" / "usr" / "bin"), search_path)
+        self.assertIn(str(Path(r"C:\Windows") / "System32" / "OpenSSH"), search_path)
+        self.assertIn(
+            str(Path(r"C:\Users\Demo\AppData\Local") / "Microsoft" / "WindowsApps"),
+            search_path,
+        )
 
 
 if __name__ == "__main__":

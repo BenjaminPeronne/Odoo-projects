@@ -220,7 +220,7 @@ class ProjectServiceTests(unittest.TestCase):
         self.service.update_project("DEMO", log=lambda _line: None)
 
         commands = [command for command, _cwd in self.runner.streams]
-        self.assertTrue(any(Path(command[0]).name == "git" and command[1:] == ["pull", "--ff-only"] for command in commands))
+        self.assertTrue(any(Path(command[0]).stem.lower() == "git" and command[1:] == ["pull", "--ff-only"] for command in commands))
         self.assertTrue(has_command_tail(commands, ["compose", "pull"]))
         self.assertTrue(has_command_tail(commands, ["compose", "up", "-d", "--no-recreate"]))
 
@@ -245,7 +245,7 @@ class ProjectServiceTests(unittest.TestCase):
         service.install_traefik("ssh://git@example.invalid/tools.git", log=lambda _line: None)
 
         commands = [command for command, _cwd in self.runner.streams]
-        self.assertTrue(any(Path(command[0]).name == "git" and command[1:] == ["pull", "--ff-only"] for command in commands))
+        self.assertTrue(any(Path(command[0]).stem.lower() == "git" and command[1:] == ["pull", "--ff-only"] for command in commands))
         self.assertTrue(has_command_tail(commands, ["compose", "up", "-d"]))
         self.assertFalse(any(command[0] == "sh" for command in commands))
 
