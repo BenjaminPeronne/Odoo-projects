@@ -63,13 +63,8 @@ Sous Windows, le gestionnaire choisit automatiquement le bon environnement :
 Docker Desktop, Git et Traefik sont utilises nativement, tandis que WSL 2 est
 appele uniquement pour les operations qui l'exigent, sans reglage manuel.
 
-Pour ajouter des modules, selectionnez un projet puis utilisez `Ajouter des
-modules locaux` :
-
-- `Copier et lier` copie les modules detectes dans
-  `PROJET/odoo/addons-store/`, puis cree un lien symbolique relatif dans
-  `PROJET/odoo/addons/`.
-- `Importer ZIP` extrait l'archive temporairement, detecte les dossiers
+Pour ajouter des modules, selectionnez un projet puis utilisez `Importer ZIP`.
+L'import extrait l'archive temporairement, detecte les dossiers
   contenant `__manifest__.py`, copie les modules dans `PROJET/odoo/addons-store/`,
   puis cree les liens relatifs dans `PROJET/odoo/addons/`.
 
@@ -81,6 +76,12 @@ dans `PROJET/odoo/addons-store/`, puis remplace par un lien relatif depuis
 Pour creer une base, selectionnez un projet puis cliquez sur `Creer base`.
 Le gestionnaire demarre le projet si necessaire, appelle Odoo, puis recharge la
 liste des bases. Le master password local habituel est `odoo`.
+
+L'onglet `Bases` separe les bases Odoo de leur serveur PostgreSQL. La base
+technique `postgres` n'est jamais proposee pour les actions Odoo. Le bouton
+`Ouvrir psql` lance, uniquement a la demande, une console connectee a la base
+Odoo selectionnee dans le conteneur PostgreSQL du projet. Aucun port SQL ni mot
+de passe n'est expose sur la machine.
 
 Pour mettre a jour tous les modules d'une base depuis l'interface, selectionnez
 le projet et la base Odoo, puis cliquez sur `Mettre a jour tous les modules`.

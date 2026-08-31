@@ -72,6 +72,52 @@ class DatabaseNameValidationTests(unittest.TestCase):
         self.assertEqual(command[database_option + 1], "sodial_recette#1")
 
 
+class PostgreSqlConsoleTests(unittest.TestCase):
+    @patch("odoo_manager_web.open_terminal_command")
+    @patch("odoo_manager_web.docker_command")
+    @patch("odoo_manager_web.list_databases_for", return_value=["postgres", "sodial_recette#1"])
+    @patch("odoo_manager_web.container_status", return_value="running")
+    @patch("odoo_manager_web.validate_project", return_value="sodial_v19")
+    def test_opens_psql_for_selected_odoo_database(
+        self,
+        _validate_project,
+        _container_status,
+        _list_databases,
+        docker_command,
+        open_terminal,
+    ):
+        docker_command.return_value = ["docker", "exec", "-it", "postgresql-sodial_v19", "psql"]
+        open_terminal.return_value = Mock(ok=True, message="Terminal ouvert.")
+
+        result = web.open_postgresql_console("sodial_v19", "sodial_recette#1")
+
+        self.assertTrue(result["ok"])
+        docker_command.assert_called_once_with(
+            web.SETTINGS,
+            "exec",
+            "-it",
+            "postgresql-sodial_v19",
+            "psql",
+            "-U",
+            "postgres",
+            "-d",
+            "sodial_recette#1",
+        )
+        open_terminal.assert_called_once()
+
+    @patch("odoo_manager_web.validate_project", return_value="sodial_v19")
+    def test_rejects_postgres_system_database(self, _validate_project):
+        with self.assertRaisesRegex(ValueError, "base système postgres"):
+            web.open_postgresql_console("sodial_v19", "postgres")
+
+    @patch("odoo_manager_web.list_databases_for", return_value=["postgres", "other_database"])
+    @patch("odoo_manager_web.container_status", return_value="running")
+    @patch("odoo_manager_web.validate_project", return_value="sodial_v19")
+    def test_rejects_unknown_odoo_database(self, _validate_project, _container_status, _list_databases):
+        with self.assertRaisesRegex(ValueError, "n'existe plus"):
+            web.open_postgresql_console("sodial_v19", "missing_database")
+
+
 class JobResourceTests(unittest.TestCase):
     def setUp(self):
         with web.JOBS_LOCK:

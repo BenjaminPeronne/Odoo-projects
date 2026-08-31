@@ -32,6 +32,7 @@ from odoo_manager_core.platform import (
     executable_search_path,
     execution_path,
     hidden_process_kwargs,
+    open_terminal_command,
     platform_id,
     resolve_executable,
     resolve_host_executable,
@@ -720,6 +721,37 @@ def list_databases_for(project, check_container=True):
     if code != 0:
         return []
     return [line.strip() for line in output.splitlines() if line.strip()]
+
+
+def open_postgresql_console(project, db_name):
+    project = validate_project(project)
+    db_name = validate_odoo_db(db_name)
+    container = f"postgresql-{project}"
+    if container_status(container) != "running":
+        raise RuntimeError("Le conteneur PostgreSQL du projet n'est pas démarré.")
+    if db_name not in list_databases_for(project, check_container=False):
+        raise ValueError("La base Odoo sélectionnée n'existe plus dans PostgreSQL.")
+
+    command = docker_command(
+        SETTINGS,
+        "exec",
+        "-it",
+        container,
+        "psql",
+        "-U",
+        "postgres",
+        "-d",
+        db_name,
+    )
+    result = open_terminal_command(
+        SETTINGS,
+        command,
+        cwd=WORKSPACE,
+        label=f"la console PostgreSQL de {db_name}",
+    )
+    if not result.ok:
+        raise RuntimeError(result.message)
+    return {"ok": True, "message": result.message, "database": db_name}
 
 
 def database_base_versions(project, databases):
@@ -2538,6 +2570,15 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 payload = self.read_json()
                 return json_response(self, generate_ssh_key(payload.get("comment", "")), status=201)
+            except (ValueError, RuntimeError, OSError) as exc:
+                return json_response(self, {"error": str(exc)}, status=400)
+
+        postgresql_match = re.match(r"^/api/projects/([^/]+)/postgresql/open$", parsed.path)
+        if postgresql_match:
+            try:
+                project = validate_project(urllib.parse.unquote(postgresql_match.group(1)))
+                payload = self.read_json()
+                return json_response(self, open_postgresql_console(project, payload.get("db", "")))
             except (ValueError, RuntimeError, OSError) as exc:
                 return json_response(self, {"error": str(exc)}, status=400)
 

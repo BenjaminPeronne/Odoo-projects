@@ -3,10 +3,46 @@ from pathlib import Path
 from unittest import mock
 
 from odoo_manager_core.config import ManagerSettings
-from odoo_manager_core.platform import execution_path, executable_search_path, hidden_process_kwargs, open_terminal_script
+from odoo_manager_core.platform import (
+    execution_path,
+    executable_search_path,
+    hidden_process_kwargs,
+    open_terminal_command,
+    open_terminal_script,
+)
 
 
 class TerminalLaunchTests(unittest.TestCase):
+    @mock.patch("odoo_manager_core.platform.subprocess.Popen")
+    @mock.patch("odoo_manager_core.platform.shutil.which")
+    @mock.patch("odoo_manager_core.platform.platform_id", return_value="windows")
+    def test_windows_opens_interactive_command_in_windows_terminal(self, _platform, which, popen):
+        which.side_effect = lambda name: "C:/Windows/wt.exe" if name == "wt.exe" else None
+        settings = ManagerSettings.from_dict({}, "/tmp/workspace")
+
+        result = open_terminal_command(settings, ["docker", "exec", "-it", "postgresql-DEMO", "psql"])
+
+        self.assertTrue(result.ok)
+        self.assertEqual(
+            popen.call_args.args[0],
+            ["C:/Windows/wt.exe", "docker", "exec", "-it", "postgresql-DEMO", "psql"],
+        )
+
+    @mock.patch("odoo_manager_core.platform.subprocess.Popen")
+    @mock.patch("odoo_manager_core.platform.shutil.which")
+    @mock.patch("odoo_manager_core.platform.platform_id", return_value="linux")
+    def test_linux_opens_interactive_command_in_detected_terminal(self, _platform, which, popen):
+        which.side_effect = lambda name: "/usr/bin/gnome-terminal" if name == "gnome-terminal" else None
+        settings = ManagerSettings.from_dict({}, "/tmp/workspace")
+
+        result = open_terminal_command(settings, ["docker", "exec", "-it", "postgresql-DEMO", "psql"])
+
+        self.assertTrue(result.ok)
+        self.assertEqual(
+            popen.call_args.args[0],
+            ["/usr/bin/gnome-terminal", "--", "docker", "exec", "-it", "postgresql-DEMO", "psql"],
+        )
+
     @mock.patch("odoo_manager_core.platform.subprocess.Popen")
     @mock.patch("odoo_manager_core.platform.wsl_execution_path", return_value="/mnt/c/create_project.sh")
     @mock.patch("odoo_manager_core.platform.shutil.which")

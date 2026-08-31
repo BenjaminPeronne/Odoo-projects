@@ -15,7 +15,6 @@ import {
   FolderPlus,
   GitBranch,
   KeyRound,
-  Link2,
   ListRestart,
   Loader2,
   Logs,
@@ -26,6 +25,7 @@ import {
   Search,
   Settings,
   Square,
+  Terminal,
   Trash2,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -399,7 +399,7 @@ function statusDot(status: string) {
 }
 
 function firstOdooDatabase(project?: Project) {
-  return project?.databases?.find((db) => db !== "postgres") || project?.databases?.[0] || "";
+  return project?.databases?.find((db) => db !== "postgres") || "";
 }
 
 function odooAccessUrl(project?: Project, db?: string) {
@@ -469,6 +469,7 @@ export default function Home() {
   const [selectedJobId, setSelectedJobId] = useState<number | null>(null);
   const [externalLogView, setExternalLogView] = useState<{ title: string; content: string } | null>(null);
   const [loading, setLoading] = useState(false);
+  const [openingPostgresql, setOpeningPostgresql] = useState(false);
   const [initializing, setInitializing] = useState(true);
   const [initializationMessage, setInitializationMessage] = useState("Démarrage du service local…");
   const [initializationError, setInitializationError] = useState("");
@@ -494,7 +495,6 @@ export default function Home() {
   const [selectedZipModules, setSelectedZipModules] = useState<Set<string>>(new Set());
   const [inspectingZip, setInspectingZip] = useState(false);
   const [deleteCodeUninstallFirst, setDeleteCodeUninstallFirst] = useState(true);
-  const [sourcePath, setSourcePath] = useState("");
   const [moduleNames, setModuleNames] = useState("");
   const [deleteConfirm, setDeleteConfirm] = useState("");
   const [pendingUninstallModules, setPendingUninstallModules] = useState<string[]>([]);
@@ -515,10 +515,36 @@ export default function Home() {
   const zipInspectionGeneration = useRef(0);
   const scheduledTimeouts = useRef<Set<number>>(new Set());
   const onboardingPrompted = useRef(false);
+  const logOutputRef = useRef<HTMLPreElement>(null);
+  const logAutoFollow = useRef(true);
+  const lastLogOutputSource = useRef("");
+
+  const scrollLogOutputToBottom = useCallback(() => {
+    window.requestAnimationFrame(() => {
+      const output = logOutputRef.current;
+      if (output) output.scrollTop = output.scrollHeight;
+    });
+  }, []);
+
+  const enableLogAutoFollow = useCallback(() => {
+    logAutoFollow.current = true;
+    scrollLogOutputToBottom();
+  }, [scrollLogOutputToBottom]);
+
+  const handleLogOutputScroll = useCallback(() => {
+    const output = logOutputRef.current;
+    if (!output) return;
+    const distanceFromBottom = output.scrollHeight - output.scrollTop - output.clientHeight;
+    logAutoFollow.current = distanceFromBottom <= 48;
+  }, []);
 
   const selectedProject = useMemo(
     () => overview?.projects.find((project) => project.name === selectedProjectName) || overview?.projects[0],
     [overview, selectedProjectName],
+  );
+  const odooDatabases = useMemo(
+    () => (selectedProject?.databases || []).filter((database) => database !== "postgres"),
+    [selectedProject],
   );
 
   const selectedJob = useMemo(() => jobs.find((job) => job.id === selectedJobId) || jobs[0], [jobs, selectedJobId]);
@@ -586,7 +612,7 @@ export default function Home() {
     setJobs(payload.jobs);
     setSelectedProjectName((currentName) => {
       const project = payload.overview.projects.find((item) => item.name === currentName) || payload.overview.projects[0];
-      setSelectedDb((currentDb) => project?.databases?.includes(currentDb) ? currentDb : firstOdooDatabase(project));
+      setSelectedDb((currentDb) => currentDb !== "postgres" && project?.databases?.includes(currentDb) ? currentDb : firstOdooDatabase(project));
       return project?.name || "";
     });
     setSelectedJobId((currentId) => payload.jobs.some((job) => job.id === currentId) ? currentId : payload.jobs[0]?.id ?? null);
@@ -854,7 +880,7 @@ export default function Home() {
 
   useEffect(() => {
     if (selectedProject) {
-      setSelectedDb((current) => selectedProject.databases?.includes(current) ? current : firstOdooDatabase(selectedProject));
+      setSelectedDb((current) => current !== "postgres" && selectedProject.databases?.includes(current) ? current : firstOdooDatabase(selectedProject));
     }
   }, [selectedProject]);
 
@@ -871,6 +897,7 @@ export default function Home() {
       });
       setSelectedJobId(result.job.id);
       setExternalLogView(null);
+      enableLogAutoFollow();
       pushToast("success", `Action lancée : ${result.job.title}`);
       await refreshJobs();
       return result.job;
@@ -913,6 +940,26 @@ export default function Home() {
       if (!opened) pushToast("error", "Lien impossible à ouvrir depuis l'application.");
     } catch (err) {
       pushToast("error", err instanceof Error ? err.message : "Lien impossible à ouvrir depuis l'application.");
+    }
+  }
+
+  async function openPostgresqlConsole() {
+    const db = selectedDatabaseOrNotify("la console PostgreSQL");
+    if (!db || !selectedProject || openingPostgresql) return;
+    setOpeningPostgresql(true);
+    try {
+      const result = await api<{ ok: boolean; message: string }>(
+        `/api/projects/${encodeURIComponent(selectedProject.name)}/postgresql/open`,
+        {
+          method: "POST",
+          body: JSON.stringify({ db }),
+        },
+      );
+      pushToast("success", result.message || "Console PostgreSQL ouverte.");
+    } catch (err) {
+      pushToast("error", err instanceof Error ? err.message : "Impossible d’ouvrir la console PostgreSQL.");
+    } finally {
+      setOpeningPostgresql(false);
     }
   }
 
@@ -1161,6 +1208,7 @@ export default function Home() {
         title: `Logs Odoo - ${selectedProject.name}`,
         content: payload.logs || "Aucun log.",
       });
+      enableLogAutoFollow();
     } catch (err) {
       pushToast("error", err instanceof Error ? err.message : "Logs indisponibles.");
     }
@@ -1174,6 +1222,7 @@ export default function Home() {
         title: `Diagnostic - ${selectedProject.name}`,
         content: formatDiagnostics(payload),
       });
+      enableLogAutoFollow();
       pushToast("info", "Diagnostic projet chargé.");
     } catch (err) {
       pushToast("error", err instanceof Error ? err.message : "Diagnostic indisponible.");
@@ -1207,6 +1256,7 @@ export default function Home() {
   function selectJob(jobId: number) {
     setExternalLogView(null);
     setSelectedJobId(jobId);
+    enableLogAutoFollow();
   }
 
   function requestUninstall(moduleNames: string[]) {
@@ -1383,10 +1433,20 @@ export default function Home() {
   );
   const selectedProjectStarting = selectedProjectLifecycleJob?.title.startsWith("Démarrer ") ?? false;
   const selectedProjectStopping = selectedProjectLifecycleJob?.title.startsWith("Arrêter ") ?? false;
-  const canUseDb = Boolean(selectedDb && selectedDb !== "postgres");
+  const canUseDb = Boolean(selectedDb && odooDatabases.includes(selectedDb));
   const selectedOdooUrl = odooAccessUrl(selectedProject, selectedDb);
   const outputTitle = externalLogView?.title || selectedJob?.title || "Aucune action sélectionnée";
   const outputContent = externalLogView?.content || selectedJob?.output || selectedJob?.lines?.join("\n") || "Aucune sortie.";
+  const outputSource = externalLogView ? `external:${externalLogView.title}` : `job:${selectedJob?.id || "none"}`;
+
+  useEffect(() => {
+    if (activeTab !== "logs") return;
+    if (lastLogOutputSource.current !== outputSource) {
+      lastLogOutputSource.current = outputSource;
+      logAutoFollow.current = true;
+    }
+    if (logAutoFollow.current) scrollLogOutputToBottom();
+  }, [activeTab, outputContent, outputSource, scrollLogOutputToBottom]);
 
   const toggleModuleSelection = useCallback((name: string, checked: boolean) => {
     setSelectedModules((current) => {
@@ -1722,7 +1782,13 @@ export default function Home() {
               </div>
             )}
 
-            <Tabs value={activeTab} onValueChange={setActiveTab}>
+            <Tabs
+              value={activeTab}
+              onValueChange={(value) => {
+                if (value === "logs") enableLogAutoFollow();
+                setActiveTab(value);
+              }}
+            >
               <TabsList className="w-full justify-start overflow-x-auto lg:w-auto">
                 <TabsTrigger value="bases">
                   <Database className="mr-2 h-4 w-4" />
@@ -1743,53 +1809,97 @@ export default function Home() {
               </TabsList>
 
               <TabsContent value="bases">
-                <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_420px]">
+                <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_400px]">
                   <Card>
                     <CardHeader>
-                      <CardTitle>Bases PostgreSQL</CardTitle>
-                      <CardDescription>Sélectionne la base utilisée pour les actions modules.</CardDescription>
+                      <CardTitle>Bases Odoo</CardTitle>
+                      <CardDescription>Sélectionne l’environnement Odoo utilisé pour les modules et les actions.</CardDescription>
                     </CardHeader>
                     <CardContent>
-                      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                        {(selectedProject?.databases || []).map((db) => (
-                          <button
-                            key={db}
-                            className={cn(
-                              "rounded-md border p-4 text-left transition-colors hover:bg-muted",
-                              selectedDb === db ? "border-primary bg-primary/8" : "bg-card",
-                            )}
-                            onClick={() => setSelectedDb(db)}
-                          >
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="font-medium">{db}</span>
-                              {db === selectedDb && <CheckCircle2 className="h-4 w-4 text-primary" />}
-                            </div>
-                            <div className="mt-2 text-sm text-muted-foreground">
-                              {db === "postgres" ? "Base système" : selectedProject?.database_versions?.[db] || "Base Odoo"}
-                            </div>
-                          </button>
-                        ))}
-                      </div>
-                    </CardContent>
-                  </Card>
-                  <Card>
-                    <CardHeader>
-                      <CardTitle>Créer une base</CardTitle>
-                      <CardDescription>Formulaire guidé branché sur l’API existante.</CardDescription>
-                    </CardHeader>
-                    <CardContent className="space-y-3">
-                      <Button className="w-full" disabled={!selectedProjectReady} onClick={() => setCreateDbOpen(true)}>
-                        <PlusCircle className="h-4 w-4" />
-                        Créer une base
-                      </Button>
-                      {selectedProject && (
-                        <Button className="w-full" variant="outline" onClick={() => openUrl(selectedProject.database_manager_url)}>
-                          <ExternalLink className="h-4 w-4" />
-                          Gestionnaire Odoo natif
-                        </Button>
+                      {odooDatabases.length ? (
+                        <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+                          {odooDatabases.map((db) => (
+                            <button
+                              key={db}
+                              className={cn(
+                                "min-w-0 rounded-md border p-4 text-left transition-colors hover:bg-muted",
+                                selectedDb === db ? "border-primary bg-primary/8" : "bg-card",
+                              )}
+                              onClick={() => setSelectedDb(db)}
+                            >
+                              <div className="flex min-w-0 items-start justify-between gap-2">
+                                <span className="min-w-0 break-words font-medium">{db}</span>
+                                {db === selectedDb && <CheckCircle2 className="h-4 w-4 shrink-0 text-primary" />}
+                              </div>
+                              <div className="mt-2 text-sm text-muted-foreground">
+                                {selectedProject?.database_versions?.[db] || "Base Odoo"}
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="rounded-md border border-dashed p-6 text-center">
+                          <Database className="mx-auto h-6 w-6 text-muted-foreground" />
+                          <p className="mt-3 font-medium">Aucune base Odoo</p>
+                          <p className="mt-1 text-sm text-muted-foreground">Crée une base pour commencer à utiliser ce projet.</p>
+                        </div>
                       )}
                     </CardContent>
                   </Card>
+                  <div className="grid min-w-0 content-start gap-4">
+                    <Card>
+                      <CardHeader>
+                        <CardTitle>Créer une base Odoo</CardTitle>
+                        <CardDescription>Ajoute une nouvelle base métier au projet sélectionné.</CardDescription>
+                      </CardHeader>
+                      <CardContent className="space-y-3">
+                        <Button className="w-full" disabled={!selectedProjectReady} onClick={() => setCreateDbOpen(true)}>
+                          <PlusCircle className="h-4 w-4" />
+                          Créer une base Odoo
+                        </Button>
+                        {selectedProject && (
+                          <Button className="w-full" variant="outline" onClick={() => openUrl(selectedProject.database_manager_url)}>
+                            <ExternalLink className="h-4 w-4" />
+                            Gestionnaire de bases Odoo
+                          </Button>
+                        )}
+                      </CardContent>
+                    </Card>
+
+                    <Card>
+                      <CardHeader>
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <CardTitle>Serveur PostgreSQL</CardTitle>
+                            <CardDescription className="mt-1">
+                              Service technique qui stocke les bases Odoo. Il ne se sélectionne pas comme une base métier.
+                            </CardDescription>
+                          </div>
+                          <Badge variant={statusVariant(selectedProject?.postgres_status || "absent")} className="shrink-0">
+                            {selectedProject?.postgres_status || "absent"}
+                          </Badge>
+                        </div>
+                      </CardHeader>
+                      <CardContent className="space-y-4">
+                        <div className="min-w-0 rounded-md bg-muted/55 p-3 text-sm">
+                          <div className="text-muted-foreground">Conteneur</div>
+                          <div className="mt-1 break-all font-medium">{selectedProject ? `postgresql-${selectedProject.name}` : "-"}</div>
+                          <div className="mt-3 text-muted-foreground">Base Odoo ciblée</div>
+                          <div className="mt-1 break-words font-medium">{selectedDb || "Aucune base sélectionnée"}</div>
+                        </div>
+                        <Button
+                          className="w-full"
+                          variant="outline"
+                          disabled={!canUseDb || selectedProject?.postgres_status !== "running" || openingPostgresql}
+                          onClick={openPostgresqlConsole}
+                        >
+                          {openingPostgresql ? <Loader2 className="h-4 w-4 animate-spin" /> : <Terminal className="h-4 w-4" />}
+                          Ouvrir psql
+                        </Button>
+                        <p className="text-xs text-muted-foreground">La console s’ouvre dans le terminal du système avec la base Odoo sélectionnée.</p>
+                      </CardContent>
+                    </Card>
+                  </div>
                 </div>
               </TabsContent>
 
@@ -1856,10 +1966,10 @@ export default function Home() {
                       </Select>
                       <Select value={selectedDb} onValueChange={setSelectedDb}>
                         <SelectTrigger>
-                          <SelectValue placeholder="Base" />
+                          <SelectValue placeholder="Base Odoo" />
                         </SelectTrigger>
                         <SelectContent>
-                          {(selectedProject?.databases || []).map((db) => (
+                          {odooDatabases.map((db) => (
                             <SelectItem key={db} value={db}>
                               {db}
                             </SelectItem>
@@ -2079,7 +2189,11 @@ export default function Home() {
                       </div>
                     </CardHeader>
                     <CardContent className="min-w-0">
-                      <pre className="min-h-[260px] max-h-[min(58vh,620px)] max-w-full overflow-auto whitespace-pre-wrap break-words rounded-md bg-slate-950 p-3 text-xs leading-relaxed text-emerald-100 sm:p-4">
+                      <pre
+                        ref={logOutputRef}
+                        className="min-h-[260px] max-h-[min(58vh,620px)] max-w-full overflow-auto whitespace-pre-wrap break-words rounded-md bg-slate-950 p-3 text-xs leading-relaxed text-emerald-100 sm:p-4"
+                        onScroll={handleLogOutputScroll}
+                      >
                         {outputContent}
                       </pre>
                     </CardContent>
@@ -2122,19 +2236,6 @@ export default function Home() {
                       <Button className="w-full" onClick={() => createJob("update_all")}>
                         <CloudDownload className="h-4 w-4" />
                         MAJ tous les projets
-                      </Button>
-                    </CardContent>
-                  </Card>
-                  <Card>
-                    <CardHeader>
-                      <CardTitle>Lier des modules</CardTitle>
-                      <CardDescription>Copie les modules dans odoo/addons-store puis crée les liens relatifs dans odoo/addons.</CardDescription>
-                    </CardHeader>
-                    <CardContent className="space-y-2">
-                      <Input placeholder="/Users/.../addons" value={sourcePath} onChange={(event) => setSourcePath(event.target.value)} />
-                      <Button className="w-full" variant="outline" disabled={!selectedProjectReady || !sourcePath} onClick={() => createJob("link_modules", { project: selectedProject?.name, source: sourcePath })}>
-                        <Link2 className="h-4 w-4" />
-                        Copier et lier
                       </Button>
                     </CardContent>
                   </Card>

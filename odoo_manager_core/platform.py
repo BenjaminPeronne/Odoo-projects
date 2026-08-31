@@ -209,6 +209,75 @@ def start_docker_desktop(settings):
         return LaunchResult(False, f"Impossible de démarrer Docker: {exc}")
 
 
+def open_terminal_command(settings, command, cwd=None, label="la commande"):
+    current_platform = platform_id()
+    command = [str(argument) for argument in command]
+    if not command:
+        return LaunchResult(False, "Commande de terminal manquante.")
+    cwd = Path(cwd or Path.home()).expanduser().resolve()
+    preferred = settings.terminal.strip().lower()
+
+    try:
+        if current_platform == "macos":
+            terminal_command = f"cd {shlex.quote(str(cwd))} && {shlex.join(command)}"
+            application = "iTerm" if preferred in {"iterm", "iterm2"} else "Terminal"
+            if application == "iTerm":
+                source = (
+                    'tell application "iTerm"\n'
+                    "  activate\n"
+                    "  if (count of windows) = 0 then create window with default profile\n"
+                    f"  tell current session of current window to write text {json.dumps(terminal_command)}\n"
+                    "end tell\n"
+                )
+            else:
+                source = (
+                    'tell application "Terminal"\n'
+                    "  activate\n"
+                    f"  do script {json.dumps(terminal_command)}\n"
+                    "end tell\n"
+                )
+            process = subprocess.run(
+                ["osascript", "-e", source],
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            if process.returncode != 0:
+                detail = (process.stderr or process.stdout).strip()
+                return LaunchResult(False, f"Impossible d’ouvrir {application}: {detail}")
+            return LaunchResult(True, f"{application} ouvert pour {label}.")
+
+        if current_platform == "windows":
+            windows_terminal = shutil.which("wt.exe")
+            if windows_terminal:
+                subprocess.Popen([windows_terminal, *command], cwd=str(cwd))
+                return LaunchResult(True, f"Windows Terminal ouvert pour {label}.")
+            cmd = shutil.which("cmd.exe")
+            if cmd:
+                subprocess.Popen([cmd, "/c", "start", "", *command], cwd=str(cwd))
+                return LaunchResult(True, f"Terminal ouvert pour {label}.")
+            return LaunchResult(False, "Windows Terminal et cmd.exe sont introuvables.")
+
+        candidates = []
+        if preferred not in {"", "auto"}:
+            candidates.append(preferred)
+        candidates.extend(["x-terminal-emulator", "gnome-terminal", "konsole", "xfce4-terminal", "xterm"])
+        executable = next((shutil.which(name) for name in candidates if shutil.which(name)), None)
+        if not executable:
+            return LaunchResult(False, "Aucun terminal graphique compatible n’a été trouvé.")
+        name = Path(executable).name
+        if name == "gnome-terminal":
+            terminal_arguments = [executable, "--", *command]
+        else:
+            terminal_arguments = [executable, "-e", *command]
+        subprocess.Popen(terminal_arguments, cwd=str(cwd))
+        return LaunchResult(True, f"Terminal ouvert avec {name} pour {label}.")
+    except (OSError, subprocess.SubprocessError) as exc:
+        return LaunchResult(False, f"Impossible d’ouvrir le terminal: {exc}")
+
+
 def open_terminal_script(settings, script_path, cwd=None):
     current_platform = platform_id()
     script_path = Path(script_path).expanduser().resolve()
