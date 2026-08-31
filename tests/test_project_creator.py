@@ -59,7 +59,8 @@ class ProjectCreatorTests(unittest.TestCase):
         return ProjectCreator(self.settings, self.workspace, service)
 
     def test_standard_project_is_created_atomically_with_relative_enterprise_links(self):
-        target = self.creator().create("DEMO_V19", "19.0")
+        runner = FakeRunner()
+        target = self.creator(runner).create("DEMO_V19", "19.0")
 
         self.assertTrue((target / "docker-compose.yml").exists())
         self.assertIn("odoo-DEMO_V19", (target / "docker-compose.yml").read_text(encoding="utf-8"))
@@ -67,6 +68,17 @@ class ProjectCreatorTests(unittest.TestCase):
         self.assertTrue(link.is_symlink())
         self.assertEqual(Path("../addons-store/odoo_entreprise/web_enterprise"), link.readlink())
         self.assertFalse((self.workspace / ".odoo_manager_staging").exists())
+        clone_commands = [command for command in runner.commands if "clone" in command]
+        self.assertTrue(clone_commands)
+        self.assertTrue(
+            all(
+                command[command.index("clone") - 2 : command.index("clone")]
+                == ["-c", "core.longpaths=true"]
+                and command[command.index("clone") + 1 : command.index("clone") + 3]
+                == ["--config", "core.longpaths=true"]
+                for command in clone_commands
+            )
+        )
 
     def test_gitlab_addons_are_cloned_to_store_and_linked(self):
         target = self.creator().create(

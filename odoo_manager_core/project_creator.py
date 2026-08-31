@@ -86,6 +86,8 @@ class ProjectCreator:
         return [
             *command_prefix(self.settings),
             resolve_executable("git", self.settings),
+            "-c",
+            "core.longpaths=true",
             *arguments,
         ]
 
@@ -102,6 +104,8 @@ class ProjectCreator:
         self.log(log, f"Récupération de {repository.rsplit('/', 1)[-1]} ({branch})...")
         command = self.git(
             "clone",
+            "--config",
+            "core.longpaths=true",
             "--depth",
             "1",
             "--branch",
@@ -113,7 +117,8 @@ class ProjectCreator:
         code = self.project_service.stream(command, cwd=self.workspace, log=log)
         if code != 0:
             raise RuntimeError(
-                "Le dépôt GitLab n'a pas pu être récupéré. Vérifie ta clé SSH, l'accès au dépôt et la branche."
+                "Le dépôt GitLab n'a pas pu être récupéré. Vérifie ta clé SSH, l'accès au dépôt et la branche. "
+                "Sous Windows, place aussi le dossier des projets dans un chemin court, par exemple C:\\Odoo."
             )
 
     @staticmethod
