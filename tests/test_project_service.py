@@ -20,6 +20,7 @@ class FakeRunner:
         self.odoo_server_running = True
         self.odoo_port_ready = True
         self.odoo_port_states = []
+        self.odoo_init_commands = []
         self.stream_codes = []
         self.compose_container_ids = []
         self.localtime_mounts = {}
@@ -74,6 +75,9 @@ class FakeRunner:
                 return 0, "odoo container startup log"
             return 0, "database system is starting up"
         if len(command) >= 5 and command[1:3] == ["exec", "odoo-DEMO"] and command[3:5] == ["sh", "-lc"]:
+            if "/proc/1/cmdline" in command[-1]:
+                init_command = self.odoo_init_commands.pop(0) if self.odoo_init_commands else "/bin/bash"
+                return 0, init_command
             if "tail -n 120" in command[-1]:
                 return 0, "odoo startup traceback"
             if "tail -n 30" in command[-1]:
@@ -175,6 +179,46 @@ class ProjectServiceTests(unittest.TestCase):
         )
 
         self.assertFalse(any("Derniers logs Odoo" in line for line in logs))
+
+    def test_waits_for_image_entrypoint_before_starting_odoo(self):
+        self.runner.statuses = {"odoo-DEMO": "running"}
+        self.runner.odoo_init_commands = [
+            "/bin/bash /init.sh /bin/bash",
+            "/bin/bash /init.sh /bin/bash",
+            "/bin/bash",
+        ]
+        logs = []
+
+        self.service.wait_for_odoo_container_initialization(
+            "odoo-DEMO",
+            max_wait=20,
+            log=logs.append,
+            sleep=lambda _seconds: None,
+        )
+
+        self.assertTrue(any("installation des dépendances" in line for line in logs))
+        self.assertIn("Préparation du conteneur Odoo terminée.", logs)
+
+    def test_start_project_checks_image_entrypoint_before_odoo_process(self):
+        self.runner.statuses = {
+            "odoo-DEMO": "running",
+            "postgresql-DEMO": "running",
+        }
+        self.runner.odoo_init_commands = ["/bin/bash /init.sh /bin/bash", "/bin/bash"]
+
+        self.service.start_project("DEMO", log=lambda _line: None)
+
+        init_probe_index = next(
+            index
+            for index, (command, _cwd, _timeout) in enumerate(self.runner.captures)
+            if "/proc/1/cmdline" in command[-1]
+        )
+        process_probe_index = next(
+            index
+            for index, (command, _cwd, _timeout) in enumerate(self.runner.captures)
+            if "grep -E '([/][o]doo-bin" in command[-1]
+        )
+        self.assertLess(init_probe_index, process_probe_index)
 
     def test_wait_odoo_port_stops_early_and_reports_logs_when_process_exits(self):
         self.runner.odoo_port_ready = False

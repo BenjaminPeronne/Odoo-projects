@@ -58,6 +58,8 @@ afin de ne pas afficher une page `Bad Gateway` pendant l'initialisation.
 Sur les volumes Windows plus lents, Odoo peut initialiser ses addons pendant
 jusqu'a cinq minutes. Le gestionnaire surveille alors le processus et le port
 8069 ; si Odoo s'arrete, ses derniers logs sont affiches immediatement.
+Au premier demarrage d'un conteneur, il attend aussi la fin de `/init.sh` et de
+l'installation des dependances `apt`/`pip` avant de lancer le serveur Odoo.
 
 Une fois Docker, Git et la cle SSH disponibles, le bouton `Installer Traefik`
 clone ou met a jour `docker-local-tools`, valide le fichier Compose puis demarre

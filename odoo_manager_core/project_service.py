@@ -463,6 +463,55 @@ class ProjectService:
             waited += 2
         raise RuntimeError(f"Le conteneur {container} n'est pas running après {max_wait}s.")
 
+    def wait_for_odoo_container_initialization(
+        self,
+        container,
+        max_wait=600,
+        log=None,
+        sleep=None,
+    ):
+        """Wait until the image entrypoint has installed project dependencies."""
+        sleep = sleep or time.sleep
+        waited = 0
+        init_command = "tr '\\000' ' ' </proc/1/cmdline 2>/dev/null || true"
+        announced = False
+
+        while waited <= max_wait:
+            status = self.container_status(container)
+            if status != "running":
+                self.odoo_startup_diagnostics(container, log=log)
+                raise RuntimeError(
+                    f"Le conteneur {container} s'est arrêté pendant sa préparation ({status})."
+                )
+
+            code, command = self.capture(
+                self.docker("exec", container, "sh", "-lc", init_command),
+                timeout=8,
+            )
+            initializing = code != 0 or "/init.sh" in command
+            if not initializing:
+                if announced:
+                    self.log(log, "Préparation du conteneur Odoo terminée.")
+                return
+
+            if not announced:
+                self.log(
+                    log,
+                    "Préparation du conteneur Odoo: installation des dépendances système et Python...",
+                )
+                announced = True
+            elif waited % 10 == 0:
+                self.log(log, f"Préparation du conteneur Odoo... {waited}s/{max_wait}s")
+
+            sleep(2)
+            waited += 2
+
+        self.odoo_startup_diagnostics(container, log=log)
+        raise RuntimeError(
+            f"La préparation du conteneur Odoo dépasse {max_wait}s. "
+            "Consulte les logs affichés ci-dessus."
+        )
+
     def odoo_server_running(self, container):
         process_command = (
             "ps -eo args | "
@@ -621,7 +670,9 @@ class ProjectService:
         self.start_traefik(log=log)
         self.log(log, f"Démarrage du projet {project}...")
         self.compose_up_project(project, path, log=log)
-        self.wait_for_container(f"odoo-{project}", log=log)
+        container = f"odoo-{project}"
+        self.wait_for_container(container, log=log)
+        self.wait_for_odoo_container_initialization(container, log=log)
         self.start_odoo_server(project, log=log)
         self.wait_project_http(project, log=log)
         self.log(log, "")
