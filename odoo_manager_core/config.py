@@ -57,16 +57,7 @@ class ManagerSettings:
         mode = str(payload.get("execution_mode", "native")).strip().lower()
         if mode not in {"native", "wsl"}:
             mode = "native"
-        system_name = platform.system()
-        if system_name == "Windows":
-            # Windows orchestration is automatic: host tools remain native and
-            # WSL is invoked only by the operations that specifically need it.
-            mode = "native"
         wsl_distribution = str(payload.get("wsl_distribution", "")).strip()
-        if system_name == "Windows":
-            # Let wsl.exe select the configured default distribution. A stale
-            # hidden distribution name must not block automatic fallbacks.
-            wsl_distribution = ""
         try:
             poll_interval = int(payload.get("docker_poll_interval", 10))
         except (TypeError, ValueError):
@@ -97,6 +88,18 @@ class SettingsStore:
         configured_file = os.environ.get("ODOO_MANAGER_CONFIG", "").strip()
         self.path = Path(config_file or configured_file or default_config_dir() / "config.json").expanduser()
 
+    @staticmethod
+    def normalize_runtime_payload(payload):
+        normalized = dict(payload if isinstance(payload, dict) else {})
+        if platform.system() == "Windows":
+            # Windows orchestration is automatic: host tools remain native and
+            # WSL is invoked only by the operations that specifically need it.
+            normalized["execution_mode"] = "native"
+            # Let wsl.exe select the default distribution so a stale hidden
+            # distribution name cannot block automatic fallbacks.
+            normalized["wsl_distribution"] = ""
+        return normalized
+
     def load(self):
         payload = {}
         try:
@@ -105,7 +108,7 @@ class SettingsStore:
             pass
         except (OSError, ValueError, TypeError):
             payload = {}
-        return ManagerSettings.from_dict(payload, self.default_workspace)
+        return ManagerSettings.from_dict(self.normalize_runtime_payload(payload), self.default_workspace)
 
     def save(self, settings):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -120,7 +123,7 @@ class SettingsStore:
     def update(self, payload, create_workspace=False):
         current = self.load().to_dict()
         current.update(payload if isinstance(payload, dict) else {})
-        settings = ManagerSettings.from_dict(current, self.default_workspace)
+        settings = ManagerSettings.from_dict(self.normalize_runtime_payload(current), self.default_workspace)
         workspace = Path(settings.workspace)
         if create_workspace:
             workspace.mkdir(parents=True, exist_ok=True)

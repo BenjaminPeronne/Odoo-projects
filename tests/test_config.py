@@ -28,7 +28,8 @@ class SettingsTests(unittest.TestCase):
             Path("C:/Users/test/AppData/Roaming/Odoo Manager"),
         )
 
-    def test_store_round_trip_and_validation(self):
+    @mock.patch("odoo_manager_core.config.platform.system", return_value="Linux")
+    def test_store_round_trip_and_validation(self, _system):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             workspace = root / "workspace"
@@ -56,10 +57,12 @@ class SettingsTests(unittest.TestCase):
 
     @mock.patch("odoo_manager_core.config.platform.system", return_value="Windows")
     def test_windows_legacy_wsl_mode_is_migrated_to_automatic_native(self, _system):
-        settings = ManagerSettings.from_dict(
-            {"execution_mode": "wsl", "wsl_distribution": "Ubuntu"},
-            "/tmp/workspace",
-        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            settings = SettingsStore(root / "workspace", root / "config.json").update(
+                {"execution_mode": "wsl", "wsl_distribution": "Ubuntu"},
+                create_workspace=True,
+            )
 
         self.assertEqual(settings.execution_mode, "native")
         self.assertEqual(settings.wsl_distribution, "")
