@@ -110,8 +110,15 @@ class ProjectCreatorTests(unittest.TestCase):
         self.assertTrue(link.is_symlink())
         self.assertEqual(Path("../addons-store/client-addons/custom_module"), link.readlink())
 
+    @mock.patch("odoo_manager_core.project_creator.platform_id", return_value="windows")
+    @mock.patch("odoo_manager_core.project_creator.host_executable_available", return_value=False)
     @mock.patch("odoo_manager_core.project_creator.wsl_execution_path")
-    def test_wsl_mode_creates_relative_links_through_linux(self, wsl_execution_path):
+    def test_wsl_mode_creates_relative_links_through_linux(
+        self,
+        wsl_execution_path,
+        _wsl_available,
+        _platform,
+    ):
         project = self.workspace / "DEMO"
         module = project / "odoo" / "addons-store" / "custom" / "custom_module"
         addons = project / "odoo" / "addons"
@@ -143,6 +150,7 @@ class ProjectCreatorTests(unittest.TestCase):
             ],
         )
 
+    @mock.patch("odoo_manager_core.project_creator.host_executable_available", return_value=False)
     @mock.patch.object(Path, "symlink_to", side_effect=OSError("privilege missing"))
     @mock.patch("odoo_manager_core.project_creator.platform_id", return_value="windows")
     @mock.patch(
@@ -154,6 +162,7 @@ class ProjectCreatorTests(unittest.TestCase):
         _wsl_execution_path,
         _platform,
         _symlink,
+        _wsl_available,
     ):
         project = self.workspace / "DEMO"
         module = project / "odoo" / "addons-store" / "custom" / "custom_module"
