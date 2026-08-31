@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from odoo_manager_core.config import ManagerSettings
-from odoo_manager_core.project_service import ProjectService
+from odoo_manager_core.project_service import ODOO_STARTUP_LOG, ODOO_STARTUP_STATUS, ProjectService
 
 
 def has_command_tail(commands, tail):
@@ -78,6 +78,10 @@ class FakeRunner:
             if "/proc/1/cmdline" in command[-1]:
                 init_command = self.odoo_init_commands.pop(0) if self.odoo_init_commands else "/bin/bash"
                 return 0, init_command
+            if ODOO_STARTUP_STATUS in command[-1]:
+                return 0, "1"
+            if ODOO_STARTUP_LOG in command[-1]:
+                return 0, "ModuleNotFoundError: No module named 'missing_dependency'"
             if "tail -n 120" in command[-1]:
                 return 0, "odoo startup traceback"
             if "tail -n 30" in command[-1]:
@@ -235,6 +239,25 @@ class ProjectServiceTests(unittest.TestCase):
 
         self.assertIn("odoo startup traceback", logs)
         self.assertIn("odoo container startup log", logs)
+        self.assertIn("1", logs)
+        self.assertIn("ModuleNotFoundError: No module named 'missing_dependency'", logs)
+
+    def test_odoo_launch_records_early_output_and_exit_status(self):
+        self.runner.odoo_server_running = False
+        self.runner.odoo_port_ready = True
+
+        self.service.start_odoo_server("DEMO", log=lambda _line: None)
+
+        launch = next(
+            command
+            for command, _cwd in self.runner.streams
+            if command[1:3] == ["exec", "-e"] and "LOG_ATTACHMENTS=False" in command
+        )
+        self.assertEqual(launch[-3:-1], ["sh", "-lc"])
+        self.assertIn(f": > {ODOO_STARTUP_LOG}", launch[-1])
+        self.assertIn(f"> {ODOO_STARTUP_STATUS}", launch[-1])
+        self.assertIn("/home/_venv/bin/python /home/odoo/srv/server/odoo/odoo-bin", launch[-1])
+        self.assertIn("--logfile=/home/odoo/srv/data/odoo.log", launch[-1])
 
     @patch("odoo_manager_core.project_service.http.client.HTTPConnection")
     def test_http_probe_uses_loopback_with_traefik_host_header(self, connection_class):

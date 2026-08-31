@@ -60,6 +60,9 @@ jusqu'a cinq minutes. Le gestionnaire surveille alors le processus et le port
 8069 ; si Odoo s'arrete, ses derniers logs sont affiches immediatement.
 Au premier demarrage d'un conteneur, il attend aussi la fin de `/init.sh` et de
 l'installation des dependances `apt`/`pip` avant de lancer le serveur Odoo.
+La sortie initiale et le code retour du processus sont conserves dans
+`odoo_data/odoo-manager-startup.*` afin que le gestionnaire affiche l'erreur
+reelle lorsque le serveur quitte avant l'ouverture du port 8069.
 
 Une fois Docker, Git et la cle SSH disponibles, le bouton `Installer Traefik`
 clone ou met a jour `docker-local-tools`, valide le fichier Compose puis demarre

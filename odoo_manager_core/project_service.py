@@ -14,6 +14,8 @@ from .platform import executable_search_path, hidden_process_kwargs, resolve_exe
 
 
 COMPOSE_FILENAMES = ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml")
+ODOO_STARTUP_LOG = "/home/odoo/srv/data/odoo-manager-startup.log"
+ODOO_STARTUP_STATUS = "/home/odoo/srv/data/odoo-manager-startup.status"
 ACTIVE_PROCESSES = set()
 ACTIVE_PROCESSES_LOCK = threading.Lock()
 
@@ -526,6 +528,28 @@ class ProjectService:
     def odoo_startup_diagnostics(self, container, log=None):
         commands = (
             (
+                "Résultat du dernier lancement Odoo:",
+                self.docker(
+                    "exec",
+                    container,
+                    "sh",
+                    "-lc",
+                    f"test -f {ODOO_STARTUP_STATUS} && cat {ODOO_STARTUP_STATUS} || true",
+                ),
+                8,
+            ),
+            (
+                "Sortie du dernier lancement Odoo:",
+                self.docker(
+                    "exec",
+                    container,
+                    "sh",
+                    "-lc",
+                    f"tail -n 160 {ODOO_STARTUP_LOG} 2>/dev/null || true",
+                ),
+                12,
+            ),
+            (
                 "Processus dans le conteneur Odoo:",
                 self.docker(
                     "exec",
@@ -643,6 +667,23 @@ class ProjectService:
             self.log(log, f"Serveur Odoo déjà démarré dans {container}")
         else:
             self.log(log, f"Démarrage du serveur Odoo dans {container}...")
+            launch_command = (
+                f"rm -f {ODOO_STARTUP_STATUS}; "
+                f": > {ODOO_STARTUP_LOG}; "
+                "if [ -x /home/_venv/bin/python ] && "
+                "[ -f /home/odoo/srv/server/odoo/odoo-bin ]; then "
+                "/home/_venv/bin/python /home/odoo/srv/server/odoo/odoo-bin "
+                "-c /home/odoo/srv/conf/odoo.conf "
+                "--logfile=/home/odoo/srv/data/odoo.log; "
+                "else "
+                "odoo -c /home/odoo/srv/conf/odoo.conf "
+                "--logfile=/home/odoo/srv/data/odoo.log; "
+                "fi "
+                f">> {ODOO_STARTUP_LOG} 2>&1; "
+                "code=$?; "
+                f"printf '%s\\n' \"$code\" > {ODOO_STARTUP_STATUS}; "
+                "exit \"$code\""
+            )
             code = self.stream(
                 self.docker(
                     "exec",
@@ -650,10 +691,9 @@ class ProjectService:
                     "LOG_ATTACHMENTS=False",
                     "-d",
                     container,
-                    "odoo",
-                    "-c",
-                    "/home/odoo/srv/conf/odoo.conf",
-                    "--logfile=/home/odoo/srv/data/odoo.log",
+                    "sh",
+                    "-lc",
+                    launch_command,
                 ),
                 log=log,
             )
