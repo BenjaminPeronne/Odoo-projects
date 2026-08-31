@@ -18,6 +18,7 @@ class FakeRunner:
         self.fail_repository = fail_repository
         self.wsl_path_exists = wsl_path_exists
         self.commands = []
+        self.batch_script = ""
 
     def capture(self, command, cwd=None, timeout=10):
         self.commands.append(command)
@@ -28,6 +29,10 @@ class FakeRunner:
     def stream(self, command, cwd=None, log=None):
         self.commands.append(command)
         if "ln" in command or "rm" in command:
+            return 0
+        if "sh" in command:
+            scripts = list(Path(cwd).rglob(".odoo_manager_links.sh"))
+            self.batch_script = scripts[0].read_text(encoding="utf-8") if scripts else ""
             return 0
         repository = next((item for item in command if isinstance(item, str) and item.endswith(".git")), "")
         if repository == self.fail_repository:
@@ -77,15 +82,20 @@ class ProjectCreatorTests(unittest.TestCase):
         self.assertFalse((self.workspace / ".odoo_manager_staging").exists())
         clone_commands = [command for command in runner.commands if "clone" in command]
         self.assertTrue(clone_commands)
-        self.assertTrue(
-            all(
-                command[command.index("clone") - 2 : command.index("clone")]
-                == ["-c", "core.longpaths=true"]
-                and command[command.index("clone") + 1 : command.index("clone") + 3]
-                == ["--config", "core.longpaths=true"]
-                for command in clone_commands
+        for command in clone_commands:
+            for setting in (
+                "core.longpaths=true",
+                "core.fscache=true",
+                "core.preloadindex=true",
+                "core.autocrlf=false",
+                "gc.auto=0",
+            ):
+                self.assertIn(setting, command)
+            self.assertEqual(
+                command[command.index("clone") + 1 : command.index("clone") + 3],
+                ["--config", "core.longpaths=true"],
             )
-        )
+            self.assertIn("--no-tags", command)
 
     def test_gitlab_addons_are_cloned_to_store_and_linked(self):
         target = self.creator().create(
@@ -168,6 +178,59 @@ class ProjectCreatorTests(unittest.TestCase):
                 "/mnt/c/Odoo/DEMO/odoo/addons/custom_module",
             ],
         )
+
+    @mock.patch("odoo_manager_core.project_creator.wsl_execution_path", return_value="/mnt/c/Odoo/DEMO/odoo/addons")
+    @mock.patch("odoo_manager_core.project_creator.host_executable_available", return_value=True)
+    @mock.patch("odoo_manager_core.project_creator.platform_id", return_value="windows")
+    def test_windows_batches_all_addon_links_in_one_wsl_process(
+        self,
+        _platform,
+        _wsl_available,
+        _wsl_execution_path,
+    ):
+        project = self.workspace / "DEMO"
+        source = project / "odoo" / "addons-store" / "custom"
+        addons = project / "odoo" / "addons"
+        addons.mkdir(parents=True)
+        for name in ("module_alpha", "module_beta"):
+            module = source / name
+            module.mkdir(parents=True)
+            (module / "__manifest__.py").write_text("{}\n", encoding="utf-8")
+        runner = FakeRunner()
+        creator = self.creator(runner)
+
+        linked = creator.link_modules(source, addons)
+
+        self.assertEqual(linked, 2)
+        shell_commands = [command for command in runner.commands if "sh" in command]
+        self.assertEqual(len(shell_commands), 1)
+        self.assertEqual(runner.batch_script.count("ln -s --"), 2)
+        self.assertIn("Préparation des liens: 2/2", runner.batch_script)
+        self.assertFalse((addons / ".odoo_manager_links.sh").exists())
+
+    def test_clone_reuses_objects_from_existing_local_repository(self):
+        existing = self.workspace / "EXISTING" / "odoo" / "odoo"
+        git_dir = existing / ".git"
+        git_dir.mkdir(parents=True)
+        (git_dir / "config").write_text(
+            '[remote "origin"]\n'
+            '    url = ssh://git@gitlab.sudokeys.com:10022/sudokeys/odoo.git\n',
+            encoding="utf-8",
+        )
+        runner = FakeRunner()
+        creator = self.creator(runner)
+        destination = self.workspace / "NEW" / "odoo" / "odoo"
+
+        creator.clone(
+            "ssh://git@gitlab.sudokeys.com:10022/sudokeys/odoo.git",
+            "19.0",
+            destination,
+        )
+
+        clone_command = next(command for command in runner.commands if "clone" in command)
+        reference_index = clone_command.index("--reference-if-able")
+        self.assertEqual(Path(clone_command[reference_index + 1]), existing.resolve())
+        self.assertIn("--dissociate", clone_command)
 
     @mock.patch.object(Path, "exists", side_effect=OSError(1920, "unreadable WSL symlink"))
     @mock.patch.object(Path, "is_symlink", side_effect=OSError(1920, "unreadable WSL symlink"))

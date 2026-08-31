@@ -1,12 +1,15 @@
 import os
 import re
+import shlex
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
 from .platform import (
     command_prefix,
     execution_path,
+    host_executable_available,
     platform_id,
     resolve_executable,
     wsl_command_prefix,
@@ -95,6 +98,14 @@ class ProjectCreator:
             resolve_executable("git", self.settings),
             "-c",
             "core.longpaths=true",
+            "-c",
+            "core.fscache=true",
+            "-c",
+            "core.preloadindex=true",
+            "-c",
+            "core.autocrlf=false",
+            "-c",
+            "gc.auto=0",
             *arguments,
         ]
 
@@ -106,27 +117,56 @@ class ProjectCreator:
                 + (f" Détail: {output}" if output else "")
             )
 
+    def reference_repository(self, repository):
+        slug = repository_slug(repository)
+        for project in sorted(self.workspace.iterdir(), key=lambda path: path.name.lower()):
+            if not project.is_dir() or project.name.startswith(".odoo_manager"):
+                continue
+            candidates = [
+                project,
+                project / "odoo" / "odoo",
+                project / "odoo" / "addons-store" / slug,
+            ]
+            for candidate in candidates:
+                config = candidate / ".git" / "config"
+                try:
+                    content = config.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                if repository in content:
+                    return candidate
+        return None
+
     def clone(self, repository, branch, destination, log=None):
         destination = Path(destination)
         self.log(log, f"Récupération de {repository.rsplit('/', 1)[-1]} ({branch})...")
-        command = self.git(
+        clone_arguments = [
             "clone",
             "--config",
             "core.longpaths=true",
             "--depth",
             "1",
+            "--no-tags",
             "--branch",
             branch,
             "--single-branch",
-            repository,
-            self.command_path(destination),
-        )
+        ]
+        reference = self.reference_repository(repository)
+        if reference is not None:
+            self.log(log, f"Réutilisation des objets Git locaux: {reference}")
+            clone_arguments.extend(
+                ["--reference-if-able", self.command_path(reference), "--dissociate"]
+            )
+        clone_arguments.extend([repository, self.command_path(destination)])
+        command = self.git(*clone_arguments)
+        started_at = time.monotonic()
         code = self.project_service.stream(command, cwd=self.workspace, log=log)
         if code != 0:
             raise RuntimeError(
                 "Le dépôt GitLab n'a pas pu être récupéré. Vérifie ta clé SSH, l'accès au dépôt et la branche. "
                 "Sous Windows, place aussi le dossier des projets dans un chemin court, par exemple C:\\Odoo."
             )
+        self.log(log, f"Dépôt récupéré en {time.monotonic() - started_at:.1f} s.")
 
     @staticmethod
     def module_directories(root):
@@ -227,9 +267,95 @@ class ProjectCreator:
                 return
             self.log(log, f"Nettoyage différé requis pour le dossier temporaire: {path}")
 
+    def link_modules_batch_via_wsl(self, modules, addons_dir, log=None, replace=False):
+        if platform_id() != "windows" or not host_executable_available("wsl.exe"):
+            return None
+
+        distribution = self.settings.wsl_distribution
+        try:
+            addons_wsl = wsl_execution_path(addons_dir, distribution).rstrip("/")
+        except (OSError, RuntimeError):
+            return None
+
+        script_path = addons_dir / ".odoo_manager_links.sh"
+        script_wsl = f"{addons_wsl}/{script_path.name}"
+        lines = [
+            "#!/bin/sh",
+            "set -eu",
+            "linked=0",
+            "skipped=0",
+        ]
+        total = len(modules)
+        for index, module in enumerate(modules, start=1):
+            link = f"{addons_wsl}/{module.name}"
+            relative = str(Path(os.path.relpath(module, addons_dir))).replace("\\", "/")
+            quoted_link = shlex.quote(link)
+            quoted_relative = shlex.quote(relative)
+            lines.append(f"if [ -e {quoted_link} ] || [ -L {quoted_link} ]; then")
+            if replace:
+                lines.append(f"  rm -rf -- {quoted_link}")
+            else:
+                lines.extend(
+                    [
+                        "  skipped=$((skipped + 1))",
+                        "else",
+                        f"  ln -s -- {quoted_relative} {quoted_link}",
+                        "  linked=$((linked + 1))",
+                    ]
+                )
+            if replace:
+                lines.extend(
+                    [
+                        "fi",
+                        f"ln -s -- {quoted_relative} {quoted_link}",
+                        "linked=$((linked + 1))",
+                    ]
+                )
+            else:
+                lines.append("fi")
+            if index % 100 == 0 or index == total:
+                lines.append(f"printf '%s\\n' 'Préparation des liens: {index}/{total}'")
+        lines.append("printf 'Liens terminés: %s créé(s), %s conservé(s).\\n' \"$linked\" \"$skipped\"")
+
+        try:
+            with script_path.open("w", encoding="utf-8", newline="\n") as script:
+                script.write("\n".join(lines) + "\n")
+            self.log(log, f"Préparation groupée de {total} lien(s) via WSL 2...")
+            code = self.project_service.stream(
+                [*wsl_command_prefix(distribution), "sh", script_wsl],
+                cwd=self.workspace,
+                log=log,
+            )
+        finally:
+            try:
+                script_path.unlink()
+            except FileNotFoundError:
+                pass
+        if code != 0:
+            raise RuntimeError(
+                "Impossible de préparer les liens d'addons en une seule opération WSL 2. "
+                "Vérifie que le workspace est accessible depuis WSL."
+            )
+        return total
+
     def link_modules(self, source_root, addons_dir, log=None, replace=False):
+        modules = self.module_directories(source_root)
+        if not modules:
+            self.log(log, "Aucun module à lier dans ce dépôt.")
+            return 0
+
+        batch_count = self.link_modules_batch_via_wsl(
+            modules,
+            addons_dir,
+            log=log,
+            replace=replace,
+        )
+        if batch_count is not None:
+            self.log(log, f"{batch_count} module(s) préparé(s) dans odoo/addons.")
+            return batch_count
+
         linked = 0
-        for module in self.module_directories(source_root):
+        for module in modules:
             link = addons_dir / module.name
             if self.path_entry_exists(link):
                 if not replace:

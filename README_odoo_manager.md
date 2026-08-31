@@ -45,6 +45,12 @@ sont demandes. Sous Windows, le premier lancement peut installer Git avec
 `winget`, generer une cle SSH Ed25519, copier sa partie publique et ouvrir la
 page GitLab. La cle privee ne quitte jamais la machine.
 
+Sous Windows, les liens d'addons sont crees par une seule operation WSL groupee
+au lieu de relancer WSL pour chaque module. Lorsqu'un autre projet contient deja
+le meme depot Git, ses objets sont utilises comme cache local puis dissocies :
+chaque nouveau projet reste autonome tout en evitant un telechargement complet.
+Les durees de recuperation sont affichees dans le journal de creation.
+
 Une fois Docker, Git et la cle SSH disponibles, le bouton `Installer Traefik`
 clone ou met a jour `docker-local-tools`, valide le fichier Compose puis demarre
 Traefik directement depuis le backend Python. Aucun terminal externe n'est
