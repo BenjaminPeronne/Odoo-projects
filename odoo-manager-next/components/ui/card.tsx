@@ -1,8 +1,24 @@
+import { Card as RadixCard } from "@radix-ui/themes";
 import * as React from "react";
 import { cn } from "@/lib/utils";
 
-export function Card({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn("min-w-0 rounded-lg border bg-card text-card-foreground shadow-sm", className)} {...props} />;
+export function Card({ className, ...props }: React.ComponentPropsWithoutRef<typeof RadixCard>) {
+  return <RadixCard size="1" variant="surface" className={cn("min-w-0 overflow-hidden", className)} {...props} />;
+}
+
+export function InteractiveCard({ className, type = "button", ...props }: React.ButtonHTMLAttributes<HTMLButtonElement>) {
+  return (
+    <RadixCard asChild size="1" variant="surface">
+      <button
+        type={type}
+        className={cn(
+          "min-w-0 cursor-pointer text-left transition-[background-color,border-color,box-shadow,transform] duration-200 hover:-translate-y-px hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+          className,
+        )}
+        {...props}
+      />
+    </RadixCard>
+  );
 }
 
 export function CardHeader({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {

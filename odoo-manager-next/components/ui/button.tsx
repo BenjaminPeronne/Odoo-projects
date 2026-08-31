@@ -1,42 +1,37 @@
+import { Button as RadixButton } from "@radix-ui/themes";
 import * as React from "react";
-import { Slot } from "@radix-ui/react-slot";
-import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
 
-const buttonVariants = cva(
-  "inline-flex min-w-0 items-center justify-center gap-2 rounded-md text-center text-sm font-medium leading-snug transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-55 [&_svg]:shrink-0",
-  {
-    variants: {
-      variant: {
-        default: "bg-primary text-primary-foreground hover:bg-primary/90",
-        secondary: "bg-secondary text-secondary-foreground hover:bg-secondary/80",
-        outline: "border bg-card hover:bg-muted",
-        ghost: "hover:bg-muted",
-        destructive: "bg-destructive text-destructive-foreground hover:bg-destructive/90",
-      },
-      size: {
-        default: "h-10 px-4 py-2",
-        sm: "h-8 px-3 text-xs",
-        icon: "h-9 w-9",
-      },
-    },
-    defaultVariants: {
-      variant: "default",
-      size: "default",
-    },
-  },
-);
+type ButtonVariant = "default" | "secondary" | "outline" | "ghost" | "destructive";
+type ButtonSize = "default" | "sm" | "icon";
+
+const buttonVariants = ({ variant = "default", size = "default", className }: { variant?: ButtonVariant | null; size?: ButtonSize | null; className?: string } = {}) =>
+  cn("min-w-0 gap-2 text-center leading-snug [&_svg]:shrink-0", size === "icon" && "h-9 w-9 p-0", className);
 
 export interface ButtonProps
-  extends React.ButtonHTMLAttributes<HTMLButtonElement>,
-    VariantProps<typeof buttonVariants> {
-  asChild?: boolean;
+  extends Omit<React.ComponentPropsWithoutRef<typeof RadixButton>, "color" | "size" | "variant"> {
+  variant?: ButtonVariant;
+  size?: ButtonSize;
 }
 
-const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ className, variant, size, asChild = false, ...props }, ref) => {
-    const Comp = asChild ? Slot : "button";
-    return <Comp className={cn(buttonVariants({ variant, size, className }))} ref={ref} {...props} />;
+const Button = React.forwardRef<React.ElementRef<typeof RadixButton>, ButtonProps>(
+  ({ className, variant = "default", size = "default", ...props }, ref) => {
+    const radixVariant =
+      variant === "secondary" ? "soft" : variant === "outline" ? "outline" : variant === "ghost" ? "ghost" : "solid";
+    const color = variant === "destructive" ? "red" : variant === "secondary" || variant === "outline" || variant === "ghost" ? "gray" : "blue";
+    const radixSize = size === "sm" || size === "icon" ? "2" : "3";
+
+    return (
+      <RadixButton
+        ref={ref}
+        variant={radixVariant}
+        color={color}
+        size={radixSize}
+        highContrast={variant === "destructive"}
+        className={buttonVariants({ variant, size, className })}
+        {...props}
+      />
+    );
   },
 );
 Button.displayName = "Button";

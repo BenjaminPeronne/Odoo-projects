@@ -31,12 +31,14 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle, InteractiveCard } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { cn } from "@/lib/utils";
 
 type Project = {
@@ -1550,7 +1552,7 @@ export default function Home() {
           </p>
           {initializationError && (
             <div className="mt-4 space-y-3">
-              <p className="break-words rounded-md border border-amber-200 bg-amber-50 p-3 text-left text-xs text-amber-900">
+              <p className="break-words rounded-md border border-amber-200 bg-amber-50 p-3 text-left text-xs text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-100">
                 {initializationError}
               </p>
               {backendDiagnostics && (
@@ -1579,13 +1581,14 @@ export default function Home() {
         <aside className="min-w-0 border-b bg-card lg:sticky lg:top-0 lg:h-screen lg:w-80 lg:flex-none lg:border-b-0 lg:border-r">
           <div className="flex h-full flex-col">
             <div className="border-b p-4">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0 flex-1">
-                  <h1 className="truncate text-lg font-semibold">Gestionnaire Odoo</h1>
-                  <p className="mt-1 max-w-full truncate text-xs text-muted-foreground" title={overview?.workspace || "Workspace local"}>
-                    {overview?.workspace || "Workspace local"}
-                  </p>
-                </div>
+              <div className="flex items-center justify-between gap-3">
+                <h1 className="min-w-0 truncate text-lg font-semibold">Gestionnaire Odoo</h1>
+                <ThemeToggle />
+              </div>
+              <div className="mt-1 flex min-w-0 items-center gap-2">
+                <p className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={overview?.workspace || "Workspace local"}>
+                  {overview?.workspace || "Workspace local"}
+                </p>
                 <Badge className="shrink-0" variant={(systemStatus?.docker.running ?? overview?.docker_ok) ? "success" : "destructive"}>
                   {(systemStatus?.docker.running ?? overview?.docker_ok) ? "Docker" : "Docker off"}
                 </Badge>
@@ -1602,11 +1605,11 @@ export default function Home() {
             </div>
             <div className="min-h-0 max-h-[45vh] flex-1 overflow-auto p-2 sm:max-h-[50vh] lg:max-h-none">
               {filteredProjects.map((project) => (
-                <button
+                <InteractiveCard
                   key={project.name}
                   className={cn(
-                    "mb-1 w-full rounded-md border p-3 text-left transition-colors hover:bg-muted",
-                    selectedProject?.name === project.name ? "border-primary bg-primary/8 shadow-sm" : "border-transparent",
+                    "mb-1 w-full p-3",
+                    selectedProject?.name === project.name && "border-primary bg-primary/8 shadow-sm",
                   )}
                   onClick={() => {
                     setSelectedProjectName(project.name);
@@ -1630,7 +1633,7 @@ export default function Home() {
                     <Badge variant={statusVariant(project.postgres_status)}>PostgreSQL {project.postgres_status}</Badge>
                     <Badge variant="outline">{project.databases?.filter((db) => db !== "postgres").length || 0} base(s)</Badge>
                   </div>
-                </button>
+                </InteractiveCard>
               ))}
             </div>
             <div className="grid gap-2 border-t p-3">
@@ -1715,18 +1718,18 @@ export default function Home() {
 
           <div className="mx-auto max-w-[1500px] px-4 py-4">
             {apiUnavailable && (
-              <div className="mb-4 flex flex-col gap-3 border-y border-red-300 bg-red-50 px-4 py-3 text-sm text-red-950 sm:flex-row sm:items-center sm:justify-between">
+              <div className="mb-4 flex flex-col gap-3 border-y border-red-300 bg-red-50 px-4 py-3 text-sm text-red-950 dark:border-red-800 dark:bg-red-950/45 dark:text-red-100 sm:flex-row sm:items-center sm:justify-between">
                 <div className="flex min-w-0 items-start gap-3">
                   <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-red-600" />
                   <div className="min-w-0">
                     <div className="font-semibold">Service local indisponible</div>
-                    <div className="mt-0.5 break-words text-red-800">
+                    <div className="mt-0.5 break-words text-red-800 dark:text-red-200">
                       L'application n'arrive pas à joindre son API locale. Attends quelques secondes puis actualise. Si Docker n'est pas encore installé,
                       installe Docker Desktop avant de lancer les projets Odoo.
                     </div>
-                    <div className="mt-3 rounded-md border border-red-200 bg-white/70 p-3">
+                    <div className="mt-3 rounded-md border border-red-200 bg-white/70 p-3 dark:border-red-800 dark:bg-red-950/55">
                       <div className="font-medium">{fallbackDockerGuide.title}</div>
-                      <ol className="mt-2 list-decimal space-y-1 pl-4 text-xs leading-5 text-red-900">
+                      <ol className="mt-2 list-decimal space-y-1 pl-4 text-xs leading-5 text-red-900 dark:text-red-100">
                         {fallbackDockerGuide.steps.map((step) => (
                           <li key={step}>{step}</li>
                         ))}
@@ -1755,16 +1758,16 @@ export default function Home() {
               </div>
             )}
             {systemStatus && !systemStatus.docker.running && (
-              <div className="mb-4 flex flex-col gap-3 border-y border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950 sm:flex-row sm:items-center sm:justify-between">
+              <div className="mb-4 flex flex-col gap-3 border-y border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/45 dark:text-amber-100 sm:flex-row sm:items-center sm:justify-between">
                 <div className="flex min-w-0 items-start gap-3">
                   <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
                   <div className="min-w-0">
                     <div className="font-semibold">Docker n’est pas disponible</div>
-                    <div className="mt-0.5 break-words text-amber-800">{systemStatus.docker.message}</div>
+                    <div className="mt-0.5 break-words text-amber-800 dark:text-amber-200">{systemStatus.docker.message}</div>
                     {systemStatus.docker.state === "missing" && systemStatus.docker.install_guide && (
-                      <div className="mt-3 rounded-md border border-amber-200 bg-white/70 p-3">
+                      <div className="mt-3 rounded-md border border-amber-200 bg-white/70 p-3 dark:border-amber-800 dark:bg-amber-950/55">
                         <div className="font-medium">{systemStatus.docker.install_guide.title}</div>
-                        <ol className="mt-2 list-decimal space-y-1 pl-4 text-xs leading-5 text-amber-900">
+                        <ol className="mt-2 list-decimal space-y-1 pl-4 text-xs leading-5 text-amber-900 dark:text-amber-100">
                           {systemStatus.docker.install_guide.steps.map((step) => (
                             <li key={step}>{step}</li>
                           ))}
@@ -1805,16 +1808,16 @@ export default function Home() {
               </div>
             )}
             {systemStatus?.traefik && !systemStatus.traefik.running && (
-              <div className="mb-4 flex flex-col gap-3 border-y border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-950 sm:flex-row sm:items-center sm:justify-between">
+              <div className="mb-4 flex flex-col gap-3 border-y border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-950 dark:border-sky-800 dark:bg-sky-950/45 dark:text-sky-100 sm:flex-row sm:items-center sm:justify-between">
                 <div className="flex min-w-0 items-start gap-3">
                   <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-sky-700" />
                   <div className="min-w-0">
                     <div className="font-semibold">Traefik n'est pas prêt</div>
-                    <div className="mt-0.5 break-words text-sky-800">
+                    <div className="mt-0.5 break-words text-sky-800 dark:text-sky-200">
                       {systemStatus.traefik.message}
                       {systemStatus.traefik.requires_docker ? " Docker doit être installé et démarré avant cette étape." : ""}
                     </div>
-                    <div className="mt-1 break-all text-xs text-sky-700">Dossier attendu : {systemStatus.traefik.path}</div>
+                    <div className="mt-1 break-all text-xs text-sky-700 dark:text-sky-300">Dossier attendu : {systemStatus.traefik.path}</div>
                   </div>
                 </div>
                 <div className="flex shrink-0 flex-col gap-2 sm:flex-row">
@@ -1835,7 +1838,7 @@ export default function Home() {
               </div>
             )}
             {error && (
-              <div className="mb-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+              <div className="mb-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950/45 dark:text-red-200">
                 <AlertTriangle className="mr-2 inline h-4 w-4" />
                 {error}
               </div>
@@ -1878,11 +1881,11 @@ export default function Home() {
                       {odooDatabases.length ? (
                         <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
                           {odooDatabases.map((db) => (
-                            <button
+                            <InteractiveCard
                               key={db}
                               className={cn(
-                                "min-w-0 rounded-md border p-4 text-left transition-colors hover:bg-muted",
-                                selectedDb === db ? "border-primary bg-primary/8" : "bg-card",
+                                "min-w-0 p-4",
+                                selectedDb === db && "border-primary bg-primary/8",
                               )}
                               onClick={() => setSelectedDb(db)}
                             >
@@ -1893,7 +1896,7 @@ export default function Home() {
                               <div className="mt-2 text-sm text-muted-foreground">
                                 {selectedProject?.database_versions?.[db] || "Base Odoo"}
                               </div>
-                            </button>
+                            </InteractiveCard>
                           ))}
                         </div>
                       ) : (
@@ -2014,8 +2017,8 @@ export default function Home() {
                         <Input className="pl-9" placeholder="Rechercher par nom de module" value={moduleSearch} onChange={(event) => setModuleSearch(event.target.value)} />
                       </div>
                       <Select value={moduleFilter} onValueChange={setModuleFilter}>
-                        <SelectTrigger>
-                          <SelectValue placeholder="État" />
+                        <SelectTrigger placeholder="État">
+                          <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
                           <SelectItem value="all">Tous les états</SelectItem>
@@ -2024,8 +2027,8 @@ export default function Home() {
                         </SelectContent>
                       </Select>
                       <Select value={selectedDb} onValueChange={setSelectedDb}>
-                        <SelectTrigger>
-                          <SelectValue placeholder="Base Odoo" />
+                        <SelectTrigger placeholder="Base Odoo">
+                          <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
                           {odooDatabases.map((db) => (
@@ -2038,16 +2041,11 @@ export default function Home() {
                     </div>
                     <div className="mb-3 flex flex-col gap-2 rounded-md border bg-muted/45 p-3 text-sm sm:flex-row sm:items-center sm:justify-between">
                       <label className="flex min-w-0 cursor-pointer items-start gap-3">
-                        <input
-                          className="mt-0.5 h-4 w-4 shrink-0"
-                          aria-checked={someFilteredModulesSelected ? "mixed" : allFilteredModulesSelected}
-                          ref={(input) => {
-                            if (input) input.indeterminate = someFilteredModulesSelected;
-                          }}
-                          type="checkbox"
-                          checked={allFilteredModulesSelected}
+                        <Checkbox
+                          className="mt-0.5"
+                          checked={someFilteredModulesSelected ? "indeterminate" : allFilteredModulesSelected}
                           disabled={!filteredModuleNames.length}
-                          onChange={(event) => toggleFilteredModules(event.target.checked)}
+                          onCheckedChange={(checked) => toggleFilteredModules(checked === true)}
                         />
                         <span className="min-w-0">
                           <span className="block font-medium">Sélectionner les résultats affichés</span>
@@ -2082,12 +2080,11 @@ export default function Home() {
                                 className="grid min-w-0 gap-3 border-t p-3 first:border-t-0 lg:grid-cols-[minmax(220px,1.35fr)_120px_130px_minmax(260px,1.15fr)_168px] lg:items-center"
                               >
                                 <div className="flex min-w-0 items-start gap-3">
-                                  <input
-                                    className="mt-1 h-4 w-4 shrink-0"
+                                  <Checkbox
+                                    className="mt-1"
                                     aria-label={`Sélectionner ${module.name}`}
-                                    type="checkbox"
                                     checked={selectedModules.has(module.name)}
-                                    onChange={(event) => toggleModuleSelection(module.name, event.target.checked)}
+                                    onCheckedChange={(checked) => toggleModuleSelection(module.name, checked === true)}
                                   />
                                   <div className="min-w-0">
                                     <div className="break-words font-medium">{module.name}</div>
@@ -2119,7 +2116,7 @@ export default function Home() {
                                     {displayLinkPath && !samePaths && (
                                       <div className="min-w-0 text-xs">
                                         <span className="font-medium text-muted-foreground">Lien Odoo</span>
-                                        <div className="break-all font-mono text-slate-600" title={linkPath}>
+                                        <div className="break-all font-mono text-slate-600 dark:text-slate-300" title={linkPath}>
                                           {displayLinkPath}
                                         </div>
                                       </div>
@@ -2190,9 +2187,9 @@ export default function Home() {
                             !externalLogView && selectedJob?.id === job.id && "border-primary bg-primary/8",
                           )}
                         >
-                          <button
-                            type="button"
-                            className="w-full min-w-0 rounded-md p-2 text-left outline-none transition-colors hover:bg-card/70 focus-visible:ring-2 focus-visible:ring-ring"
+                          <Button
+                            variant="ghost"
+                            className="h-auto w-full min-w-0 justify-start whitespace-normal p-2 text-left"
                             onClick={() => selectJob(job.id)}
                           >
                             <div className="flex items-start justify-between gap-2">
@@ -2202,9 +2199,9 @@ export default function Home() {
                               </div>
                               <Badge className="shrink-0" variant={statusVariant(job.status)}>{job.status}</Badge>
                             </div>
-                          </button>
+                          </Button>
                           <Button
-                            className="relative z-10 mt-1 w-full shrink-0 border-red-200 text-red-700 hover:border-red-300 hover:bg-red-50 hover:text-red-800 active:bg-red-100 focus-visible:ring-red-500"
+                            className="relative z-10 mt-1 w-full shrink-0 border-red-200 text-red-700 hover:border-red-300 hover:bg-red-50 hover:text-red-800 active:bg-red-100 focus-visible:ring-red-500 dark:border-red-800 dark:text-red-300 dark:hover:border-red-700 dark:hover:bg-red-950/60 dark:hover:text-red-200 dark:active:bg-red-950"
                             variant="outline"
                             size="sm"
                             title={`Supprimer l'historique ${job.title}`}
@@ -2560,12 +2557,11 @@ export default function Home() {
               </div>
 
               <label className="flex cursor-pointer items-start gap-3 rounded-md border p-3 text-sm">
-                <input
-                  className="mt-0.5 h-4 w-4 shrink-0"
-                  type="checkbox"
+                <Checkbox
+                  className="mt-0.5"
                   checked={settingsDraft.start_project_before_open}
-                  onChange={(event) =>
-                    setSettingsDraft({ ...settingsDraft, start_project_before_open: event.target.checked })
+                  onCheckedChange={(checked) =>
+                    setSettingsDraft({ ...settingsDraft, start_project_before_open: checked === true })
                   }
                 />
                 <span className="min-w-0">
@@ -2658,16 +2654,14 @@ export default function Home() {
           {!inspectingZip && zipModuleCandidates.length > 0 && (
             <div className="min-w-0 rounded-md border">
               <label className="flex cursor-pointer items-start gap-3 border-b bg-muted/40 p-3 text-sm">
-                <input
-                  className="mt-0.5 h-4 w-4 shrink-0"
-                  type="checkbox"
-                  checked={selectedZipModules.size === zipModuleCandidates.length}
-                  ref={(input) => {
-                    if (input) {
-                      input.indeterminate = selectedZipModules.size > 0 && selectedZipModules.size < zipModuleCandidates.length;
-                    }
-                  }}
-                  onChange={(event) => toggleAllZipModules(event.target.checked)}
+                <Checkbox
+                  className="mt-0.5"
+                  checked={
+                    selectedZipModules.size > 0 && selectedZipModules.size < zipModuleCandidates.length
+                      ? "indeterminate"
+                      : selectedZipModules.size === zipModuleCandidates.length
+                  }
+                  onCheckedChange={(checked) => toggleAllZipModules(checked === true)}
                 />
                 <span className="min-w-0 flex-1">
                   <span className="block font-medium">Sélectionner tous les modules détectés</span>
@@ -2682,11 +2676,10 @@ export default function Home() {
                     key={moduleName}
                     className="flex min-w-0 cursor-pointer items-start gap-3 rounded-md p-2 text-sm hover:bg-muted"
                   >
-                    <input
-                      className="mt-0.5 h-4 w-4 shrink-0"
-                      type="checkbox"
+                    <Checkbox
+                      className="mt-0.5"
                       checked={selectedZipModules.has(moduleName)}
-                      onChange={(event) => toggleZipModule(moduleName, event.target.checked)}
+                      onCheckedChange={(checked) => toggleZipModule(moduleName, checked === true)}
                     />
                     <span className="min-w-0 break-all font-mono">{moduleName}</span>
                   </label>
@@ -2695,11 +2688,10 @@ export default function Home() {
             </div>
           )}
           <label className="flex items-start gap-2 rounded-md border bg-muted/40 p-3 text-sm">
-            <input
+            <Checkbox
               className="mt-1"
-              type="checkbox"
               checked={replaceZipModules}
-              onChange={(event) => setReplaceZipModules(event.target.checked)}
+              onCheckedChange={(checked) => setReplaceZipModules(checked === true)}
             />
             <span>
               <span className="block font-medium">Remplacer les modules existants</span>
@@ -2784,7 +2776,7 @@ export default function Home() {
             </div>
           </div>
           {updateLocalExcludedModules.length ? (
-            <div className="grid gap-2 rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-950">
+            <div className="grid gap-2 rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-950 dark:border-blue-800 dark:bg-blue-950/45 dark:text-blue-100">
               <div className="font-medium">Mode avec exceptions locales</div>
               <p>
                 Le gestionnaire utilisera une liste explicite des modules dont le code est disponible. Les modules suivants ne seront pas remis en
@@ -2792,19 +2784,19 @@ export default function Home() {
               </p>
               <div className="flex flex-wrap gap-1.5">
                 {updateLocalExcludedModules.map((moduleName) => (
-                  <Badge key={moduleName} variant="outline" className="border-blue-300 bg-white font-mono text-blue-950">
+                  <Badge key={moduleName} variant="outline" className="border-blue-300 bg-white font-mono text-blue-950 dark:border-blue-700 dark:bg-blue-950/70 dark:text-blue-100">
                     {moduleName}
                   </Badge>
                 ))}
               </div>
-              <Button variant="outline" className="border-blue-300 bg-white hover:bg-blue-100" onClick={restoreLocalModuleExclusions} disabled={loading}>
+              <Button variant="outline" className="border-blue-300 bg-white hover:bg-blue-100 dark:border-blue-700 dark:bg-blue-950/70 dark:hover:bg-blue-900/70" onClick={restoreLocalModuleExclusions} disabled={loading}>
                 <RefreshCcw className="h-4 w-4" />
                 Réactiver toutes les exclusions
               </Button>
             </div>
           ) : null}
           {updatePendingModules.length ? (
-            <div className="grid gap-3 rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-950">
+            <div className="grid gap-3 rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-950 dark:border-red-800 dark:bg-red-950/45 dark:text-red-100">
               <div className="flex items-start gap-2">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-600" />
                 <div className="grid gap-1">
@@ -2815,14 +2807,13 @@ export default function Home() {
                   </span>
                 </div>
               </div>
-              <div className="max-h-48 space-y-2 overflow-y-auto rounded-md border border-red-200 bg-white p-2">
+              <div className="max-h-48 space-y-2 overflow-y-auto rounded-md border border-red-200 bg-white p-2 dark:border-red-800 dark:bg-red-950/55">
                 {updatePendingModules.map((module) => (
-                  <label key={module.name} className="flex cursor-pointer items-center gap-3 rounded px-2 py-2 hover:bg-red-50">
-                    <input
-                      type="checkbox"
-                      className="h-4 w-4 shrink-0 accent-red-600"
+                  <label key={module.name} className="flex cursor-pointer items-center gap-3 rounded px-2 py-2 hover:bg-red-50 dark:hover:bg-red-900/50">
+                    <Checkbox
+                      color="red"
                       checked={missingModulesToIgnore.has(module.name)}
-                      onChange={(event) => toggleMissingModuleToIgnore(module.name, event.target.checked)}
+                      onCheckedChange={(checked) => toggleMissingModuleToIgnore(module.name, checked === true)}
                     />
                     <span className="min-w-0 flex-1 break-all font-mono text-xs">{module.name}</span>
                     <Badge className="shrink-0" variant={module.code_available ? "outline" : "destructive"}>
@@ -2839,13 +2830,13 @@ export default function Home() {
                 {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <PackageX className="h-4 w-4" />}
                 Ignorer la sélection sur cette copie locale
               </Button>
-              <p className="text-xs text-red-800">
+              <p className="text-xs text-red-800 dark:text-red-200">
                 Relance ensuite cette fenêtre. Les modules non exclus dont le code manque devront être restaurés avant la mise à jour.
               </p>
             </div>
           ) : null}
           {updateFilestoreStatus && updateFilestoreStatus.missing > 0 ? (
-            <div className="grid gap-3 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+            <div className="grid gap-3 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/45 dark:text-amber-100">
               <div className="flex items-start gap-2">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                 <div className="grid gap-1">
@@ -2856,12 +2847,11 @@ export default function Home() {
                   </span>
                 </div>
               </div>
-              <label className="flex cursor-pointer items-start gap-3 rounded-md border border-amber-300 bg-white p-3 hover:bg-amber-100/60">
-                <input
-                  type="checkbox"
-                  className="mt-0.5 h-4 w-4 shrink-0 accent-blue-600"
+              <label className="flex cursor-pointer items-start gap-3 rounded-md border border-amber-300 bg-white p-3 hover:bg-amber-100/60 dark:border-amber-800 dark:bg-amber-950/55 dark:hover:bg-amber-900/50">
+                <Checkbox
+                  className="mt-0.5"
                   checked={allowMissingFilestore}
-                  onChange={(event) => setAllowMissingFilestore(event.target.checked)}
+                  onCheckedChange={(checked) => setAllowMissingFilestore(checked === true)}
                 />
                 <span className="font-medium">Continuer sans télécharger le filestore</span>
               </label>
@@ -2925,12 +2915,11 @@ export default function Home() {
             ))}
           </div>
           <label className="flex items-start gap-2 rounded-md border bg-muted/40 p-3 text-sm">
-            <input
+            <Checkbox
               className="mt-1"
-              type="checkbox"
               checked={deleteCodeUninstallFirst}
               disabled={!canUseDb}
-              onChange={(event) => setDeleteCodeUninstallFirst(event.target.checked)}
+              onCheckedChange={(checked) => setDeleteCodeUninstallFirst(checked === true)}
             />
             <span>
               <span className="block font-medium">Désinstaller de la base avant suppression</span>
@@ -2952,8 +2941,8 @@ export default function Home() {
             key={toast.id}
             className={cn(
               "w-full break-words rounded-md border bg-card p-3 text-sm shadow-lg",
-              toast.kind === "error" && "border-red-200 bg-red-50 text-red-800",
-              toast.kind === "success" && "border-emerald-200 bg-emerald-50 text-emerald-800",
+              toast.kind === "error" && "border-red-200 bg-red-50 text-red-800 dark:border-red-800 dark:bg-red-950 dark:text-red-200",
+              toast.kind === "success" && "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-200",
             )}
           >
             {toast.message}
@@ -2980,7 +2969,7 @@ function PrerequisiteRow({
   return (
     <div className="flex min-w-0 flex-col gap-3 p-3 sm:flex-row sm:items-center">
       <div className="flex min-w-0 flex-1 items-start gap-3">
-        <div className={cn("mt-0.5 rounded-md p-2", ready ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700")}>
+        <div className={cn("mt-0.5 rounded-md p-2", ready ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300" : "bg-amber-50 text-amber-700 dark:bg-amber-950 dark:text-amber-300")}>
           <Icon className="h-4 w-4" />
         </div>
         <div className="min-w-0">
@@ -3074,28 +3063,26 @@ function CreateProjectDialog({
           <fieldset className="grid gap-2">
             <legend className="mb-1 text-sm font-medium">Source du projet</legend>
             <div className="grid gap-2 sm:grid-cols-2">
-              <button
-                type="button"
+              <InteractiveCard
                 className={cn(
-                  "min-h-20 rounded-md border p-3 text-left transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                  "min-h-20 p-3",
                   sourceType === "standard" && "border-primary bg-primary/5",
                 )}
                 onClick={() => setSourceType("standard")}
               >
                 <span className="block font-medium">Odoo standard</span>
                 <span className="mt-1 block text-xs leading-5 text-muted-foreground">Odoo Community et Enterprise Sudokeys.</span>
-              </button>
-              <button
-                type="button"
+              </InteractiveCard>
+              <InteractiveCard
                 className={cn(
-                  "min-h-20 rounded-md border p-3 text-left transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                  "min-h-20 p-3",
                   sourceType === "gitlab" && "border-primary bg-primary/5",
                 )}
                 onClick={() => setSourceType("gitlab")}
               >
                 <span className="block font-medium">Dépôt d’addons GitLab</span>
                 <span className="mt-1 block text-xs leading-5 text-muted-foreground">Ajoute le dépôt client au socle standard.</span>
-              </button>
+              </InteractiveCard>
             </div>
           </fieldset>
 
@@ -3117,12 +3104,11 @@ function CreateProjectDialog({
           )}
 
           <label className={cn("flex items-start gap-3 rounded-md border p-3 text-sm", !dockerReady && "bg-muted/40")}>
-            <input
-              className="mt-0.5 h-4 w-4 shrink-0 accent-blue-600"
-              type="checkbox"
+            <Checkbox
+              className="mt-0.5"
               checked={startAfterCreation}
               disabled={!dockerReady}
-              onChange={(event) => setStartAfterCreation(event.target.checked)}
+              onCheckedChange={(checked) => setStartAfterCreation(checked === true)}
             />
             <span>
               <span className="block font-medium">Démarrer le projet après la création</span>
@@ -3135,7 +3121,7 @@ function CreateProjectDialog({
           </label>
 
           {!prerequisitesReady && (
-            <div className="flex flex-col gap-3 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex flex-col gap-3 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/45 dark:text-amber-100 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex min-w-0 items-start gap-2">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                 <span>Git, le workspace et une clé SSH publique sont requis pour récupérer les dépôts privés.</span>
@@ -3223,7 +3209,7 @@ function CreateDatabaseDialog({
           </label>
         </div>
         <label className="flex items-center gap-2 text-sm">
-          <input type="checkbox" checked={demo} onChange={(event) => setDemo(event.target.checked)} />
+          <Checkbox checked={demo} onCheckedChange={(checked) => setDemo(checked === true)} />
           Charger les données de démonstration
         </label>
         <Button

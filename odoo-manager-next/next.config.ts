@@ -7,6 +7,7 @@ const configDir = dirname(fileURLToPath(import.meta.url));
 const desktopBuild = process.env.TAURI_BUILD === "1";
 
 const browserConfig: NextConfig = {
+  agentRules: false,
   outputFileTracingRoot: configDir,
   async rewrites() {
     return [
@@ -19,7 +20,7 @@ const browserConfig: NextConfig = {
 };
 
 const nextConfig: NextConfig = desktopBuild
-  ? { output: "export", outputFileTracingRoot: configDir }
+  ? { agentRules: false, output: "export", outputFileTracingRoot: configDir }
   : browserConfig;
 
 export default nextConfig;
