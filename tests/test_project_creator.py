@@ -14,16 +14,20 @@ from odoo_manager_core.project_service import ProjectService
 
 
 class FakeRunner:
-    def __init__(self, fail_repository=""):
+    def __init__(self, fail_repository="", wsl_path_exists=False):
         self.fail_repository = fail_repository
+        self.wsl_path_exists = wsl_path_exists
         self.commands = []
 
     def capture(self, command, cwd=None, timeout=10):
+        self.commands.append(command)
+        if "test" in command:
+            return (0, "") if self.wsl_path_exists else (1, "")
         return 0, "git version 2.50.0"
 
     def stream(self, command, cwd=None, log=None):
         self.commands.append(command)
-        if "ln" in command:
+        if "ln" in command or "rm" in command:
             return 0
         repository = next((item for item in command if isinstance(item, str) and item.endswith(".git")), "")
         if repository == self.fail_repository:
@@ -162,6 +166,66 @@ class ProjectCreatorTests(unittest.TestCase):
                 "-s",
                 "../addons-store/custom/custom_module",
                 "/mnt/c/Odoo/DEMO/odoo/addons/custom_module",
+            ],
+        )
+
+    @mock.patch.object(Path, "exists", side_effect=OSError(1920, "unreadable WSL symlink"))
+    @mock.patch.object(Path, "is_symlink", side_effect=OSError(1920, "unreadable WSL symlink"))
+    @mock.patch("odoo_manager_core.project_creator.platform_id", return_value="windows")
+    @mock.patch(
+        "odoo_manager_core.project_creator.wsl_execution_path",
+        return_value="/mnt/c/Odoo/DEMO/odoo/addons/account_3way_match",
+    )
+    def test_windows_detects_wsl_link_when_pathlib_returns_winerror_1920(
+        self,
+        _wsl_execution_path,
+        _platform,
+        _is_symlink,
+        _exists,
+    ):
+        runner = FakeRunner(wsl_path_exists=True)
+        creator = self.creator(runner)
+
+        exists = creator.path_entry_exists(self.workspace / "DEMO" / "odoo" / "addons" / "account_3way_match")
+
+        self.assertTrue(exists)
+        self.assertEqual(
+            runner.commands[-1],
+            [
+                "wsl.exe",
+                "--exec",
+                "test",
+                "-e",
+                "/mnt/c/Odoo/DEMO/odoo/addons/account_3way_match",
+            ],
+        )
+
+    @mock.patch.object(Path, "is_symlink", side_effect=OSError(1920, "unreadable WSL symlink"))
+    @mock.patch("odoo_manager_core.project_creator.platform_id", return_value="windows")
+    @mock.patch(
+        "odoo_manager_core.project_creator.wsl_execution_path",
+        return_value="/mnt/c/Odoo/DEMO/odoo/addons/account_3way_match",
+    )
+    def test_windows_removes_unreadable_wsl_link_via_wsl(
+        self,
+        _wsl_execution_path,
+        _platform,
+        _is_symlink,
+    ):
+        runner = FakeRunner()
+        creator = self.creator(runner)
+
+        creator.remove_path_entry(self.workspace / "DEMO" / "odoo" / "addons" / "account_3way_match")
+
+        self.assertEqual(
+            runner.commands[-1],
+            [
+                "wsl.exe",
+                "--exec",
+                "rm",
+                "-rf",
+                "--",
+                "/mnt/c/Odoo/DEMO/odoo/addons/account_3way_match",
             ],
         )
 

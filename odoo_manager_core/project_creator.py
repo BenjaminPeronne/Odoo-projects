@@ -164,17 +164,77 @@ class ProjectCreator:
             return True
         return False
 
+    def path_entry_exists_via_wsl(self, path):
+        distribution = self.settings.wsl_distribution
+        try:
+            destination = wsl_execution_path(path, distribution)
+        except (OSError, RuntimeError):
+            return None
+        for predicate in ("-e", "-L"):
+            code, _output = self.project_service.capture(
+                [*wsl_command_prefix(distribution), "test", predicate, destination],
+                timeout=8,
+            )
+            if code == 0:
+                return True
+            if code != 1:
+                return None
+        return False
+
+    def path_entry_exists(self, path):
+        try:
+            return path.exists() or path.is_symlink()
+        except OSError:
+            if platform_id() == "windows":
+                detected = self.path_entry_exists_via_wsl(path)
+                if detected is not None:
+                    return detected
+            raise
+
+    def remove_path_via_wsl(self, path, log=None):
+        distribution = self.settings.wsl_distribution
+        try:
+            destination = wsl_execution_path(path, distribution)
+            code = self.project_service.stream(
+                [*wsl_command_prefix(distribution), "rm", "-rf", "--", destination],
+                cwd=self.workspace,
+                log=log,
+            )
+        except (OSError, RuntimeError):
+            return False
+        return code == 0
+
+    def remove_path_entry(self, path, log=None):
+        try:
+            if path.is_symlink() or path.is_file():
+                path.unlink()
+            else:
+                shutil.rmtree(path)
+            return
+        except OSError as exc:
+            if platform_id() == "windows" and self.remove_path_via_wsl(path, log=log):
+                self.log(log, f"Ancien lien supprimé via WSL 2: {path.name}")
+                return
+            raise RuntimeError(f"Impossible de remplacer le module existant: {path}") from exc
+
+    def cleanup_staging_path(self, path, log=None):
+        try:
+            shutil.rmtree(path)
+        except FileNotFoundError:
+            return
+        except OSError:
+            if platform_id() == "windows" and self.remove_path_via_wsl(path, log=log):
+                return
+            self.log(log, f"Nettoyage différé requis pour le dossier temporaire: {path}")
+
     def link_modules(self, source_root, addons_dir, log=None, replace=False):
         linked = 0
         for module in self.module_directories(source_root):
             link = addons_dir / module.name
-            if link.exists() or link.is_symlink():
+            if self.path_entry_exists(link):
                 if not replace:
                     continue
-                if link.is_symlink() or link.is_file():
-                    link.unlink()
-                else:
-                    shutil.rmtree(link)
+                self.remove_path_entry(link, log=log)
             relative = Path(os.path.relpath(module, addons_dir))
             if self.settings.execution_mode == "wsl":
                 if not self.link_module_via_wsl(relative, link, log=log):
@@ -275,7 +335,7 @@ class ProjectCreator:
             self.log(log, f"URL locale: http://dev.{name}.localhost/")
             return target
         finally:
-            shutil.rmtree(temporary, ignore_errors=True)
+            self.cleanup_staging_path(temporary, log=log)
             try:
                 staging_root.rmdir()
             except OSError:
