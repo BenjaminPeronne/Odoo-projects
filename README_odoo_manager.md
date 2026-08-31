@@ -51,6 +51,11 @@ le meme depot Git, ses objets sont utilises comme cache local puis dissocies :
 chaque nouveau projet reste autonome tout en evitant un telechargement complet.
 Les durees de recuperation sont affichees dans le journal de creation.
 
+Au demarrage, un PostgreSQL temporairement `unhealthy` est attendu jusqu'a sa
+disponibilite puis Compose reprend sans recreer son volume. Le bouton `Ouvrir
+Odoo` attend aussi une reponse valide de Traefik avant d'ouvrir le navigateur,
+afin de ne pas afficher une page `Bad Gateway` pendant l'initialisation.
+
 Une fois Docker, Git et la cle SSH disponibles, le bouton `Installer Traefik`
 clone ou met a jour `docker-local-tools`, valide le fichier Compose puis demarre
 Traefik directement depuis le backend Python. Aucun terminal externe n'est

@@ -469,6 +469,7 @@ export default function Home() {
   const [selectedJobId, setSelectedJobId] = useState<number | null>(null);
   const [externalLogView, setExternalLogView] = useState<{ title: string; content: string } | null>(null);
   const [loading, setLoading] = useState(false);
+  const [openingOdoo, setOpeningOdoo] = useState(false);
   const [openingPostgresql, setOpeningPostgresql] = useState(false);
   const [initializing, setInitializing] = useState(true);
   const [initializationMessage, setInitializationMessage] = useState("Démarrage du service local…");
@@ -907,6 +908,23 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
+  }
+
+  async function waitForJob(jobId: number, timeoutMilliseconds = 240000) {
+    const deadline = Date.now() + timeoutMilliseconds;
+    while (Date.now() < deadline) {
+      const payload = await api<{ jobs: Job[] }>("/api/jobs");
+      setJobs(payload.jobs);
+      const current = payload.jobs.find((job) => job.id === jobId);
+      if (!current) throw new Error("L'action de démarrage est introuvable dans l'historique.");
+      if (current.status === "done") return current;
+      if (current.status === "error") {
+        const detail = current.lines.filter(Boolean).at(-1) || "Le projet n'a pas pu démarrer.";
+        throw new Error(detail);
+      }
+      await delay(800);
+    }
+    throw new Error("Le démarrage d'Odoo prend trop de temps. Consulte les logs de l'action.");
   }
 
   async function requestDockerStart() {
@@ -1489,6 +1507,24 @@ export default function Home() {
     }
   }
 
+  async function requestOpenOdoo() {
+    if (!selectedProject || openingOdoo || selectedProjectLifecycleJob) return;
+    setOpeningOdoo(true);
+    try {
+      const job = await createJob("start_project", { project: selectedProject.name });
+      if (!job) return;
+      await waitForJob(job.id);
+      await refreshOverview();
+      const opened = await openExternalUrl(selectedOdooUrl);
+      if (!opened) throw new Error("Lien impossible à ouvrir depuis l'application.");
+      pushToast("success", "Odoo est prêt et a été ouvert dans le navigateur.");
+    } catch (err) {
+      pushToast("error", err instanceof Error ? err.message : "Impossible d'ouvrir Odoo.");
+    } finally {
+      setOpeningOdoo(false);
+    }
+  }
+
   if (initializing) {
     return (
       <main className="grid min-h-screen place-items-center bg-background px-6">
@@ -1645,9 +1681,14 @@ export default function Home() {
                   {selectedProjectStopping ? "Arrêt…" : "Arrêter"}
                 </Button>
                 {selectedProject && (
-                  <Button className="w-full sm:w-auto" variant="outline" onClick={() => openUrl(selectedOdooUrl)}>
-                    <ExternalLink className="h-4 w-4" />
-                    Ouvrir Odoo
+                  <Button
+                    className="w-full sm:w-auto"
+                    variant="outline"
+                    disabled={!selectedProjectReady || openingOdoo || Boolean(selectedProjectLifecycleJob)}
+                    onClick={requestOpenOdoo}
+                  >
+                    {openingOdoo ? <Loader2 className="h-4 w-4 animate-spin" /> : <ExternalLink className="h-4 w-4" />}
+                    {openingOdoo ? "Préparation d’Odoo…" : "Ouvrir Odoo"}
                   </Button>
                 )}
               </div>

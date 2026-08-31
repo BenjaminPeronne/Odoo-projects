@@ -16,6 +16,7 @@ class FakeRunner:
         self.streams = []
         self.captures = []
         self.statuses = {}
+        self.health_statuses = {}
         self.odoo_server_running = True
         self.odoo_port_ready = True
         self.stream_codes = []
@@ -58,6 +59,17 @@ class FakeRunner:
         if len(command) >= 5 and command[1:4] == ["inspect", "-f", "{{.State.Status}}"]:
             status = self.statuses.get(command[4], "absent")
             return (0, status) if status != "absent" else (1, "")
+        if len(command) >= 5 and command[1:3] == ["inspect", "-f"] and ".State.Health.Status" in command[3]:
+            statuses = self.health_statuses.get(command[4], "none")
+            if isinstance(statuses, list):
+                status = statuses.pop(0) if len(statuses) > 1 else statuses[0]
+            else:
+                status = statuses
+            return (0, status) if status != "absent" else (1, "")
+        if len(command) >= 5 and command[1:3] == ["inspect", "-f"] and "json .State.Health" in command[3]:
+            return 0, '{"Status":"unhealthy"}'
+        if len(command) >= 4 and command[1:3] == ["logs", "--tail"]:
+            return 0, "database system is starting up"
         if len(command) >= 5 and command[1:3] == ["exec", "odoo-DEMO"] and command[3:5] == ["sh", "-lc"]:
             return (0, "") if self.odoo_server_running else (1, "")
         if len(command) >= 5 and command[1:3] == ["exec", "odoo-DEMO"] and command[3:5] == ["python3", "-c"]:
@@ -104,6 +116,59 @@ class ProjectServiceTests(unittest.TestCase):
         commands = [command for command, _cwd in self.runner.streams]
         self.assertTrue(has_command_tail(commands, ["compose", "up", "-d", "--no-recreate"]))
         self.assertFalse(any("--pull" in command for command in commands))
+
+    @patch("odoo_manager_core.project_service.time.sleep", return_value=None)
+    def test_start_project_waits_for_slow_postgres_then_resumes_compose(self, _sleep):
+        self.runner.stream_codes = [1, 0]
+        self.runner.statuses = {
+            "postgresql-DEMO": "running",
+            "odoo-DEMO": "running",
+        }
+        self.runner.health_statuses = {
+            "postgresql-DEMO": ["unhealthy", "starting", "starting", "healthy"],
+        }
+        logs = []
+
+        self.service.start_project("DEMO", log=logs.append)
+
+        commands = [command for command, _cwd in self.runner.streams]
+        compose_starts = [command for command in commands if command[-4:] == ["compose", "up", "-d", "--no-recreate"]]
+        self.assertEqual(len(compose_starts), 2)
+        self.assertTrue(any("encore en phase de démarrage" in line for line in logs))
+        self.assertTrue(any("Reprise du démarrage Odoo" in line for line in logs))
+
+    def test_start_project_waits_until_traefik_stops_returning_bad_gateway(self):
+        statuses = iter((502, 502, 303))
+        service = ProjectService(
+            self.settings,
+            self.root,
+            runner=self.runner,
+            http_probe=lambda _url: next(statuses),
+        )
+        logs = []
+
+        service.wait_project_http("DEMO", log=logs.append, sleep=lambda _seconds: None)
+
+        self.assertTrue(any("HTTP 502" in line for line in logs))
+        self.assertTrue(any("HTTP 303" in line for line in logs))
+
+    @patch("odoo_manager_core.project_service.http.client.HTTPConnection")
+    def test_http_probe_uses_loopback_with_traefik_host_header(self, connection_class):
+        connection = connection_class.return_value
+        connection.getresponse.return_value.status = 303
+
+        status = ProjectService.http_status("http://dev.Caritel_v18.localhost/web/login")
+
+        self.assertEqual(status, 303)
+        connection_class.assert_called_once_with("127.0.0.1", None, timeout=3)
+        connection.request.assert_called_once_with(
+            "GET",
+            "/web/login",
+            headers={
+                "Host": "dev.caritel_v18.localhost",
+                "User-Agent": "Odoo-Manager/readiness",
+            },
+        )
 
     @patch("odoo_manager_core.project_service.platform.system", return_value="Darwin")
     def test_start_project_recovers_stale_macos_localtime_mount(self, _system):

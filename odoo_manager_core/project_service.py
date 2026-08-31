@@ -1,9 +1,11 @@
+import http.client
 import os
 import platform
 import shutil
 import subprocess
 import threading
 import time
+import urllib.parse
 import uuid
 from pathlib import Path
 
@@ -41,11 +43,12 @@ def terminate_active_processes(wait_seconds=0.5):
 
 
 class ProjectService:
-    def __init__(self, settings, workspace, traefik_dir=None, runner=None):
+    def __init__(self, settings, workspace, traefik_dir=None, runner=None, http_probe=None):
         self.settings = settings
         self.workspace = Path(workspace)
         self.traefik_dir = Path(traefik_dir).expanduser() if traefik_dir else None
         self.runner = runner
+        self.http_probe = http_probe
 
     def env(self):
         env = os.environ.copy()
@@ -154,6 +157,84 @@ class ProjectService:
 
     def is_running(self, container):
         return self.container_status(container) == "running"
+
+    def container_health(self, container):
+        health_format = "{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}"
+        code, output = self.capture(
+            self.docker("inspect", "-f", health_format, container),
+            timeout=5,
+        )
+        if code != 0 or not output:
+            return "absent"
+        return output.splitlines()[0].strip().lower()
+
+    def container_startup_diagnostics(self, container, log=None):
+        health_format = "{{if .State.Health}}{{json .State.Health}}{{else}}null{{end}}"
+        health_code, health = self.capture(
+            self.docker("inspect", "-f", health_format, container),
+            timeout=8,
+        )
+        logs_code, logs = self.capture(
+            self.docker("logs", "--tail", "80", container),
+            timeout=12,
+        )
+        if health_code == 0 and health and health != "null":
+            self.log(log, "Dernier état du contrôle de santé PostgreSQL:")
+            self.log(log, health)
+        if logs_code == 0 and logs:
+            self.log(log, "Derniers logs PostgreSQL:")
+            self.log(log, logs)
+
+    def wait_for_postgres(self, project, max_wait=180, log=None, sleep=None):
+        sleep = sleep or time.sleep
+        container = f"postgresql-{project}"
+        waited = 0
+        last_state = None
+        while waited <= max_wait:
+            status = self.container_status(container)
+            health = self.container_health(container) if status == "running" else "none"
+            state = (status, health)
+            if state != last_state or waited % 10 == 0:
+                self.log(
+                    log,
+                    f"Attente PostgreSQL... {waited}s/{max_wait}s "
+                    f"(conteneur: {status}, santé: {health})",
+                )
+                last_state = state
+            if status == "running" and health in {"healthy", "none"}:
+                return
+            if status in {"dead", "exited", "paused"}:
+                self.container_startup_diagnostics(container, log=log)
+                raise RuntimeError(f"PostgreSQL s'est arrêté pendant son démarrage ({status}).")
+            sleep(2)
+            waited += 2
+
+        self.container_startup_diagnostics(container, log=log)
+        raise RuntimeError(
+            f"PostgreSQL n'est pas devenu sain après {max_wait}s. "
+            "Consulte les contrôles de santé et les logs affichés ci-dessus."
+        )
+
+    def recover_postgres_dependency(self, project, path, log=None):
+        container = f"postgresql-{project}"
+        status = self.container_status(container)
+        health = self.container_health(container) if status == "running" else "none"
+        if status != "running" or health not in {"starting", "unhealthy", "healthy"}:
+            return None
+
+        self.log(log, "")
+        self.log(
+            log,
+            "PostgreSQL est encore en phase de démarrage. "
+            "Le gestionnaire attend sa disponibilité sans recréer le volume de données.",
+        )
+        self.wait_for_postgres(project, log=log)
+        self.log(log, "PostgreSQL est prêt. Reprise du démarrage Odoo...")
+        return self.stream(
+            self.docker("compose", "up", "-d", "--no-recreate"),
+            cwd=path,
+            log=log,
+        )
 
     def fix_macos_localtime_mount(self, compose_file, log=None):
         if platform.system() != "Darwin":
@@ -346,7 +427,11 @@ class ProjectService:
                 self.log(log, "")
                 self.log(log, "Anomalie Docker apparue pendant le démarrage.")
                 code = self.recreate_stale_containers(path, stale_mounts, stale_networks, log=log)
-            elif self.is_running(f"odoo-{project}"):
+            else:
+                recovered_code = self.recover_postgres_dependency(project, path, log=log)
+                if recovered_code is not None:
+                    code = recovered_code
+            if code != 0 and self.is_running(f"odoo-{project}"):
                 self.log(log, f"Docker Compose a retourné une erreur, mais odoo-{project} est déjà running.")
                 self.log(log, "Le gestionnaire continue avec le conteneur existant.")
                 return
@@ -398,6 +483,56 @@ class ProjectService:
             waited += 2
         raise RuntimeError("Odoo ne répond pas sur le port 8069.")
 
+    @staticmethod
+    def http_status(url, timeout=3):
+        parsed = urllib.parse.urlsplit(url)
+        host = parsed.hostname
+        if not host:
+            return 0
+        connect_host = host if host in {"127.0.0.1", "localhost", "::1"} else "127.0.0.1"
+        connection_class = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+        connection = connection_class(connect_host, parsed.port, timeout=timeout)
+        try:
+            path = parsed.path or "/"
+            if parsed.query:
+                path += f"?{parsed.query}"
+            host_header = host if parsed.port in {None, 80, 443} else f"{host}:{parsed.port}"
+            connection.request(
+                "GET",
+                path,
+                headers={"Host": host_header, "User-Agent": "Odoo-Manager/readiness"},
+            )
+            response = connection.getresponse()
+            return response.status
+        except (OSError, http.client.HTTPException):
+            return 0
+        finally:
+            connection.close()
+
+    def wait_project_http(self, project, max_wait=30, log=None, sleep=None):
+        sleep = sleep or time.sleep
+        url = urllib.parse.urljoin(self.project_url(project), "web/login")
+        probe = self.http_probe or self.http_status
+        if self.runner is not None and self.http_probe is None:
+            return
+
+        waited = 0
+        last_status = None
+        while waited <= max_wait:
+            status = probe(url)
+            if status != last_status or waited % 10 == 0:
+                displayed = status or "indisponible"
+                self.log(log, f"Vérification de l'accès Odoo... {waited}s/{max_wait}s (HTTP {displayed})")
+                last_status = status
+            if 200 <= status < 500 and status != 404:
+                return
+            sleep(2)
+            waited += 2
+        raise RuntimeError(
+            "Odoo répond dans son conteneur, mais Traefik ne fournit pas encore l'URL locale. "
+            "Le navigateur n'a pas été ouvert afin d'éviter une page Bad Gateway."
+        )
+
     def start_odoo_server(self, project, log=None):
         container = f"odoo-{project}"
         if self.odoo_server_running(container):
@@ -433,6 +568,7 @@ class ProjectService:
         self.compose_up_project(project, path, log=log)
         self.wait_for_container(f"odoo-{project}", log=log)
         self.start_odoo_server(project, log=log)
+        self.wait_project_http(project, log=log)
         self.log(log, "")
         self.log(log, f"Projet démarré: {project}")
         self.log(log, f"URL Odoo: {self.project_url(project)}")
