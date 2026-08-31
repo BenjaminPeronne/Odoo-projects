@@ -149,6 +149,23 @@ class ProjectCreator:
                 else:
                     shutil.rmtree(link)
             relative = Path(os.path.relpath(module, addons_dir))
+            if self.settings.execution_mode == "wsl":
+                relative_target = str(relative).replace("\\", "/")
+                command = [
+                    *command_prefix(self.settings),
+                    "ln",
+                    "-s",
+                    relative_target,
+                    execution_path(link, self.settings),
+                ]
+                code = self.project_service.stream(command, cwd=self.workspace, log=log)
+                if code != 0:
+                    raise RuntimeError(
+                        "Impossible de créer les liens symboliques des addons via WSL 2. "
+                        "Vérifie que le dossier des projets est accessible depuis WSL."
+                    )
+                linked += 1
+                continue
             try:
                 link.symlink_to(relative, target_is_directory=True)
             except OSError as exc:

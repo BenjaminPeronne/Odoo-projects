@@ -83,7 +83,9 @@ def command_prefix(settings):
     command = ["wsl.exe"]
     if settings.wsl_distribution:
         command.extend(["-d", settings.wsl_distribution])
-    command.append("--")
+    # --exec bypasses the default Linux shell, which would otherwise consume
+    # backslashes from Windows paths before wslpath receives them.
+    command.append("--exec")
     return command
 
 
@@ -114,7 +116,8 @@ def execution_path(path, settings):
     path = str(Path(path).expanduser().resolve())
     if settings.execution_mode != "wsl":
         return path
-    command = [*command_prefix(settings), "wslpath", "-a", "-u", path]
+    path_for_wsl = path.replace("\\", "/")
+    command = [*command_prefix(settings), "wslpath", "-a", "-u", path_for_wsl]
     result = subprocess.run(
         command,
         capture_output=True,

@@ -77,7 +77,7 @@ class DockerStatusTests(unittest.TestCase):
         command = shell_command(settings, "C:/tools/odoo_manager.sh", "--list")
         self.assertEqual(
             command,
-            ["wsl.exe", "-d", "Ubuntu", "--", "sh", "/mnt/c/tools/odoo_manager.sh", "--list"],
+            ["wsl.exe", "-d", "Ubuntu", "--exec", "sh", "/mnt/c/tools/odoo_manager.sh", "--list"],
         )
 
 

@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from odoo_manager_core.config import ManagerSettings
 from odoo_manager_core.project_creator import (
@@ -22,6 +23,8 @@ class FakeRunner:
 
     def stream(self, command, cwd=None, log=None):
         self.commands.append(command)
+        if "ln" in command:
+            return 0
         repository = next((item for item in command if isinstance(item, str) and item.endswith(".git")), "")
         if repository == self.fail_repository:
             return 1
@@ -92,6 +95,39 @@ class ProjectCreatorTests(unittest.TestCase):
         link = target / "odoo" / "addons" / "custom_module"
         self.assertTrue(link.is_symlink())
         self.assertEqual(Path("../addons-store/client-addons/custom_module"), link.readlink())
+
+    @mock.patch("odoo_manager_core.project_creator.execution_path")
+    def test_wsl_mode_creates_relative_links_through_linux(self, execution_path):
+        project = self.workspace / "DEMO"
+        module = project / "odoo" / "addons-store" / "custom" / "custom_module"
+        addons = project / "odoo" / "addons"
+        module.mkdir(parents=True)
+        addons.mkdir(parents=True)
+        (module / "__manifest__.py").write_text("{}\n", encoding="utf-8")
+        execution_path.return_value = "/mnt/c/Odoo/DEMO/odoo/addons/custom_module"
+        runner = FakeRunner()
+        settings = ManagerSettings.from_dict(
+            {"execution_mode": "wsl", "wsl_distribution": "Ubuntu"},
+            self.workspace,
+        )
+        creator = ProjectCreator(settings, self.workspace, ProjectService(settings, self.workspace, runner=runner))
+
+        linked = creator.link_modules(module.parent, addons)
+
+        self.assertEqual(linked, 1)
+        self.assertEqual(
+            runner.commands[-1],
+            [
+                "wsl.exe",
+                "-d",
+                "Ubuntu",
+                "--exec",
+                "ln",
+                "-s",
+                "../addons-store/custom/custom_module",
+                "/mnt/c/Odoo/DEMO/odoo/addons/custom_module",
+            ],
+        )
 
     def test_failed_clone_leaves_no_partial_project(self):
         runner = FakeRunner(fail_repository="ssh://git@gitlab.sudokeys.com:10022/sudokeys/odoo.git")

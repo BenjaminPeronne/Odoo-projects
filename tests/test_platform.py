@@ -3,7 +3,7 @@ from pathlib import Path
 from unittest import mock
 
 from odoo_manager_core.config import ManagerSettings
-from odoo_manager_core.platform import executable_search_path, hidden_process_kwargs, open_terminal_script
+from odoo_manager_core.platform import execution_path, executable_search_path, hidden_process_kwargs, open_terminal_script
 
 
 class TerminalLaunchTests(unittest.TestCase):
@@ -28,7 +28,27 @@ class TerminalLaunchTests(unittest.TestCase):
         self.assertTrue(result.ok)
         command = popen.call_args.args[0]
         self.assertEqual(command[:4], ["C:/Windows/wt.exe", "wsl.exe", "-d", "Ubuntu"])
+        self.assertEqual(command[4], "--exec")
         self.assertEqual(command[-2:], ["sh", "/mnt/c/create_project.sh"])
+
+    @mock.patch("odoo_manager_core.platform.Path")
+    @mock.patch("odoo_manager_core.platform.subprocess.run")
+    def test_wslpath_receives_path_without_default_shell_reparsing(self, run, path_class):
+        run.return_value = mock.Mock(returncode=0, stdout="/mnt/c/Users/Demo/Odoo-projects\n", stderr="")
+        path_class.return_value.expanduser.return_value.resolve.return_value = (
+            r"C:\Users\Demo\Odoo-projects"
+        )
+        settings = ManagerSettings.from_dict(
+            {"execution_mode": "wsl", "wsl_distribution": "Ubuntu"},
+            "/tmp/workspace",
+        )
+
+        translated = execution_path("/tmp/workspace", settings)
+
+        self.assertEqual(translated, "/mnt/c/Users/Demo/Odoo-projects")
+        command = run.call_args.args[0]
+        self.assertEqual(command[:5], ["wsl.exe", "-d", "Ubuntu", "--exec", "wslpath"])
+        self.assertEqual(command[-1], "C:/Users/Demo/Odoo-projects")
 
     @mock.patch("odoo_manager_core.platform.shutil.which", return_value=None)
     @mock.patch("odoo_manager_core.platform.platform_id", return_value="linux")
