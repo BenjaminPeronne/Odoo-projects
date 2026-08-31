@@ -41,6 +41,7 @@ def windows_executable_paths():
                 Path(program_files) / "Git" / "cmd",
                 Path(program_files) / "Git" / "bin",
                 Path(program_files) / "Git" / "usr" / "bin",
+                Path(program_files) / "Docker" / "Docker" / "resources" / "bin",
             ]
         )
     if local_app_data:
@@ -50,6 +51,7 @@ def windows_executable_paths():
                 Path(local_app_data) / "Programs" / "Git" / "cmd",
                 Path(local_app_data) / "Programs" / "Git" / "bin",
                 Path(local_app_data) / "Programs" / "Git" / "usr" / "bin",
+                Path(local_app_data) / "Programs" / "Docker" / "Docker" / "resources" / "bin",
             ]
         )
     return [str(path) for path in candidates]
@@ -77,16 +79,20 @@ def platform_id():
     return "linux"
 
 
-def command_prefix(settings):
-    if settings.execution_mode != "wsl":
-        return []
+def wsl_command_prefix(distribution=""):
     command = ["wsl.exe"]
-    if settings.wsl_distribution:
-        command.extend(["-d", settings.wsl_distribution])
+    if distribution:
+        command.extend(["-d", distribution])
     # --exec bypasses the default Linux shell, which would otherwise consume
     # backslashes from Windows paths before wslpath receives them.
     command.append("--exec")
     return command
+
+
+def command_prefix(settings):
+    if settings.execution_mode != "wsl":
+        return []
+    return wsl_command_prefix(settings.wsl_distribution)
 
 
 def executable_search_path(extra_paths=None):
@@ -106,31 +112,50 @@ def executable_search_path(extra_paths=None):
 def resolve_executable(executable, settings):
     if settings.execution_mode == "wsl":
         return executable
+    return resolve_host_executable(executable)
+
+
+def resolve_host_executable(executable):
     path = Path(executable).expanduser()
     if path.is_absolute():
         return str(path)
     return shutil.which(executable, path=executable_search_path()) or executable
 
 
-def execution_path(path, settings):
+def host_executable_available(executable):
+    path = Path(executable).expanduser()
+    if path.is_absolute():
+        return path.exists() and path.is_file()
+    return shutil.which(executable, path=executable_search_path()) is not None
+
+
+def wsl_execution_path(path, distribution=""):
     path = str(Path(path).expanduser().resolve())
-    if settings.execution_mode != "wsl":
-        return path
     path_for_wsl = path.replace("\\", "/")
-    command = [*command_prefix(settings), "wslpath", "-a", "-u", path_for_wsl]
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        timeout=8,
-        check=False,
-        **hidden_process_kwargs(),
-    )
+    command = [*wsl_command_prefix(distribution), "wslpath", "-a", "-u", path_for_wsl]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+            **hidden_process_kwargs(),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"Impossible d’exécuter WSL: {exc}") from exc
     translated = result.stdout.strip()
     if result.returncode != 0 or not translated:
         detail = (result.stderr or result.stdout or "wslpath a échoué").strip()
         raise RuntimeError(f"Impossible de traduire le chemin pour WSL: {detail}")
     return translated
+
+
+def execution_path(path, settings):
+    resolved = str(Path(path).expanduser().resolve())
+    if settings.execution_mode != "wsl":
+        return resolved
+    return wsl_execution_path(resolved, settings.wsl_distribution)
 
 
 def executable_available(executable, settings):
@@ -223,18 +248,16 @@ def open_terminal_script(settings, script_path, cwd=None):
             return LaunchResult(True, f"{application} ouvert.")
 
         if current_platform == "windows":
-            if settings.execution_mode != "wsl":
-                return LaunchResult(False, "Sous Windows, configure le mode WSL 2 pour exécuter Brainkeys.")
-            translated_script = execution_path(script_path, settings)
-            command = [*command_prefix(settings), "sh", translated_script]
+            translated_script = wsl_execution_path(script_path, settings.wsl_distribution)
+            command = [*wsl_command_prefix(settings.wsl_distribution), "sh", translated_script]
             windows_terminal = shutil.which("wt.exe")
             if windows_terminal:
                 subprocess.Popen([windows_terminal, *command], cwd=str(cwd))
-                return LaunchResult(True, "Windows Terminal ouvert dans WSL 2.")
+                return LaunchResult(True, "Windows Terminal ouvert pour la création du projet.")
             cmd = shutil.which("cmd.exe")
             if cmd:
                 subprocess.Popen([cmd, "/c", "start", "", *command], cwd=str(cwd))
-                return LaunchResult(True, "Terminal WSL 2 ouvert.")
+                return LaunchResult(True, "Terminal ouvert pour la création du projet.")
             return LaunchResult(False, "Windows Terminal et cmd.exe sont introuvables.")
 
         candidates = []

@@ -2,7 +2,7 @@ import unittest
 from unittest import mock
 
 from odoo_manager_core.config import ManagerSettings
-from odoo_manager_core.system import docker_status, shell_command
+from odoo_manager_core.system import docker_command, docker_status, shell_command
 
 
 class DockerStatusTests(unittest.TestCase):
@@ -79,6 +79,34 @@ class DockerStatusTests(unittest.TestCase):
             command,
             ["wsl.exe", "-d", "Ubuntu", "--exec", "sh", "/mnt/c/tools/odoo_manager.sh", "--list"],
         )
+
+    @mock.patch("odoo_manager_core.system.resolve_host_executable", return_value=r"C:\Docker\docker.exe")
+    @mock.patch("odoo_manager_core.system.platform_id", return_value="windows")
+    def test_windows_wsl_mode_uses_docker_desktop_cli(self, _platform, _resolve):
+        settings = ManagerSettings.from_dict(
+            {"execution_mode": "wsl", "wsl_distribution": "Ubuntu"},
+            "/tmp/workspace",
+        )
+
+        command = docker_command(settings, "info")
+
+        self.assertEqual(command, [r"C:\Docker\docker.exe", "info"])
+
+    @mock.patch("odoo_manager_core.system.resolve_host_executable", return_value=r"C:\Docker\docker.exe")
+    @mock.patch("odoo_manager_core.system.host_executable_available", return_value=True)
+    @mock.patch("odoo_manager_core.system.platform_id", return_value="windows")
+    @mock.patch("odoo_manager_core.system.subprocess.run")
+    def test_windows_wsl_docker_status_probes_native_cli(self, run, _platform, _available, _resolve):
+        run.return_value = mock.Mock(returncode=0, stdout='"28.0.0"\n', stderr="")
+        settings = ManagerSettings.from_dict(
+            {"execution_mode": "wsl", "wsl_distribution": "Ubuntu"},
+            "/tmp/workspace",
+        )
+
+        status = docker_status(settings)
+
+        self.assertEqual(status["state"], "ready")
+        self.assertEqual(run.call_args.args[0][0], r"C:\Docker\docker.exe")
 
 
 if __name__ == "__main__":

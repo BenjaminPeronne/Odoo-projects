@@ -163,6 +163,74 @@ class CommandWorkingDirectoryTests(unittest.TestCase):
         run.assert_not_called()
 
 
+class WslManagerCommandTests(unittest.TestCase):
+    @patch("odoo_manager_web.execution_path")
+    def test_generic_command_environment_keeps_host_paths(self, execution_path):
+        previous_settings = web.SETTINGS
+        previous_workspace = web.WORKSPACE
+        try:
+            web.SETTINGS = web.ManagerSettings.from_dict(
+                {
+                    "execution_mode": "wsl",
+                    "wsl_distribution": "Ubuntu",
+                    "traefik_directory": r"C:\Users\Demo\docker-local-tools\traefik",
+                },
+                r"C:\Users\Demo\Odoo-projects",
+            )
+            web.WORKSPACE = Path(r"C:\Users\Demo\Odoo-projects")
+
+            environment = web.command_env()
+        finally:
+            web.SETTINGS = previous_settings
+            web.WORKSPACE = previous_workspace
+
+        execution_path.assert_not_called()
+        self.assertEqual(environment["ODOO_WORKSPACE"], r"C:\Users\Demo\Odoo-projects")
+        self.assertEqual(
+            environment["TRAEFIK_DIR"],
+            r"C:\Users\Demo\docker-local-tools\traefik",
+        )
+
+    @patch("odoo_manager_web.local_traefik_directory", return_value=Path(r"C:\Users\Demo\docker-local-tools\traefik"))
+    @patch("odoo_manager_web.resolve_host_executable", return_value=r"C:\Docker\docker.exe")
+    @patch("odoo_manager_web.execution_path")
+    @patch("odoo_manager_web.platform_id", return_value="windows")
+    def test_shell_compatibility_uses_host_docker_from_wsl(
+        self,
+        _platform,
+        execution_path,
+        _resolve_docker,
+        _traefik,
+    ):
+        execution_path.side_effect = lambda path, _settings: {
+            r"C:\Users\Demo\Odoo-projects": "/mnt/c/Users/Demo/Odoo-projects",
+            r"C:\Docker\docker.exe": "/mnt/c/Docker/docker.exe",
+            r"C:\Users\Demo\docker-local-tools\traefik": "/mnt/c/Users/Demo/docker-local-tools/traefik",
+            r"C:\Odoo Manager\odoo_manager.sh": "/mnt/c/Odoo Manager/odoo_manager.sh",
+        }[str(path)]
+        previous_settings = web.SETTINGS
+        previous_workspace = web.WORKSPACE
+        previous_manager = web.MANAGER
+        try:
+            web.SETTINGS = web.ManagerSettings.from_dict(
+                {"execution_mode": "wsl", "wsl_distribution": "Ubuntu"},
+                r"C:\Users\Demo\Odoo-projects",
+            )
+            web.WORKSPACE = Path(r"C:\Users\Demo\Odoo-projects")
+            web.MANAGER = Path(r"C:\Odoo Manager\odoo_manager.sh")
+
+            command = web.manager_command("--update-module", "DEMO", "demo", "sale")
+        finally:
+            web.SETTINGS = previous_settings
+            web.WORKSPACE = previous_workspace
+            web.MANAGER = previous_manager
+
+        self.assertEqual(command[:6], ["wsl.exe", "-d", "Ubuntu", "--exec", "env", "ODOO_WORKSPACE=/mnt/c/Users/Demo/Odoo-projects"])
+        self.assertIn("ODOO_MANAGER_DOCKER=/mnt/c/Docker/docker.exe", command)
+        self.assertIn("TRAEFIK_DIR=/mnt/c/Users/Demo/docker-local-tools/traefik", command)
+        self.assertEqual(command[-4:], ["--update-module", "DEMO", "demo", "sale"])
+
+
 class BootstrapSnapshotTests(unittest.TestCase):
     @patch("odoo_manager_web.jobs_snapshot", return_value=[])
     @patch("odoo_manager_web.container_status", return_value="absent")
@@ -232,6 +300,25 @@ class BootstrapSnapshotTests(unittest.TestCase):
 
         docker_status.assert_not_called()
         self.assertIn(payload["platform"], {"macos", "windows", "linux"})
+
+
+class TraefikPathTests(unittest.TestCase):
+    @patch("odoo_manager_web.Path.home")
+    def test_wsl_mode_uses_concrete_host_traefik_path(self, home):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            home.return_value = root
+            previous_settings = web.SETTINGS
+            try:
+                web.SETTINGS = web.ManagerSettings.from_dict(
+                    {"execution_mode": "wsl", "wsl_distribution": "Ubuntu"},
+                    root / "Odoo-projects",
+                )
+                expected = root / "docker-local-tools" / "traefik"
+                self.assertEqual(web.local_traefik_directory(), expected)
+                self.assertEqual(web.traefik_directory_label(), str(expected))
+            finally:
+                web.SETTINGS = previous_settings
 
 
 class ProjectCreationPrerequisitesTests(unittest.TestCase):

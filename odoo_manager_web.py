@@ -34,6 +34,7 @@ from odoo_manager_core.platform import (
     hidden_process_kwargs,
     platform_id,
     resolve_executable,
+    resolve_host_executable,
 )
 from odoo_manager_core.project_creator import (
     SUPPORTED_ODOO_VERSIONS,
@@ -147,9 +148,9 @@ def command_env():
     env = os.environ.copy()
     env["PATH"] = executable_search_path()
     env["PYTHONUNBUFFERED"] = "1"
-    env["ODOO_WORKSPACE"] = execution_path(WORKSPACE, SETTINGS)
+    env["ODOO_WORKSPACE"] = str(WORKSPACE)
     if SETTINGS.traefik_directory:
-        env["TRAEFIK_DIR"] = execution_path(SETTINGS.traefik_directory, SETTINGS)
+        env["TRAEFIK_DIR"] = str(Path(SETTINGS.traefik_directory).expanduser())
     env["ODOO_MANAGER_EXECUTION_MODE"] = SETTINGS.execution_mode
     env["ODOO_MANAGER_DOCKER"] = SETTINGS.docker_executable
     env["ODOO_MANAGER_BRAINKEYS"] = SETTINGS.brainkeys_executable
@@ -305,16 +306,12 @@ def default_traefik_directory():
 def traefik_directory_label():
     if SETTINGS.traefik_directory:
         return str(Path(SETTINGS.traefik_directory).expanduser())
-    if SETTINGS.execution_mode == "wsl":
-        return "$HOME/docker-local-tools/traefik"
     return str(default_traefik_directory())
 
 
 def local_traefik_directory():
     if SETTINGS.traefik_directory:
         return Path(SETTINGS.traefik_directory).expanduser()
-    if SETTINGS.execution_mode == "wsl":
-        return None
     return default_traefik_directory()
 
 
@@ -323,18 +320,6 @@ def project_service():
 
 
 def traefik_compose_probe():
-    if SETTINGS.execution_mode == "wsl" and not SETTINGS.traefik_directory:
-        script = (
-            'dir="$HOME/docker-local-tools/traefik"; '
-            'if [ ! -d "$dir" ]; then echo missing; exit 2; fi; '
-            'if [ -f "$dir/docker-compose.yml" ] || [ -f "$dir/docker-compose.yaml" ] || '
-            '[ -f "$dir/compose.yml" ] || [ -f "$dir/compose.yaml" ]; then echo ready; exit 0; fi; '
-            'echo invalid; exit 3'
-        )
-        code, output = run_capture([*command_prefix(SETTINGS), "sh", "-lc", script], timeout=6)
-        state = (output.splitlines()[-1] if output else "").strip()
-        return code == 0, state != "missing", state == "ready"
-
     directory = local_traefik_directory()
     if not directory or not directory.exists():
         return False, False, False
@@ -1498,7 +1483,30 @@ def run_stream(job, args, cwd=None):
 def manager_job(job, *args):
     if not MANAGER.exists():
         raise RuntimeError(f"Script introuvable: {MANAGER}")
-    run_stream(job, shell_command(SETTINGS, MANAGER, *args))
+    return run_stream(job, manager_command(*args))
+
+
+def manager_command(*args):
+    if platform_id() != "windows" or SETTINGS.execution_mode != "wsl":
+        return shell_command(SETTINGS, MANAGER, *args)
+
+    docker_host_path = resolve_host_executable(SETTINGS.docker_executable)
+    variables = [
+        f"ODOO_WORKSPACE={execution_path(WORKSPACE, SETTINGS)}",
+        f"ODOO_MANAGER_DOCKER={execution_path(docker_host_path, SETTINGS)}",
+        "ODOO_MANAGER_EXECUTION_MODE=wsl",
+    ]
+    traefik_dir = local_traefik_directory()
+    if traefik_dir:
+        variables.append(f"TRAEFIK_DIR={execution_path(traefik_dir, SETTINGS)}")
+    return [
+        *command_prefix(SETTINGS),
+        "env",
+        *variables,
+        "sh",
+        execution_path(MANAGER, SETTINGS),
+        *args,
+    ]
 
 
 def update_all_modules_manager_args(project, db_name, allow_missing_filestore=False):
@@ -1647,16 +1655,15 @@ def install_traefik_job(job):
     status = docker_status(SETTINGS)
     if not status["running"]:
         raise RuntimeError("Docker doit être installé et démarré avant l'installation de Traefik.")
-    git_code, git_output = run_capture(
-        [*command_prefix(SETTINGS), resolve_executable("git", SETTINGS), "--version"],
-        timeout=8,
+    git = (
+        resolve_host_executable("git")
+        if platform_id() == "windows" and SETTINGS.execution_mode == "wsl"
+        else resolve_executable("git", SETTINGS)
     )
+    git_code, git_output = run_capture([git, "--version"], timeout=8)
     if git_code != 0:
         raise RuntimeError("Git doit être installé avant Traefik. Utilise le bouton Installer dans l'étape Git.")
     job.add(git_output.splitlines()[0] if git_output else "Git détecté.")
-    if SETTINGS.execution_mode == "wsl":
-        manager_job(job, "--install-traefik")
-        return
     project_service().install_traefik(TRAEFIK_REPO, log=job.add)
 
 
@@ -2039,7 +2046,7 @@ def delete_module_code_job(job, project, modules, db_name="", uninstall_first=Fa
         installed = [name for name in module_names if states.get(name, {}).get("state") == "installed"]
         if installed:
             job.add(f"Désinstallation Odoo avant suppression: {', '.join(installed)}")
-            code = run_stream(job, shell_command(SETTINGS, MANAGER, "--uninstall-module", project, db_name, ",".join(installed)))
+            code = manager_job(job, "--uninstall-module", project, db_name, ",".join(installed))
             if code != 0:
                 raise RuntimeError("La désinstallation Odoo a échoué; suppression du code annulée.")
         else:

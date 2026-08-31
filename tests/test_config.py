@@ -1,11 +1,18 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from odoo_manager_core.config import ManagerSettings, SettingsStore, default_config_dir
+from odoo_manager_core.config import ManagerSettings, SettingsStore, default_config_dir, expand_home_reference
 
 
 class SettingsTests(unittest.TestCase):
+    def test_home_reference_is_expanded_for_legacy_traefik_setting(self):
+        self.assertEqual(
+            expand_home_reference(r"$HOME\docker-local-tools\traefik", home="C:/Users/Demo"),
+            str(Path("C:/Users/Demo") / "docker-local-tools" / "traefik"),
+        )
+
     def test_platform_config_directories(self):
         home = Path("/home/test")
         self.assertEqual(
@@ -46,6 +53,16 @@ class SettingsTests(unittest.TestCase):
     def test_invalid_mode_uses_native(self):
         settings = ManagerSettings.from_dict({"execution_mode": "dos"}, "/tmp/workspace")
         self.assertEqual(settings.execution_mode, "native")
+
+    @mock.patch("odoo_manager_core.config.platform.system", return_value="Windows")
+    def test_windows_legacy_wsl_mode_is_migrated_to_automatic_native(self, _system):
+        settings = ManagerSettings.from_dict(
+            {"execution_mode": "wsl", "wsl_distribution": "Ubuntu"},
+            "/tmp/workspace",
+        )
+
+        self.assertEqual(settings.execution_mode, "native")
+        self.assertEqual(settings.wsl_distribution, "")
 
 
 if __name__ == "__main__":

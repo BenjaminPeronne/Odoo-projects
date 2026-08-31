@@ -4,7 +4,14 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from .platform import command_prefix, execution_path, resolve_executable
+from .platform import (
+    command_prefix,
+    execution_path,
+    platform_id,
+    resolve_executable,
+    wsl_command_prefix,
+    wsl_execution_path,
+)
 
 
 SUPPORTED_ODOO_VERSIONS = ("15.0", "16.0", "17.0", "18.0", "19.0")
@@ -137,6 +144,26 @@ class ProjectCreator:
                 dirs[:] = []
         return sorted(modules, key=lambda path: path.name.lower())
 
+    def link_module_via_wsl(self, relative, link, log=None):
+        distribution = self.settings.wsl_distribution
+        relative_target = str(relative).replace("\\", "/")
+        try:
+            destination = wsl_execution_path(link, distribution)
+            command = [
+                *wsl_command_prefix(distribution),
+                "ln",
+                "-s",
+                relative_target,
+                destination,
+            ]
+            code = self.project_service.stream(command, cwd=self.workspace, log=log)
+        except (OSError, RuntimeError):
+            return False
+        if code == 0:
+            self.log(log, f"Lien créé via WSL 2: {link.name}")
+            return True
+        return False
+
     def link_modules(self, source_root, addons_dir, log=None, replace=False):
         linked = 0
         for module in self.module_directories(source_root):
@@ -150,16 +177,7 @@ class ProjectCreator:
                     shutil.rmtree(link)
             relative = Path(os.path.relpath(module, addons_dir))
             if self.settings.execution_mode == "wsl":
-                relative_target = str(relative).replace("\\", "/")
-                command = [
-                    *command_prefix(self.settings),
-                    "ln",
-                    "-s",
-                    relative_target,
-                    execution_path(link, self.settings),
-                ]
-                code = self.project_service.stream(command, cwd=self.workspace, log=log)
-                if code != 0:
+                if not self.link_module_via_wsl(relative, link, log=log):
                     raise RuntimeError(
                         "Impossible de créer les liens symboliques des addons via WSL 2. "
                         "Vérifie que le dossier des projets est accessible depuis WSL."
@@ -169,9 +187,12 @@ class ProjectCreator:
             try:
                 link.symlink_to(relative, target_is_directory=True)
             except OSError as exc:
+                if platform_id() == "windows" and self.link_module_via_wsl(relative, link, log=log):
+                    linked += 1
+                    continue
                 raise RuntimeError(
                     "Impossible de créer les liens symboliques des addons. "
-                    "Sous Windows, active le mode développeur ou utilise le mode WSL 2."
+                    "Sous Windows, installe WSL 2 ou active le mode développeur."
                 ) from exc
             linked += 1
         self.log(log, f"{linked} module(s) lié(s) dans odoo/addons.")

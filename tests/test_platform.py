@@ -7,18 +7,25 @@ from odoo_manager_core.platform import execution_path, executable_search_path, h
 
 
 class TerminalLaunchTests(unittest.TestCase):
-    @mock.patch("odoo_manager_core.platform.platform_id", return_value="windows")
-    def test_windows_native_requires_wsl(self, _platform):
-        settings = ManagerSettings.from_dict({"execution_mode": "native"}, "/tmp/workspace")
-        result = open_terminal_script(settings, "/tmp/create_project.sh")
-        self.assertFalse(result.ok)
-        self.assertIn("WSL 2", result.message)
-
     @mock.patch("odoo_manager_core.platform.subprocess.Popen")
-    @mock.patch("odoo_manager_core.platform.execution_path", return_value="/mnt/c/create_project.sh")
+    @mock.patch("odoo_manager_core.platform.wsl_execution_path", return_value="/mnt/c/create_project.sh")
     @mock.patch("odoo_manager_core.platform.shutil.which")
     @mock.patch("odoo_manager_core.platform.platform_id", return_value="windows")
-    def test_windows_wsl_uses_windows_terminal(self, _platform, which, _execution_path, popen):
+    def test_windows_native_uses_wsl_automatically(self, _platform, which, wsl_path, popen):
+        which.side_effect = lambda name: "C:/Windows/wt.exe" if name == "wt.exe" else None
+        settings = ManagerSettings.from_dict({"execution_mode": "native"}, "/tmp/workspace")
+        result = open_terminal_script(settings, "/tmp/create_project.sh")
+
+        self.assertTrue(result.ok)
+        wsl_path.assert_called_once()
+        command = popen.call_args.args[0]
+        self.assertEqual(command, ["C:/Windows/wt.exe", "wsl.exe", "--exec", "sh", "/mnt/c/create_project.sh"])
+
+    @mock.patch("odoo_manager_core.platform.subprocess.Popen")
+    @mock.patch("odoo_manager_core.platform.wsl_execution_path", return_value="/mnt/c/create_project.sh")
+    @mock.patch("odoo_manager_core.platform.shutil.which")
+    @mock.patch("odoo_manager_core.platform.platform_id", return_value="windows")
+    def test_windows_configured_distribution_is_used_automatically(self, _platform, which, _wsl_path, popen):
         which.side_effect = lambda name: "C:/Windows/wt.exe" if name == "wt.exe" else None
         settings = ManagerSettings.from_dict(
             {"execution_mode": "wsl", "wsl_distribution": "Ubuntu"},
@@ -80,6 +87,10 @@ class WindowsProcessTests(unittest.TestCase):
 
         self.assertIn(str(Path(r"C:\Program Files") / "Git" / "cmd"), search_path)
         self.assertIn(str(Path(r"C:\Program Files") / "Git" / "usr" / "bin"), search_path)
+        self.assertIn(
+            str(Path(r"C:\Program Files") / "Docker" / "Docker" / "resources" / "bin"),
+            search_path,
+        )
         self.assertIn(str(Path(r"C:\Windows") / "System32" / "OpenSSH"), search_path)
         self.assertIn(
             str(Path(r"C:\Users\Demo\AppData\Local") / "Microsoft" / "WindowsApps"),

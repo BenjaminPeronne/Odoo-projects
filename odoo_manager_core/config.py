@@ -8,6 +8,19 @@ from pathlib import Path
 CONFIG_VERSION = 1
 
 
+def expand_home_reference(value, home=None):
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    normalized = value.replace("\\", "/")
+    for marker in ("$HOME", "${HOME}"):
+        if normalized == marker:
+            return str(Path(home or Path.home()))
+        if normalized.startswith(marker + "/"):
+            return str(Path(home or Path.home()) / normalized[len(marker) + 1 :])
+    return str(Path(value).expanduser())
+
+
 def default_config_dir(system_name=None, environ=None, home=None):
     system_name = system_name or platform.system()
     environ = environ or os.environ
@@ -44,6 +57,16 @@ class ManagerSettings:
         mode = str(payload.get("execution_mode", "native")).strip().lower()
         if mode not in {"native", "wsl"}:
             mode = "native"
+        system_name = platform.system()
+        if system_name == "Windows":
+            # Windows orchestration is automatic: host tools remain native and
+            # WSL is invoked only by the operations that specifically need it.
+            mode = "native"
+        wsl_distribution = str(payload.get("wsl_distribution", "")).strip()
+        if system_name == "Windows":
+            # Let wsl.exe select the configured default distribution. A stale
+            # hidden distribution name must not block automatic fallbacks.
+            wsl_distribution = ""
         try:
             poll_interval = int(payload.get("docker_poll_interval", 10))
         except (TypeError, ValueError):
@@ -55,10 +78,10 @@ class ManagerSettings:
             version=CONFIG_VERSION,
             workspace=str(Path(workspace).expanduser().resolve()),
             execution_mode=mode,
-            wsl_distribution=str(payload.get("wsl_distribution", "")).strip(),
+            wsl_distribution=wsl_distribution,
             docker_executable=str(payload.get("docker_executable", "docker")).strip() or "docker",
             brainkeys_executable=str(payload.get("brainkeys_executable", "brainkeys")).strip() or "brainkeys",
-            traefik_directory=str(payload.get("traefik_directory", "")).strip(),
+            traefik_directory=expand_home_reference(payload.get("traefik_directory", "")),
             terminal=str(payload.get("terminal", "auto")).strip() or "auto",
             docker_poll_interval=poll_interval,
             onboarding_completed=bool(payload.get("onboarding_completed", False)),

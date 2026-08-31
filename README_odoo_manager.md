@@ -55,10 +55,13 @@ Windows, le bouton `Ouvrir Docker` tente de lancer Docker Desktop. Le bouton
 `Parametres` permet de definir :
 
 - le workspace analyse pour lister et creer les projets ;
-- le mode natif ou WSL 2 ;
 - la commande Docker ;
 - le dossier Traefik ;
 - la frequence de verification de Docker.
+
+Sous Windows, le gestionnaire choisit automatiquement le bon environnement :
+Docker Desktop, Git et Traefik sont utilises nativement, tandis que WSL 2 est
+appele uniquement pour les operations qui l'exigent, sans reglage manuel.
 
 Pour ajouter des modules, selectionnez un projet puis utilisez `Ajouter des
 modules locaux` :
@@ -157,4 +160,4 @@ Repondez `Non`. Le gestionnaire detectera ensuite le nouveau projet, lancera lui
 - Pour mettre a jour tous les modules d'une base, utilisez l'option `6` du menu ou lancez `--update-all-modules PROJET BASE`.
 - Le master password documente pour les bases locales est `odoo`.
 - Par defaut, le workspace est le dossier ou se trouve le script. Il peut etre surcharge avec `ODOO_WORKSPACE=/chemin/vers/Odoo-projects`.
-- Sous Windows 10/11, l'application graphique fonctionne en mode natif avec Docker Desktop. WSL 2 reste disponible pour les anciens parcours shell ou Brainkeys. MS-DOS n'est pas un environnement d'execution compatible avec Docker et Odoo.
+- Sous Windows 10/11, l'application graphique utilise automatiquement Docker Desktop et les outils Windows. WSL 2 n'est appele qu'en interne pour Brainkeys ou comme secours lors de la creation de liens symboliques. L'utilisateur n'a aucun mode a choisir.

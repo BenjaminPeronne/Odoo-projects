@@ -56,7 +56,7 @@ Premiere tranche disponible :
 - historique des jobs ;
 - actions principales projet ;
 - notification Docker et tentative de demarrage de Docker Desktop ;
-- parametres workspace, Docker, Traefik et WSL 2.
+- parametres workspace, Docker et Traefik ; la coordination Windows/WSL 2 est automatique.
 
 ### Creation d'un projet
 

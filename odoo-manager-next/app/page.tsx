@@ -1011,7 +1011,7 @@ export default function Home() {
     try {
       const payload = await api<{ settings: ManagerSettings }>("/api/settings", {
         method: "POST",
-        body: JSON.stringify({ ...settingsDraft, create_workspace: true }),
+        body: JSON.stringify({ ...settingsDraft, execution_mode: "native", create_workspace: true }),
       });
       setSettings(payload.settings);
       setSettingsDraft(payload.settings);
@@ -2391,29 +2391,12 @@ export default function Home() {
                 </span>
               </div>
 
-              <div className="grid gap-4 md:grid-cols-2">
-                <label className="grid gap-1.5 text-sm font-medium">
-                  Mode d’exécution
-                  <Select
-                    value={settingsDraft.execution_mode}
-                    onValueChange={(value) => setSettingsDraft({ ...settingsDraft, execution_mode: value })}
-                  >
-                    <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="native">Natif</SelectItem>
-                      <SelectItem value="wsl">WSL 2 (Windows)</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </label>
-                <label className="grid gap-1.5 text-sm font-medium">
-                  Distribution WSL
-                  <Input
-                    value={settingsDraft.wsl_distribution}
-                    disabled={settingsDraft.execution_mode !== "wsl"}
-                    onChange={(event) => setSettingsDraft({ ...settingsDraft, wsl_distribution: event.target.value })}
-                    placeholder="Ubuntu"
-                  />
-                </label>
+              <div className="rounded-md border bg-muted/40 p-3">
+                <div className="text-sm font-medium">Exécution automatique</div>
+                <p className="mt-1 text-xs font-normal leading-relaxed text-muted-foreground">
+                  Le gestionnaire choisit automatiquement les outils adaptés au système. Sous Windows, Docker,
+                  Git et Traefik restent natifs ; WSL est utilisé uniquement lorsqu’une opération le nécessite.
+                </p>
               </div>
 
               <label className="grid gap-1.5 text-sm font-medium">

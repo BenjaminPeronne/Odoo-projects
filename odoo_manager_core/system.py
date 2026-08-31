@@ -7,15 +7,19 @@ from .platform import (
     executable_available,
     executable_search_path,
     execution_path,
+    host_executable_available,
     hidden_process_kwargs,
     open_terminal_script,
     platform_id,
     resolve_executable,
+    resolve_host_executable,
     start_docker_desktop,
 )
 
 
 def docker_command(settings, *arguments):
+    if platform_id() == "windows" and settings.execution_mode == "wsl":
+        return [resolve_host_executable(settings.docker_executable), *arguments]
     return [*command_prefix(settings), resolve_executable(settings.docker_executable, settings), *arguments]
 
 
@@ -88,10 +92,14 @@ def docker_status_payload(settings, state, installed, running, message, **extra)
 
 def docker_status(settings, timeout=6):
     system = platform_id()
-    if not executable_available(settings.docker_executable, settings):
+    native_windows_docker = system == "windows" and settings.execution_mode == "wsl"
+    docker_installed = (
+        host_executable_available(settings.docker_executable)
+        if native_windows_docker
+        else executable_available(settings.docker_executable, settings)
+    )
+    if not docker_installed:
         message = "Docker est introuvable. Installe Docker Desktop et vérifie les paramètres."
-        if settings.execution_mode == "wsl":
-            message = "WSL est introuvable ou indisponible. Vérifie le mode d'exécution Windows."
         return docker_status_payload(settings, "missing", False, False, message, can_start=False)
 
     command = docker_command(settings, "info", "--format", "{{json .ServerVersion}}")

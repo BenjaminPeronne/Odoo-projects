@@ -96,15 +96,15 @@ class ProjectCreatorTests(unittest.TestCase):
         self.assertTrue(link.is_symlink())
         self.assertEqual(Path("../addons-store/client-addons/custom_module"), link.readlink())
 
-    @mock.patch("odoo_manager_core.project_creator.execution_path")
-    def test_wsl_mode_creates_relative_links_through_linux(self, execution_path):
+    @mock.patch("odoo_manager_core.project_creator.wsl_execution_path")
+    def test_wsl_mode_creates_relative_links_through_linux(self, wsl_execution_path):
         project = self.workspace / "DEMO"
         module = project / "odoo" / "addons-store" / "custom" / "custom_module"
         addons = project / "odoo" / "addons"
         module.mkdir(parents=True)
         addons.mkdir(parents=True)
         (module / "__manifest__.py").write_text("{}\n", encoding="utf-8")
-        execution_path.return_value = "/mnt/c/Odoo/DEMO/odoo/addons/custom_module"
+        wsl_execution_path.return_value = "/mnt/c/Odoo/DEMO/odoo/addons/custom_module"
         runner = FakeRunner()
         settings = ManagerSettings.from_dict(
             {"execution_mode": "wsl", "wsl_distribution": "Ubuntu"},
@@ -121,6 +121,42 @@ class ProjectCreatorTests(unittest.TestCase):
                 "wsl.exe",
                 "-d",
                 "Ubuntu",
+                "--exec",
+                "ln",
+                "-s",
+                "../addons-store/custom/custom_module",
+                "/mnt/c/Odoo/DEMO/odoo/addons/custom_module",
+            ],
+        )
+
+    @mock.patch.object(Path, "symlink_to", side_effect=OSError("privilege missing"))
+    @mock.patch("odoo_manager_core.project_creator.platform_id", return_value="windows")
+    @mock.patch(
+        "odoo_manager_core.project_creator.wsl_execution_path",
+        return_value="/mnt/c/Odoo/DEMO/odoo/addons/custom_module",
+    )
+    def test_native_windows_falls_back_to_wsl_for_relative_links(
+        self,
+        _wsl_execution_path,
+        _platform,
+        _symlink,
+    ):
+        project = self.workspace / "DEMO"
+        module = project / "odoo" / "addons-store" / "custom" / "custom_module"
+        addons = project / "odoo" / "addons"
+        module.mkdir(parents=True)
+        addons.mkdir(parents=True)
+        (module / "__manifest__.py").write_text("{}\n", encoding="utf-8")
+        runner = FakeRunner()
+        creator = self.creator(runner)
+
+        linked = creator.link_modules(module.parent, addons)
+
+        self.assertEqual(linked, 1)
+        self.assertEqual(
+            runner.commands[-1],
+            [
+                "wsl.exe",
                 "--exec",
                 "ln",
                 "-s",

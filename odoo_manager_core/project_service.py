@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 
 from .system import docker_command
-from .platform import executable_search_path, hidden_process_kwargs, resolve_executable
+from .platform import executable_search_path, hidden_process_kwargs, resolve_executable, resolve_host_executable
 
 
 COMPOSE_FILENAMES = ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml")
@@ -119,6 +119,11 @@ class ProjectService:
     def docker(self, *arguments):
         return docker_command(self.settings, *arguments)
 
+    def host_git(self):
+        if platform.system() == "Windows" and self.settings.execution_mode == "wsl":
+            return resolve_host_executable("git")
+        return resolve_executable("git", self.settings)
+
     def project_path(self, project):
         return self.workspace / project
 
@@ -212,7 +217,7 @@ class ProjectService:
         tools_dir = self.traefik_dir.parent
         parent_dir = tools_dir.parent
         compose_ready = any((self.traefik_dir / name).is_file() for name in COMPOSE_FILENAMES)
-        git = resolve_executable("git", self.settings)
+        git = self.host_git()
 
         if compose_ready and not (tools_dir / ".git").is_dir():
             self.log(log, f"Traefik déjà présent: {self.traefik_dir}")
@@ -452,7 +457,7 @@ class ProjectService:
         self.log(log, f"Mise à jour du projet {project}")
         if (path / ".git").exists():
             self.log(log, "Git pull...")
-            code = self.stream(["git", "pull", "--ff-only"], cwd=path, log=log)
+            code = self.stream([self.host_git(), "pull", "--ff-only"], cwd=path, log=log)
             if code != 0:
                 raise RuntimeError(f"Git pull impossible pour {project}.")
         else:
