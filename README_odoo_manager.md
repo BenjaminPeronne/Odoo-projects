@@ -64,6 +64,10 @@ La sortie initiale et le code retour du processus sont conserves dans
 `odoo_data/odoo-manager-startup.*` afin que le gestionnaire affiche l'erreur
 reelle lorsque le serveur quitte avant l'ouverture du port 8069.
 
+Le bouton `Ouvrir Odoo` ouvre uniquement la base selectionnee par defaut. Le
+demarrage automatique du projet avant l'ouverture peut etre active dans les
+parametres du gestionnaire.
+
 Une fois Docker, Git et la cle SSH disponibles, le bouton `Installer Traefik`
 clone ou met a jour `docker-local-tools`, valide le fichier Compose puis demarre
 Traefik directement depuis le backend Python. Aucun terminal externe n'est

@@ -49,7 +49,26 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(settings, loaded)
             self.assertEqual(loaded.execution_mode, "wsl")
             self.assertEqual(loaded.docker_poll_interval, 3)
+            self.assertFalse(loaded.start_project_before_open)
             self.assertTrue(loaded.onboarding_completed)
+
+    def test_open_odoo_does_not_start_project_by_default(self):
+        settings = ManagerSettings.from_dict({}, "/tmp/workspace")
+
+        self.assertFalse(settings.start_project_before_open)
+
+    def test_open_odoo_start_preference_round_trip(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = root / "workspace"
+            store = SettingsStore(workspace, root / "config.json")
+
+            store.update(
+                {"start_project_before_open": True},
+                create_workspace=True,
+            )
+
+            self.assertTrue(store.load().start_project_before_open)
 
     def test_invalid_mode_uses_native(self):
         settings = ManagerSettings.from_dict({"execution_mode": "dos"}, "/tmp/workspace")

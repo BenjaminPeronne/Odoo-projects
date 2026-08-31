@@ -49,6 +49,7 @@ class ManagerSettings:
     traefik_directory: str = ""
     terminal: str = "auto"
     docker_poll_interval: int = 10
+    start_project_before_open: bool = False
     onboarding_completed: bool = False
 
     @classmethod
@@ -75,6 +76,7 @@ class ManagerSettings:
             traefik_directory=expand_home_reference(payload.get("traefik_directory", "")),
             terminal=str(payload.get("terminal", "auto")).strip() or "auto",
             docker_poll_interval=poll_interval,
+            start_project_before_open=bool(payload.get("start_project_before_open", False)),
             onboarding_completed=bool(payload.get("onboarding_completed", False)),
         )
 

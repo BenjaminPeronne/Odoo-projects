@@ -110,6 +110,7 @@ type ManagerSettings = {
   docker_executable: string;
   traefik_directory: string;
   docker_poll_interval: number;
+  start_project_before_open: boolean;
   onboarding_completed: boolean;
   config_file?: string;
   platform?: string;
@@ -434,6 +435,7 @@ function fallbackManagerSettings(
     docker_executable: current?.docker_executable || "docker",
     traefik_directory: current?.traefik_directory || systemStatus?.traefik?.path || "",
     docker_poll_interval: current?.docker_poll_interval || 10,
+    start_project_before_open: current?.start_project_before_open ?? false,
     onboarding_completed: current?.onboarding_completed ?? false,
     config_file: current?.config_file,
     platform: current?.platform || systemStatus?.docker.platform || "",
@@ -910,7 +912,7 @@ export default function Home() {
     }
   }
 
-  async function waitForJob(jobId: number, timeoutMilliseconds = 240000) {
+  async function waitForJob(jobId: number, timeoutMilliseconds = 960000) {
     const deadline = Date.now() + timeoutMilliseconds;
     while (Date.now() < deadline) {
       const payload = await api<{ jobs: Job[] }>("/api/jobs");
@@ -1508,16 +1510,24 @@ export default function Home() {
   }
 
   async function requestOpenOdoo() {
-    if (!selectedProject || openingOdoo || selectedProjectLifecycleJob) return;
+    const startBeforeOpen = settings?.start_project_before_open ?? false;
+    if (!selectedProject || openingOdoo || (startBeforeOpen && selectedProjectLifecycleJob)) return;
     setOpeningOdoo(true);
     try {
-      const job = await createJob("start_project", { project: selectedProject.name });
-      if (!job) return;
-      await waitForJob(job.id);
-      await refreshOverview();
+      if (startBeforeOpen) {
+        const job = await createJob("start_project", { project: selectedProject.name });
+        if (!job) return;
+        await waitForJob(job.id);
+        await refreshOverview();
+      }
       const opened = await openExternalUrl(selectedOdooUrl);
       if (!opened) throw new Error("Lien impossible à ouvrir depuis l'application.");
-      pushToast("success", "Odoo est prêt et a été ouvert dans le navigateur.");
+      pushToast(
+        "success",
+        startBeforeOpen
+          ? "Odoo est prêt et a été ouvert dans le navigateur."
+          : "La base Odoo a été ouverte dans le navigateur.",
+      );
     } catch (err) {
       pushToast("error", err instanceof Error ? err.message : "Impossible d'ouvrir Odoo.");
     } finally {
@@ -1684,11 +1694,19 @@ export default function Home() {
                   <Button
                     className="w-full sm:w-auto"
                     variant="outline"
-                    disabled={!selectedProjectReady || openingOdoo || Boolean(selectedProjectLifecycleJob)}
+                    disabled={
+                      !selectedProjectReady ||
+                      openingOdoo ||
+                      Boolean(settings?.start_project_before_open && selectedProjectLifecycleJob)
+                    }
                     onClick={requestOpenOdoo}
                   >
                     {openingOdoo ? <Loader2 className="h-4 w-4 animate-spin" /> : <ExternalLink className="h-4 w-4" />}
-                    {openingOdoo ? "Préparation d’Odoo…" : "Ouvrir Odoo"}
+                    {openingOdoo
+                      ? settings?.start_project_before_open
+                        ? "Préparation d’Odoo…"
+                        : "Ouverture…"
+                      : "Ouvrir Odoo"}
                   </Button>
                 )}
               </div>
@@ -2540,6 +2558,24 @@ export default function Home() {
                   Git et Traefik restent natifs ; WSL est utilisé uniquement lorsqu’une opération le nécessite.
                 </p>
               </div>
+
+              <label className="flex cursor-pointer items-start gap-3 rounded-md border p-3 text-sm">
+                <input
+                  className="mt-0.5 h-4 w-4 shrink-0"
+                  type="checkbox"
+                  checked={settingsDraft.start_project_before_open}
+                  onChange={(event) =>
+                    setSettingsDraft({ ...settingsDraft, start_project_before_open: event.target.checked })
+                  }
+                />
+                <span className="min-w-0">
+                  <span className="block font-medium">Démarrer le projet avant d’ouvrir Odoo</span>
+                  <span className="mt-1 block text-xs font-normal leading-relaxed text-muted-foreground">
+                    Si cette option est activée, le bouton « Ouvrir Odoo » démarre et attend le projet avant
+                    d’ouvrir le navigateur. Par défaut, le bouton ouvre uniquement la base sélectionnée.
+                  </span>
+                </span>
+              </label>
 
               <label className="grid gap-1.5 text-sm font-medium">
                 Commande Docker
