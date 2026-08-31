@@ -2,7 +2,9 @@ import { Select as RadixSelect } from "@radix-ui/themes";
 import * as React from "react";
 import { cn } from "@/lib/utils";
 
-export const Select = RadixSelect.Root;
+export function Select(props: React.ComponentPropsWithoutRef<typeof RadixSelect.Root>) {
+  return <RadixSelect.Root size="3" {...props} />;
+}
 
 export function SelectValue() {
   return null;

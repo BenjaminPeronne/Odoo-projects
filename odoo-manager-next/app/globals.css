@@ -65,33 +65,35 @@ textarea {
 .theme-switch-wrap {
   position: relative;
   display: inline-flex;
-  width: 58px;
-  height: 32px;
+  width: 52px;
+  height: 28px;
   flex: none;
   align-items: center;
 }
 
 .theme-switch.rt-SwitchRoot {
-  width: 58px;
-  height: 32px;
-  border: 1px solid hsl(var(--border));
+  --switch-height: 28px;
+  --switch-width: 52px;
+  --switch-thumb-inset: 3px;
+  --switch-thumb-size: 22px;
+  --switch-thumb-translate-x: 24px;
+  width: var(--switch-width);
+  height: var(--switch-height);
   border-radius: 999px;
-  background: hsl(45 88% 88%);
-  box-shadow: inset 0 1px 2px hsl(35 40% 35% / 0.15);
-  transition: background-color 360ms cubic-bezier(0.22, 1, 0.36, 1), border-color 280ms ease, box-shadow 280ms ease;
 }
 
-.theme-switch.rt-SwitchRoot:hover {
-  border-color: hsl(var(--ring) / 0.7);
-  box-shadow: inset 0 1px 2px hsl(35 40% 35% / 0.15), 0 0 0 3px hsl(var(--ring) / 0.1);
+.theme-switch.rt-SwitchRoot::before {
+  background-color: hsl(43 72% 88%);
+  background-image: none;
+  box-shadow: inset 0 0 0 1px hsl(38 38% 67% / 0.55);
+  transition: background-color 280ms ease, box-shadow 280ms ease;
 }
 
-.theme-switch.rt-SwitchRoot:focus-visible {
-  outline: 2px solid hsl(var(--ring));
-  outline-offset: 2px;
+.theme-switch.rt-SwitchRoot:hover::before {
+  box-shadow: inset 0 0 0 1px hsl(var(--ring) / 0.65), 0 0 0 3px hsl(var(--ring) / 0.1);
 }
 
-.theme-switch.rt-SwitchRoot[data-state="checked"] {
+.theme-switch.rt-SwitchRoot[data-state="checked"]::before {
   background: hsl(220 25% 18%);
   box-shadow: inset 0 1px 3px hsl(220 40% 3% / 0.55);
 }
@@ -103,20 +105,16 @@ textarea {
 
 .theme-switch.rt-SwitchRoot .rt-SwitchThumb {
   display: grid;
-  width: 26px;
-  height: 26px;
-  transform: translateX(2px) rotate(0deg);
   place-items: center;
   border-radius: 999px;
   background: hsl(0 0% 100%);
   color: hsl(35 90% 48%);
   box-shadow: 0 2px 7px hsl(220 30% 10% / 0.28);
-  transition: transform 420ms cubic-bezier(0.34, 1.56, 0.64, 1), background-color 280ms ease, color 280ms ease;
+  transition: transform 360ms cubic-bezier(0.34, 1.3, 0.64, 1), background-color 280ms ease, color 280ms ease;
   will-change: transform;
 }
 
 .theme-switch.rt-SwitchRoot[data-state="checked"] .rt-SwitchThumb {
-  transform: translateX(30px) rotate(360deg);
   background: hsl(220 18% 92%);
   color: hsl(224 72% 48%);
 }
@@ -124,21 +122,39 @@ textarea {
 .theme-switch-icon {
   pointer-events: none;
   position: absolute;
-  left: 0;
+  left: 3px;
   top: 3px;
   z-index: 2;
   display: grid;
-  width: 26px;
-  height: 26px;
-  transform: translateX(2px) rotate(0deg);
+  width: 22px;
+  height: 22px;
+  transform: translateX(0) rotate(0deg);
   place-items: center;
   color: hsl(35 90% 48%);
   transition: transform 420ms cubic-bezier(0.34, 1.56, 0.64, 1), color 280ms ease;
 }
 
 .theme-switch-wrap[data-state="checked"] .theme-switch-icon {
-  transform: translateX(30px) rotate(360deg);
+  transform: translateX(24px) rotate(360deg);
   color: hsl(224 72% 48%);
+}
+
+.app-destructive-button.rt-Button {
+  background-color: hsl(var(--destructive));
+  color: hsl(var(--destructive-foreground));
+  box-shadow: inset 0 0 0 1px hsl(0 0% 0% / 0.08);
+}
+
+.app-destructive-button.rt-Button:hover {
+  filter: brightness(0.94);
+}
+
+.app-destructive-button.rt-Button:active {
+  filter: brightness(0.88);
+}
+
+.app-destructive-button.rt-Button:disabled {
+  filter: none;
 }
 
 .theme-switch-sun,

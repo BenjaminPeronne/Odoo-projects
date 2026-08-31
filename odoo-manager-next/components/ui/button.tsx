@@ -6,7 +6,12 @@ type ButtonVariant = "default" | "secondary" | "outline" | "ghost" | "destructiv
 type ButtonSize = "default" | "sm" | "icon";
 
 const buttonVariants = ({ variant = "default", size = "default", className }: { variant?: ButtonVariant | null; size?: ButtonSize | null; className?: string } = {}) =>
-  cn("min-w-0 gap-2 text-center leading-snug [&_svg]:shrink-0", size === "icon" && "h-9 w-9 p-0", className);
+  cn(
+    "min-w-0 gap-2 text-center leading-snug [&_svg]:shrink-0",
+    variant === "destructive" && "app-destructive-button",
+    size === "icon" && "h-9 w-9 p-0",
+    className,
+  );
 
 export interface ButtonProps
   extends Omit<React.ComponentPropsWithoutRef<typeof RadixButton>, "color" | "size" | "variant"> {
@@ -27,7 +32,6 @@ const Button = React.forwardRef<React.ElementRef<typeof RadixButton>, ButtonProp
         variant={radixVariant}
         color={color}
         size={radixSize}
-        highContrast={variant === "destructive"}
         className={buttonVariants({ variant, size, className })}
         {...props}
       />
