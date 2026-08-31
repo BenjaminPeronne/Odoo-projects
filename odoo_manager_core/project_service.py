@@ -464,10 +464,54 @@ class ProjectService:
         raise RuntimeError(f"Le conteneur {container} n'est pas running après {max_wait}s.")
 
     def odoo_server_running(self, container):
-        code, _ = self.capture(self.docker("exec", container, "sh", "-lc", "ps aux | grep -E '[o]doo-bin' >/dev/null 2>&1"), timeout=8)
+        process_command = (
+            "ps -eo args | "
+            "grep -E '([/][o]doo-bin|[/][o]doo)( |$)' >/dev/null 2>&1"
+        )
+        code, _ = self.capture(
+            self.docker("exec", container, "sh", "-lc", process_command),
+            timeout=8,
+        )
         return code == 0
 
-    def wait_odoo_port(self, container, max_wait=90, log=None, sleep=time.sleep):
+    def odoo_startup_diagnostics(self, container, log=None):
+        commands = (
+            (
+                "Processus dans le conteneur Odoo:",
+                self.docker(
+                    "exec",
+                    container,
+                    "sh",
+                    "-lc",
+                    "ps -eo pid,args | grep -E '[o]doo|[p]ython' | tail -n 30 || true",
+                ),
+                8,
+            ),
+            (
+                "Derniers logs Odoo:",
+                self.docker(
+                    "exec",
+                    container,
+                    "sh",
+                    "-lc",
+                    "tail -n 120 /home/odoo/srv/data/odoo.log 2>/dev/null || true",
+                ),
+                12,
+            ),
+            (
+                "Derniers logs du conteneur Odoo:",
+                self.docker("logs", "--tail", "80", container),
+                12,
+            ),
+        )
+        for title, command, timeout in commands:
+            code, output = self.capture(command, timeout=timeout)
+            if code == 0 and output:
+                self.log(log, title)
+                self.log(log, output)
+
+    def wait_odoo_port(self, container, max_wait=300, log=None, sleep=None):
+        sleep = sleep or time.sleep
         waited = 0
         command = (
             "import socket; "
@@ -475,13 +519,24 @@ class ProjectService:
             "s.close()"
         )
         while waited <= max_wait:
-            self.log(log, f"Attente serveur Odoo... {waited}s/{max_wait}s")
+            if waited == 0 or waited % 10 == 0:
+                self.log(log, f"Attente serveur Odoo... {waited}s/{max_wait}s")
             code, _ = self.capture(self.docker("exec", container, "python3", "-c", command), timeout=5)
             if code == 0:
                 return
+            if waited >= 4 and not self.odoo_server_running(container):
+                self.odoo_startup_diagnostics(container, log=log)
+                raise RuntimeError(
+                    "Le processus Odoo s'est arrêté avant d'ouvrir le port 8069. "
+                    "Consulte les logs Odoo affichés ci-dessus."
+                )
             sleep(2)
             waited += 2
-        raise RuntimeError("Odoo ne répond pas sur le port 8069.")
+        self.odoo_startup_diagnostics(container, log=log)
+        raise RuntimeError(
+            f"Odoo fonctionne mais ne répond pas sur le port 8069 après {max_wait}s. "
+            "Consulte les logs Odoo affichés ci-dessus."
+        )
 
     @staticmethod
     def http_status(url, timeout=3):

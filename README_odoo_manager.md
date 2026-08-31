@@ -55,6 +55,9 @@ Au demarrage, un PostgreSQL temporairement `unhealthy` est attendu jusqu'a sa
 disponibilite puis Compose reprend sans recreer son volume. Le bouton `Ouvrir
 Odoo` attend aussi une reponse valide de Traefik avant d'ouvrir le navigateur,
 afin de ne pas afficher une page `Bad Gateway` pendant l'initialisation.
+Sur les volumes Windows plus lents, Odoo peut initialiser ses addons pendant
+jusqu'a cinq minutes. Le gestionnaire surveille alors le processus et le port
+8069 ; si Odoo s'arrete, ses derniers logs sont affiches immediatement.
 
 Une fois Docker, Git et la cle SSH disponibles, le bouton `Installer Traefik`
 clone ou met a jour `docker-local-tools`, valide le fichier Compose puis demarre

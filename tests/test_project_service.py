@@ -19,6 +19,7 @@ class FakeRunner:
         self.health_statuses = {}
         self.odoo_server_running = True
         self.odoo_port_ready = True
+        self.odoo_port_states = []
         self.stream_codes = []
         self.compose_container_ids = []
         self.localtime_mounts = {}
@@ -69,11 +70,21 @@ class FakeRunner:
         if len(command) >= 5 and command[1:3] == ["inspect", "-f"] and "json .State.Health" in command[3]:
             return 0, '{"Status":"unhealthy"}'
         if len(command) >= 4 and command[1:3] == ["logs", "--tail"]:
+            if command[-1].startswith("odoo-"):
+                return 0, "odoo container startup log"
             return 0, "database system is starting up"
         if len(command) >= 5 and command[1:3] == ["exec", "odoo-DEMO"] and command[3:5] == ["sh", "-lc"]:
+            if "tail -n 120" in command[-1]:
+                return 0, "odoo startup traceback"
+            if "tail -n 30" in command[-1]:
+                return 0, "42 python3 /home/odoo/srv/server/odoo/odoo-bin"
             return (0, "") if self.odoo_server_running else (1, "")
         if len(command) >= 5 and command[1:3] == ["exec", "odoo-DEMO"] and command[3:5] == ["python3", "-c"]:
-            return (0, "") if self.odoo_port_ready else (1, "")
+            if self.odoo_port_states:
+                ready = self.odoo_port_states.pop(0)
+            else:
+                ready = self.odoo_port_ready
+            return (0, "") if ready else (1, "")
         if len(command) >= 3 and command[1:3] == ["port", "odoo-DEMO"]:
             return 1, ""
         return 0, ""
@@ -151,6 +162,35 @@ class ProjectServiceTests(unittest.TestCase):
 
         self.assertTrue(any("HTTP 502" in line for line in logs))
         self.assertTrue(any("HTTP 303" in line for line in logs))
+
+    def test_wait_odoo_port_allows_slow_running_process(self):
+        self.runner.odoo_port_states = [False, False, False, True]
+        logs = []
+
+        self.service.wait_odoo_port(
+            "odoo-DEMO",
+            max_wait=20,
+            log=logs.append,
+            sleep=lambda _seconds: None,
+        )
+
+        self.assertFalse(any("Derniers logs Odoo" in line for line in logs))
+
+    def test_wait_odoo_port_stops_early_and_reports_logs_when_process_exits(self):
+        self.runner.odoo_port_ready = False
+        self.runner.odoo_server_running = False
+        logs = []
+
+        with self.assertRaisesRegex(RuntimeError, "processus Odoo s'est arrêté"):
+            self.service.wait_odoo_port(
+                "odoo-DEMO",
+                max_wait=300,
+                log=logs.append,
+                sleep=lambda _seconds: None,
+            )
+
+        self.assertIn("odoo startup traceback", logs)
+        self.assertIn("odoo container startup log", logs)
 
     @patch("odoo_manager_core.project_service.http.client.HTTPConnection")
     def test_http_probe_uses_loopback_with_traefik_host_header(self, connection_class):
