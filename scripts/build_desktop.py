@@ -62,6 +62,17 @@ def run(command: list[str], *, cwd: Path = ROOT, env=None) -> None:
     subprocess.run(resolved, cwd=cwd, env=env, check=True)
 
 
+def tauri_build_command(bundles: str, env: dict[str, str]) -> list[str]:
+    command = ["npm", "run", "tauri", "build", "--", "--bundles", bundles]
+    extra_config = env.get("TAURI_EXTRA_CONFIG", "").strip()
+    if extra_config:
+        config_path = Path(extra_config)
+        if not config_path.is_file():
+            raise SystemExit(f"Configuration Tauri additionnelle introuvable: {config_path}")
+        command.extend(["--config", str(config_path)])
+    return command
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Construit le sidecar et l'installateur natifs d'Odoo Manager."
@@ -100,11 +111,7 @@ def main() -> None:
 
     clean_macos_attributes(*(path for path in (cargo_target_dir,) if path))
 
-    run(
-        ["npm", "run", "tauri", "build", "--", "--bundles", bundles],
-        cwd=FRONTEND,
-        env=env,
-    )
+    run(tauri_build_command(bundles, env), cwd=FRONTEND, env=env)
     bundle_dir = (
         (cargo_target_dir / "release" / "bundle")
         if cargo_target_dir

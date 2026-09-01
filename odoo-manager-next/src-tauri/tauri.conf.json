@@ -33,7 +33,7 @@
     ],
     "macOS": {
       "signingIdentity": "-",
-      "hardenedRuntime": false
+      "hardenedRuntime": true
     },
     "icon": [
       "icons/32x32.png",
