@@ -44,7 +44,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { cn } from "@/lib/utils";
 import appIcon from "./icon.png";
+import localIcon from "./local-icon.png";
 import packageMetadata from "../package.json";
+
+type InterfaceIcon = "manager" | "local";
 
 type Project = {
   name: string;
@@ -118,6 +121,7 @@ type ManagerSettings = {
   traefik_directory: string;
   docker_poll_interval: number;
   start_project_before_open: boolean;
+  interface_icon: InterfaceIcon;
   onboarding_completed: boolean;
   config_file?: string;
   platform?: string;
@@ -539,6 +543,7 @@ function fallbackManagerSettings(
     traefik_directory: current?.traefik_directory || systemStatus?.traefik?.path || "",
     docker_poll_interval: current?.docker_poll_interval || 10,
     start_project_before_open: current?.start_project_before_open ?? false,
+    interface_icon: current?.interface_icon === "local" ? "local" : "manager",
     onboarding_completed: current?.onboarding_completed ?? false,
     config_file: current?.config_file,
     platform: current?.platform || systemStatus?.docker.platform || "",
@@ -653,6 +658,7 @@ export default function Home() {
     () => overview?.projects.find((project) => project.name === selectedProjectName) || overview?.projects[0],
     [overview, selectedProjectName],
   );
+  const selectedAppIcon = settings?.interface_icon === "local" ? localIcon : appIcon;
   const odooDatabases = useMemo(
     () => (selectedProject?.databases || []).filter((database) => database !== "postgres"),
     [selectedProject],
@@ -1710,9 +1716,12 @@ export default function Home() {
       <main className="grid min-h-screen place-items-center bg-background px-6">
         <div className="w-full max-w-md rounded-lg border bg-card p-6 text-center shadow-sm">
           <img
-            src={appIcon.src}
+            src={selectedAppIcon.src}
             alt="Odoo Manager"
-            className="mx-auto h-16 w-16 rounded-[15px]"
+            className={cn(
+              "mx-auto h-16 w-16 object-cover",
+              settings?.interface_icon === "local" ? "rounded-full" : "rounded-[15px]",
+            )}
           />
           <div className="mt-3 flex justify-center">
             {initializationError ? (
@@ -1759,10 +1768,13 @@ export default function Home() {
               <div className="flex items-center justify-between gap-3">
                 <div className="flex min-w-0 items-center gap-2.5">
                   <img
-                    src={appIcon.src}
+                    src={selectedAppIcon.src}
                     alt=""
                     aria-hidden="true"
-                    className="h-9 w-9 shrink-0 rounded-[9px]"
+                    className={cn(
+                      "h-9 w-9 shrink-0 object-cover",
+                      settings?.interface_icon === "local" ? "rounded-full" : "rounded-[9px]",
+                    )}
                   />
                   <h1 className="min-w-0 truncate text-lg font-semibold">Gestionnaire Odoo</h1>
                 </div>
@@ -2761,6 +2773,49 @@ export default function Home() {
                 </p>
               </div>
 
+              <div className="grid gap-2">
+                <div>
+                  <div className="text-sm font-medium">Icône affichée</div>
+                  <p className="mt-1 text-xs font-normal text-muted-foreground">
+                    Choisis l’identité visuelle utilisée dans le gestionnaire.
+                  </p>
+                </div>
+                <div className="grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Icône affichée">
+                  <InteractiveCard
+                    className={cn(
+                      "flex min-h-24 items-center gap-3 p-3",
+                      settingsDraft.interface_icon === "manager" && "border-primary bg-primary/8 ring-1 ring-primary",
+                    )}
+                    role="radio"
+                    aria-checked={settingsDraft.interface_icon === "manager"}
+                    onClick={() => setSettingsDraft({ ...settingsDraft, interface_icon: "manager" })}
+                  >
+                    <img src={appIcon.src} alt="" aria-hidden="true" className="h-14 w-14 shrink-0 rounded-[13px] object-cover" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-sm font-semibold">Odoo Manager</span>
+                      <span className="mt-1 block text-xs text-muted-foreground">Icône actuelle</span>
+                    </span>
+                    {settingsDraft.interface_icon === "manager" && <CheckCircle2 className="h-5 w-5 shrink-0 text-primary" aria-hidden="true" />}
+                  </InteractiveCard>
+                  <InteractiveCard
+                    className={cn(
+                      "flex min-h-24 items-center gap-3 p-3",
+                      settingsDraft.interface_icon === "local" && "border-primary bg-primary/8 ring-1 ring-primary",
+                    )}
+                    role="radio"
+                    aria-checked={settingsDraft.interface_icon === "local"}
+                    onClick={() => setSettingsDraft({ ...settingsDraft, interface_icon: "local" })}
+                  >
+                    <img src={localIcon.src} alt="" aria-hidden="true" className="h-14 w-14 shrink-0 rounded-full object-cover" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-sm font-semibold">Logo Local</span>
+                      <span className="mt-1 block text-xs text-muted-foreground">Nouvelle icône</span>
+                    </span>
+                    {settingsDraft.interface_icon === "local" && <CheckCircle2 className="h-5 w-5 shrink-0 text-primary" aria-hidden="true" />}
+                  </InteractiveCard>
+                </div>
+              </div>
+
               <label className="flex cursor-pointer items-start gap-3 rounded-md border p-3 text-sm">
                 <Checkbox
                   className="mt-0.5"
@@ -2841,10 +2896,13 @@ export default function Home() {
             <div className="flex min-w-0 flex-col items-start justify-between gap-3 rounded-md border bg-muted/35 p-4 sm:flex-row sm:items-center">
               <div className="flex min-w-0 items-center gap-3">
                 <img
-                  src={appIcon.src}
+                  src={selectedAppIcon.src}
                   alt=""
                   aria-hidden="true"
-                  className="h-14 w-14 shrink-0 rounded-[13px]"
+                  className={cn(
+                    "h-14 w-14 shrink-0 object-cover",
+                    settings?.interface_icon === "local" ? "rounded-full" : "rounded-[13px]",
+                  )}
                 />
                 <div className="min-w-0">
                   <div className="font-semibold">Odoo Manager</div>

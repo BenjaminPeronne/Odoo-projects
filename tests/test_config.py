@@ -41,6 +41,7 @@ class SettingsTests(unittest.TestCase):
                     "execution_mode": "wsl",
                     "wsl_distribution": "Ubuntu",
                     "docker_poll_interval": 1,
+                    "interface_icon": "local",
                     "onboarding_completed": True,
                 },
                 create_workspace=True,
@@ -50,12 +51,18 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(loaded.execution_mode, "wsl")
             self.assertEqual(loaded.docker_poll_interval, 3)
             self.assertFalse(loaded.start_project_before_open)
+            self.assertEqual(loaded.interface_icon, "local")
             self.assertTrue(loaded.onboarding_completed)
 
     def test_open_odoo_does_not_start_project_by_default(self):
         settings = ManagerSettings.from_dict({}, "/tmp/workspace")
 
         self.assertFalse(settings.start_project_before_open)
+
+    def test_interface_icon_defaults_to_manager_for_unknown_value(self):
+        settings = ManagerSettings.from_dict({"interface_icon": "unknown"}, "/tmp/workspace")
+
+        self.assertEqual(settings.interface_icon, "manager")
 
     def test_open_odoo_start_preference_round_trip(self):
         with tempfile.TemporaryDirectory() as temporary:

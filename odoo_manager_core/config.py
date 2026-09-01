@@ -8,6 +8,7 @@ from .platform import wsl_path_context
 
 
 CONFIG_VERSION = 1
+INTERFACE_ICONS = {"manager", "local"}
 
 
 def normalize_workspace_path(value):
@@ -59,6 +60,7 @@ class ManagerSettings:
     terminal: str = "auto"
     docker_poll_interval: int = 10
     start_project_before_open: bool = False
+    interface_icon: str = "manager"
     onboarding_completed: bool = False
 
     @classmethod
@@ -73,6 +75,9 @@ class ManagerSettings:
         except (TypeError, ValueError):
             poll_interval = 10
         poll_interval = min(60, max(3, poll_interval))
+        interface_icon = str(payload.get("interface_icon", "manager")).strip().lower()
+        if interface_icon not in INTERFACE_ICONS:
+            interface_icon = "manager"
 
         workspace = str(payload.get("workspace") or default_workspace).strip()
         return cls(
@@ -86,6 +91,7 @@ class ManagerSettings:
             terminal=str(payload.get("terminal", "auto")).strip() or "auto",
             docker_poll_interval=poll_interval,
             start_project_before_open=bool(payload.get("start_project_before_open", False)),
+            interface_icon=interface_icon,
             onboarding_completed=bool(payload.get("onboarding_completed", False)),
         )
 
