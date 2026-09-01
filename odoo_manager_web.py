@@ -43,6 +43,7 @@ from odoo_manager_core.platform import (
     workspace_execution_path,
     workspace_wsl_context,
     wsl_command_prefix,
+    wsl_executable_available,
     wsl_path_context,
     wsl_unc_path,
 )
@@ -54,7 +55,7 @@ from odoo_manager_core.project_creator import (
     validate_odoo_version,
 )
 from odoo_manager_core.project_service import terminate_active_processes as terminate_project_processes
-from odoo_manager_core.system import docker_command, shell_command
+from odoo_manager_core.system import docker_command, reset_docker_backend_cache, shell_command
 
 
 ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)).resolve()
@@ -198,6 +199,7 @@ def apply_settings(settings):
     with MODULE_CACHE_LOCK:
         MODULE_CACHE.clear()
         WSL_MODULE_METADATA.clear()
+    reset_docker_backend_cache()
 
 
 def settings_snapshot():
@@ -401,16 +403,71 @@ def system_status_snapshot(docker=None):
     }
 
 
+def preferred_git_runtime():
+    if platform_id() != "windows":
+        available = executable_available("git", SETTINGS)
+        return {
+            "kind": "native",
+            "label": "Système",
+            "distribution": "",
+            "available": available,
+            "command": [resolve_executable("git", SETTINGS)],
+            "native_available": available,
+            "wsl_available": False,
+        }
+
+    context = active_workspace_wsl_context()
+    distribution = context.distribution if context else SETTINGS.wsl_distribution
+    native_available = host_executable_available("git")
+    wsl_available = wsl_executable_available("git", distribution)
+    use_wsl = (bool(context) and wsl_available) or (not native_available and wsl_available)
+    if use_wsl:
+        return {
+            "kind": "wsl",
+            "label": f"WSL ({distribution})" if distribution else "WSL",
+            "distribution": distribution,
+            "available": True,
+            "command": [*wsl_command_prefix(distribution), "git"],
+            "native_available": native_available,
+            "wsl_available": wsl_available,
+        }
+    return {
+        "kind": "native",
+        "label": "Windows",
+        "distribution": "",
+        "available": native_available,
+        "command": [resolve_host_executable("git")],
+        "native_available": native_available,
+        "wsl_available": wsl_available,
+    }
+
+
+def ssh_runtime():
+    git_runtime = preferred_git_runtime()
+    if git_runtime["available"]:
+        return git_runtime
+    context = active_workspace_wsl_context()
+    if context and host_executable_available("wsl.exe"):
+        return {
+            **git_runtime,
+            "kind": "wsl",
+            "label": f"WSL ({context.distribution})",
+            "distribution": context.distribution,
+        }
+    return git_runtime
+
+
 def project_creation_prerequisites():
-    wsl_context = active_workspace_wsl_context()
-    prefix = workspace_tool_prefix()
-    git_probe_cwd = workspace_tool_cwd() if wsl_context else (WORKSPACE if WORKSPACE.exists() else ROOT)
+    git_runtime = preferred_git_runtime()
+    git_probe_cwd = Path.home() if git_runtime["kind"] == "wsl" else (WORKSPACE if WORKSPACE.exists() else ROOT)
     git_code, git_output = run_capture(
-        [*prefix, "git", "--version"],
+        [*git_runtime["command"], "--version"],
         cwd=git_probe_cwd,
         timeout=8,
     )
-    if wsl_context:
+    selected_ssh_runtime = ssh_runtime()
+    if selected_ssh_runtime["kind"] == "wsl":
+        prefix = wsl_command_prefix(selected_ssh_runtime["distribution"])
         key_code, key_output = run_capture(
             [
                 *prefix,
@@ -426,7 +483,8 @@ def project_creation_prerequisites():
         ssh_dir = Path.home() / ".ssh"
         ssh_keys = sorted(path.name for path in ssh_dir.glob("*.pub") if path.is_file()) if ssh_dir.exists() else []
 
-    if wsl_context:
+    if selected_ssh_runtime["kind"] == "wsl":
+        prefix = wsl_command_prefix(selected_ssh_runtime["distribution"])
         keygen_code, _keygen_output = run_capture(
             [*prefix, "sh", "-lc", "command -v ssh-keygen >/dev/null 2>&1"],
             cwd=git_probe_cwd,
@@ -434,23 +492,24 @@ def project_creation_prerequisites():
         )
         ssh_keygen_available = keygen_code == 0
     else:
-        ssh_keygen_available = executable_available("ssh-keygen", SETTINGS)
+        ssh_keygen_available = host_executable_available("ssh-keygen") if platform_id() == "windows" else executable_available("ssh-keygen", SETTINGS)
 
     git_install_supported = platform_id() == "windows" and (
-        (bool(wsl_context) and host_executable_available("wsl.exe"))
-        or (not wsl_context and executable_available("winget", SETTINGS))
+        host_executable_available("wsl.exe") or host_executable_available("winget")
     )
 
+    wsl_context = active_workspace_wsl_context()
     if wsl_context:
+        workspace_prefix = wsl_command_prefix(wsl_context.distribution)
         workspace_linux = workspace_execution_path(WORKSPACE, SETTINGS, WORKSPACE)
         workspace_code, _workspace_output = run_capture(
-            [*prefix, "test", "-d", workspace_linux],
-            cwd=git_probe_cwd,
+            [*workspace_prefix, "test", "-d", workspace_linux],
+            cwd=Path.home(),
             timeout=6,
         )
         writable_code, _writable_output = run_capture(
-            [*prefix, "test", "-w", workspace_linux],
-            cwd=git_probe_cwd,
+            [*workspace_prefix, "test", "-w", workspace_linux],
+            cwd=Path.home(),
             timeout=6,
         )
         workspace_exists = workspace_code == 0
@@ -472,6 +531,8 @@ def project_creation_prerequisites():
         "workspace_ready": workspace_ready,
         "git_available": git_code == 0,
         "git_version": git_output.splitlines()[0] if git_code == 0 and git_output else "",
+        "git_native_available": git_runtime["native_available"],
+        "git_wsl_available": git_runtime["wsl_available"],
         "git_install_supported": git_install_supported,
         "git_install_message": (
             f"Git peut être installé automatiquement dans WSL ({wsl_context.distribution})."
@@ -483,15 +544,15 @@ def project_creation_prerequisites():
         "ssh_key_present": bool(ssh_keys),
         "ssh_keys": ssh_keys,
         "ssh_keygen_available": ssh_keygen_available,
-        "tool_environment": f"WSL ({wsl_context.distribution})" if wsl_context else "Windows" if platform_id() == "windows" else "Système",
+        "tool_environment": git_runtime["label"],
         "gitlab_ssh_keys_url": "https://gitlab.sudokeys.com/-/user_settings/ssh_keys",
         "supported_versions": list(SUPPORTED_ODOO_VERSIONS),
     }
 
 
 def ssh_public_keys_snapshot():
-    wsl_context = active_workspace_wsl_context()
-    if wsl_context:
+    runtime = ssh_runtime()
+    if runtime["kind"] == "wsl":
         script = (
             'for key in "$HOME"/.ssh/*.pub; do '
             '[ -f "$key" ] || continue; '
@@ -499,8 +560,8 @@ def ssh_public_keys_snapshot():
             "done"
         )
         code, output = run_capture(
-            [*workspace_tool_prefix(), "sh", "-lc", script],
-            cwd=workspace_tool_cwd(),
+            [*wsl_command_prefix(runtime["distribution"]), "sh", "-lc", script],
+            cwd=Path.home(),
             timeout=8,
         )
         if code != 0:
@@ -539,8 +600,8 @@ def generate_ssh_key(comment=""):
     if default_existing:
         return {**default_existing, "created": False, "message": "La clé Ed25519 existe déjà."}
 
-    wsl_context = active_workspace_wsl_context()
-    if wsl_context:
+    runtime = ssh_runtime()
+    if runtime["kind"] == "wsl":
         comment_argument = f" -C {shlex.quote(comment)}" if comment else ""
         script = (
             'mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh" && '
@@ -549,8 +610,8 @@ def generate_ssh_key(comment=""):
             f'ssh-keygen -t ed25519 -f "$HOME/.ssh/id_ed25519" -N ""{comment_argument}'
         )
         code, output = run_capture(
-            [*workspace_tool_prefix(), "sh", "-lc", script],
-            cwd=workspace_tool_cwd(),
+            [*wsl_command_prefix(runtime["distribution"]), "sh", "-lc", script],
+            cwd=Path.home(),
             timeout=30,
         )
         if code != 0:
@@ -2498,7 +2559,24 @@ def module_command_job(job, flag, project, db_name, modules):
     if flag in ("--install-module", "--update-module"):
         normalize_module_layout_for_action(job, project, module_names)
 
-    manager_job(job, flag, project, db_name, ",".join(module_names))
+    if flag == "--uninstall-module":
+        project_service().run_odoo_uninstall_command(
+            project,
+            db_name,
+            ",".join(module_names),
+            log=job.add,
+        )
+        return
+    if flag not in ("--install-module", "--update-module"):
+        raise ValueError("Action module Odoo inconnue.")
+
+    project_service().run_odoo_module_command(
+        project,
+        db_name,
+        ",".join(module_names),
+        option="-i" if flag == "--install-module" else "-u",
+        log=job.add,
+    )
 
 
 def delete_module_code_job(job, project, modules, db_name="", uninstall_first=False):
@@ -2520,9 +2598,7 @@ def delete_module_code_job(job, project, modules, db_name="", uninstall_first=Fa
         installed = [name for name in module_names if states.get(name, {}).get("state") == "installed"]
         if installed:
             job.add(f"Désinstallation Odoo avant suppression: {', '.join(installed)}")
-            code = manager_job(job, "--uninstall-module", project, db_name, ",".join(installed))
-            if code != 0:
-                raise RuntimeError("La désinstallation Odoo a échoué; suppression du code annulée.")
+            module_command_job(job, "--uninstall-module", project, db_name, ",".join(installed))
         else:
             job.add(f"Aucun module sélectionné n'est installé dans {db_name}; suppression du code uniquement.")
     else:
@@ -3198,13 +3274,20 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     job = Job(
                         f"Mettre à jour tous les modules sur {db_name}{title_suffix}",
-                        manager_job,
-                        update_all_modules_manager_args(project, db_name, allow_missing_filestore),
+                        module_command_job,
+                        ("--update-module", project, db_name, "all"),
                     )
             elif action == "update_local_modules":
                 project = validate_project(payload.get("project", ""))
                 db_name = validate_odoo_db(payload.get("db", ""))
-                job = Job(f"Mettre à jour les addons projet sur {db_name}", manager_job, ("--update-local-modules", project, db_name))
+                modules = available_update_modules(project, db_name)
+                if not modules:
+                    raise ValueError("Aucun addon projet installé à mettre à jour.")
+                job = Job(
+                    f"Mettre à jour les addons projet sur {db_name}",
+                    module_command_job,
+                    ("--update-module", project, db_name, ",".join(modules)),
+                )
             elif action == "ignore_missing_modules_locally":
                 project = validate_project(payload.get("project", ""))
                 db_name = validate_odoo_db(payload.get("db", ""))
@@ -3280,10 +3363,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     flag = "--update-module"
                     label = "Mettre à jour"
-                if action == "uninstall_module":
-                    job = Job(f"{label} {modules} sur {db_name}", manager_job, (flag, project, db_name, modules))
-                else:
-                    job = Job(f"{label} {modules} sur {db_name}", module_command_job, (flag, project, db_name, modules))
+                job = Job(f"{label} {modules} sur {db_name}", module_command_job, (flag, project, db_name, modules))
             elif action == "link_modules":
                 project = validate_project(payload.get("project", ""))
                 source = payload.get("source", "")

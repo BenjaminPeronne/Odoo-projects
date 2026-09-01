@@ -10,7 +10,18 @@ import uuid
 from pathlib import Path
 
 from .system import docker_command
-from .platform import executable_search_path, hidden_process_kwargs, resolve_executable, resolve_host_executable
+from .platform import (
+    command_uses_wsl,
+    executable_search_path,
+    hidden_process_kwargs,
+    host_executable_available,
+    resolve_host_executable,
+    workspace_execution_path,
+    workspace_wsl_context,
+    wsl_command_prefix,
+    wsl_command_with_cwd,
+    wsl_executable_available,
+)
 
 
 COMPOSE_FILENAMES = ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml")
@@ -67,14 +78,15 @@ class ProjectService:
             callback(message)
 
     def stream(self, command, cwd=None, log=None):
+        cwd = Path(cwd or self.workspace)
+        command, process_cwd = self.prepare_command(command, cwd)
         if self.runner:
-            return self.runner.stream(command, cwd=cwd, log=log)
+            return self.runner.stream(command, cwd=process_cwd, log=log)
 
-        cwd = cwd or self.workspace
         self.log(log, "$ " + " ".join(str(arg) for arg in command))
         process = subprocess.Popen(
             command,
-            cwd=str(cwd),
+            cwd=str(process_cwd),
             env=self.env(),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -98,13 +110,15 @@ class ProjectService:
         return code
 
     def capture(self, command, cwd=None, timeout=10):
+        cwd = Path(cwd or self.workspace)
+        command, process_cwd = self.prepare_command(command, cwd)
         if self.runner:
-            return self.runner.capture(command, cwd=cwd, timeout=timeout)
+            return self.runner.capture(command, cwd=process_cwd, timeout=timeout)
 
         try:
             result = subprocess.run(
                 command,
-                cwd=str(cwd or self.workspace),
+                cwd=str(process_cwd),
                 env=self.env(),
                 capture_output=True,
                 text=True,
@@ -124,10 +138,26 @@ class ProjectService:
     def docker(self, *arguments):
         return docker_command(self.settings, *arguments)
 
-    def host_git(self):
-        if platform.system() == "Windows" and self.settings.execution_mode == "wsl":
-            return resolve_host_executable("git")
-        return resolve_executable("git", self.settings)
+    def prepare_command(self, command, cwd):
+        command = [str(argument) for argument in command]
+        if platform.system() != "Windows" or not command_uses_wsl(command):
+            return command, cwd
+        prepared = wsl_command_with_cwd(command, cwd, self.settings, self.workspace)
+        return prepared, Path.home()
+
+    def git(self, *arguments):
+        context = workspace_wsl_context(self.settings, self.workspace) if platform.system() == "Windows" else None
+        distribution = context.distribution if context else self.settings.wsl_distribution
+        native_available = host_executable_available("git")
+        wsl_available = wsl_executable_available("git", distribution)
+        if (context and wsl_available) or (not native_available and wsl_available):
+            return [*wsl_command_prefix(distribution), "git", *arguments]
+        return [resolve_host_executable("git"), *arguments]
+
+    def command_path(self, command, path):
+        if command_uses_wsl(command):
+            return workspace_execution_path(path, self.settings, self.workspace)
+        return str(path)
 
     def project_path(self, project):
         return self.workspace / project
@@ -300,7 +330,7 @@ class ProjectService:
         tools_dir = self.traefik_dir.parent
         parent_dir = tools_dir.parent
         compose_ready = any((self.traefik_dir / name).is_file() for name in COMPOSE_FILENAMES)
-        git = self.host_git()
+        git = self.git
 
         if compose_ready and not (tools_dir / ".git").is_dir():
             self.log(log, f"Traefik déjà présent: {self.traefik_dir}")
@@ -311,7 +341,7 @@ class ProjectService:
             if not (tools_dir / ".git").is_dir():
                 raise RuntimeError(f"Le dossier {tools_dir} existe mais n'est pas un dépôt Git exploitable.")
             self.log(log, "Mise à jour de docker-local-tools...")
-            code = self.stream([git, "pull", "--ff-only"], cwd=tools_dir, log=log)
+            code = self.stream(git("pull", "--ff-only"), cwd=tools_dir, log=log)
             if code != 0:
                 raise RuntimeError("Impossible de mettre à jour docker-local-tools.")
         else:
@@ -319,7 +349,9 @@ class ProjectService:
             temporary = parent_dir / f".{tools_dir.name}.odoo-manager-{uuid.uuid4().hex}"
             self.log(log, "Installation de docker-local-tools...")
             try:
-                code = self.stream([git, "clone", repository, str(temporary)], cwd=parent_dir, log=log)
+                clone_prefix = git("clone", repository)
+                clone_destination = self.command_path(clone_prefix, temporary)
+                code = self.stream([*clone_prefix, clone_destination], cwd=parent_dir, log=log)
                 if code != 0:
                     raise RuntimeError("Impossible de cloner docker-local-tools. Vérifie Git et ta clé SSH GitLab.")
                 temporary_traefik = temporary / "traefik"
@@ -701,6 +733,180 @@ class ProjectService:
                 raise RuntimeError("Impossible de démarrer le serveur Odoo dans le conteneur.")
         self.wait_odoo_port(container, log=log)
 
+    def stop_odoo_server(self, project, log=None, max_wait=30, sleep=None):
+        sleep = sleep or time.sleep
+        container = f"odoo-{project}"
+        if not self.odoo_server_running(container):
+            return
+        self.log(log, f"Arrêt du serveur Odoo dans {container}...")
+        code = self.stream(
+            self.docker(
+                "exec",
+                container,
+                "sh",
+                "-lc",
+                "pkill -TERM -f '[o]doo-bin' || pkill -TERM -f '[ /]odoo ' || true",
+            ),
+            log=log,
+        )
+        if code != 0:
+            raise RuntimeError("Impossible d'arrêter le serveur Odoo avant l'opération module.")
+        waited = 0
+        while waited <= max_wait:
+            if not self.odoo_server_running(container):
+                return
+            sleep(1)
+            waited += 1
+        raise RuntimeError("Le serveur Odoo ne s'est pas arrêté dans le délai prévu.")
+
+    def install_project_pip_requirements(self, project, log=None):
+        requirements = self.project_path(project) / "init" / "requirements_pip.txt"
+        try:
+            has_requirements = any(
+                line.strip() and not line.lstrip().startswith("#")
+                for line in requirements.read_text(encoding="utf-8", errors="ignore").splitlines()
+            )
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise RuntimeError(f"Impossible de lire {requirements}: {exc}") from exc
+        if not has_requirements:
+            return
+        self.log(log, "Vérification des dépendances Python du projet...")
+        code = self.stream(
+            self.docker(
+                "exec",
+                f"odoo-{project}",
+                "/home/_venv/bin/python",
+                "-m",
+                "pip",
+                "install",
+                "-r",
+                "/conf/requirements_pip.txt",
+            ),
+            log=log,
+        )
+        if code != 0:
+            raise RuntimeError("L'installation des dépendances Python du projet a échoué.")
+
+    def run_odoo_module_command(self, project, db_name, modules, option="-u", log=None):
+        if option not in {"-i", "-u"}:
+            raise ValueError("Option module Odoo invalide.")
+        container = f"odoo-{project}"
+        postgres = f"postgresql-{project}"
+        if not self.is_running(container) or not self.is_running(postgres):
+            self.start_project(project, log=log)
+        else:
+            self.wait_for_odoo_container_initialization(container, log=log)
+        self.install_project_pip_requirements(project, log=log)
+
+        action = "installation" if option == "-i" else "mise à jour"
+        self.log(log, "")
+        self.log(log, f"Commande Odoo ({action})")
+        self.log(log, f"Projet: {project}")
+        self.log(log, f"Base: {db_name}")
+        self.log(log, f"Module(s): {modules}")
+        self.log(log, f"Équivalent: odoo -d {db_name} {option} {modules} --stop-after-init")
+
+        self.stop_odoo_server(project, log=log)
+        command = self.docker(
+            "exec",
+            "-e",
+            "LOG_ATTACHMENTS=False",
+            container,
+            "odoo",
+            "-c",
+            "/home/odoo/srv/conf/odoo.conf",
+            "-d",
+            db_name,
+            option,
+            modules,
+            "--stop-after-init",
+        )
+        code = None
+        try:
+            code = self.stream(command, log=log)
+            if code != 0:
+                self.odoo_startup_diagnostics(container, log=log)
+                raise RuntimeError(f"La commande Odoo a échoué avec le code {code}.")
+        finally:
+            self.log(log, "Redémarrage du serveur Odoo...")
+            self.start_odoo_server(project, log=log)
+        self.wait_project_http(project, log=log)
+        self.log(log, "Opération module terminée.")
+        self.log(log, f"URL Odoo: {self.project_url(project)}")
+
+    def run_odoo_uninstall_command(self, project, db_name, modules, log=None):
+        container = f"odoo-{project}"
+        postgres = f"postgresql-{project}"
+        if not self.is_running(container) or not self.is_running(postgres):
+            self.start_project(project, log=log)
+        else:
+            self.wait_for_odoo_container_initialization(container, log=log)
+
+        self.log(log, "")
+        self.log(log, "Commande Odoo (désinstallation)")
+        self.log(log, f"Projet: {project}")
+        self.log(log, f"Base: {db_name}")
+        self.log(log, f"Module(s): {modules}")
+
+        uninstall_script = """import os
+
+module_names = [name.strip() for name in os.environ.get("MODULE_NAMES", "").split(",") if name.strip()]
+if not module_names:
+    raise SystemExit("Aucun module fourni.")
+
+modules = env["ir.module.module"].search([("name", "in", module_names)])
+found = set(modules.mapped("name"))
+missing = sorted(set(module_names) - found)
+if missing:
+    print("Module(s) introuvable(s): " + ", ".join(missing))
+
+installed = modules.filtered(lambda module: module.state == "installed")
+skipped = modules - installed
+if skipped:
+    print("Module(s) ignoré(s) car non installé(s): " + ", ".join(skipped.mapped("name")))
+
+if not installed:
+    raise SystemExit("Aucun module installé à désinstaller.")
+
+print("Désinstallation: " + ", ".join(installed.mapped("name")))
+installed.button_immediate_uninstall()
+env.cr.commit()
+print("Désinstallation terminée.")
+"""
+        shell_command = (
+            "odoo shell -c /home/odoo/srv/conf/odoo.conf "
+            "-d \"$ODOO_DB_NAME\" --no-http <<'ODOO_MANAGER_PY'\n"
+            f"{uninstall_script}ODOO_MANAGER_PY"
+        )
+
+        self.stop_odoo_server(project, log=log)
+        command = self.docker(
+            "exec",
+            "-e",
+            "LOG_ATTACHMENTS=False",
+            "-e",
+            f"ODOO_DB_NAME={db_name}",
+            "-e",
+            f"MODULE_NAMES={modules}",
+            container,
+            "sh",
+            "-lc",
+            shell_command,
+        )
+        try:
+            code = self.stream(command, log=log)
+            if code != 0:
+                self.odoo_startup_diagnostics(container, log=log)
+                raise RuntimeError(f"La désinstallation Odoo a échoué avec le code {code}.")
+        finally:
+            self.log(log, "Redémarrage du serveur Odoo...")
+            self.start_odoo_server(project, log=log)
+        self.wait_project_http(project, log=log)
+        self.log(log, "Désinstallation terminée.")
+        self.log(log, f"URL Odoo: {self.project_url(project)}")
+
     def start_project(self, project, log=None):
         path = self.project_path(project)
         compose = self.compose_file(project)
@@ -739,7 +945,7 @@ class ProjectService:
         self.log(log, f"Mise à jour du projet {project}")
         if (path / ".git").exists():
             self.log(log, "Git pull...")
-            code = self.stream([self.host_git(), "pull", "--ff-only"], cwd=path, log=log)
+            code = self.stream(self.git("pull", "--ff-only"), cwd=path, log=log)
             if code != 0:
                 raise RuntimeError(f"Git pull impossible pour {project}.")
         else:

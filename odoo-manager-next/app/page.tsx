@@ -1441,7 +1441,10 @@ export default function Home() {
   }
 
   function requestDeleteCode(moduleNames: string[]) {
-    const removable = moduleNames.filter((name) => modules.find((module) => module.name === name)?.removable);
+    const removable = moduleNames.filter((name) => {
+      const module = modules.find((candidate) => candidate.name === name);
+      return module?.removable && module.removal_mode !== "link_only";
+    });
     if (!removable.length) {
       pushToast("error", "Sélectionne au moins un module supprimable du dossier addons.");
       return;
@@ -1596,7 +1599,11 @@ export default function Home() {
     [moduleByName, selectedModuleList],
   );
   const selectedRemovableModuleList = useMemo(
-    () => selectedModuleList.filter((name) => moduleByName.get(name)?.removable),
+    () =>
+      selectedModuleList.filter((name) => {
+        const module = moduleByName.get(name);
+        return module?.removable && module.removal_mode !== "link_only";
+      }),
     [moduleByName, selectedModuleList],
   );
   const selectedProjectReady = Boolean(selectedProject);
@@ -2316,7 +2323,7 @@ export default function Home() {
                                     )}
                                   </div>
                                 </div>
-                                <div className="grid grid-cols-4 gap-2 sm:flex sm:justify-end">
+                                <div className="flex flex-wrap justify-end gap-2">
                                   <Button size="icon" variant="outline" disabled={!canUseDb} title={`Installer ${module.name}`} aria-label={`Installer ${module.name}`} onClick={() => createJob("install_module", { project: selectedProject?.name, db: selectedDb, modules: module.name })}>
                                     <PlusCircle className="h-4 w-4" />
                                   </Button>
@@ -2333,16 +2340,18 @@ export default function Home() {
                                   >
                                     <PackageX className="h-4 w-4" />
                                   </Button>
-                                  <Button
-                                    size="icon"
-                                    variant="destructive"
-                                    disabled={!module.removable}
-                                    title={module.removal_note || `Supprimer ${module.name} du projet`}
-                                    aria-label={`Supprimer le code ${module.name}`}
-                                    onClick={() => requestDeleteCode([module.name])}
-                                  >
-                                    <Trash2 className="h-4 w-4" />
-                                  </Button>
+                                  {module.removal_mode !== "link_only" && (
+                                    <Button
+                                      size="icon"
+                                      variant="destructive"
+                                      disabled={!module.removable}
+                                      title={module.removal_note || `Supprimer ${module.name} du projet`}
+                                      aria-label={`Supprimer le code ${module.name}`}
+                                      onClick={() => requestDeleteCode([module.name])}
+                                    >
+                                      <Trash2 className="h-4 w-4" />
+                                    </Button>
+                                  )}
                                 </div>
                               </div>
                             );

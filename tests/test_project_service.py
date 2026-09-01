@@ -259,6 +259,79 @@ class ProjectServiceTests(unittest.TestCase):
         self.assertIn("/home/_venv/bin/python /home/odoo/srv/server/odoo/odoo-bin", launch[-1])
         self.assertIn("--logfile=/home/odoo/srv/data/odoo.log", launch[-1])
 
+    def test_module_update_runs_explicit_odoo_command_and_restarts_server(self):
+        self.runner.statuses = {
+            "odoo-DEMO": "running",
+            "postgresql-DEMO": "running",
+        }
+        self.runner.odoo_server_running = False
+        self.runner.odoo_port_ready = True
+        logs = []
+
+        self.service.run_odoo_module_command(
+            "DEMO",
+            "PROTEX_20812",
+            "sale_custom",
+            option="-u",
+            log=logs.append,
+        )
+
+        commands = [command for command, _cwd in self.runner.streams]
+        update = next(command for command in commands if "--stop-after-init" in command)
+        self.assertEqual(
+            update[-9:],
+            [
+                "odoo-DEMO",
+                "odoo",
+                "-c",
+                "/home/odoo/srv/conf/odoo.conf",
+                "-d",
+                "PROTEX_20812",
+                "-u",
+                "sale_custom",
+                "--stop-after-init",
+            ],
+        )
+        self.assertTrue(any("Équivalent: odoo -d PROTEX_20812 -u sale_custom --stop-after-init" in line for line in logs))
+        self.assertTrue(any("Redémarrage du serveur Odoo" in line for line in logs))
+
+    def test_module_uninstall_runs_odoo_shell_and_restarts_server(self):
+        self.runner.statuses = {
+            "odoo-DEMO": "running",
+            "postgresql-DEMO": "running",
+        }
+        self.runner.odoo_server_running = False
+        self.runner.odoo_port_ready = True
+        logs = []
+
+        self.service.run_odoo_uninstall_command(
+            "DEMO",
+            "PROTEX_20812",
+            "sale_custom",
+            log=logs.append,
+        )
+
+        commands = [command for command, _cwd in self.runner.streams]
+        uninstall = next(command for command in commands if "odoo shell" in command[-1])
+        self.assertIn("ODOO_DB_NAME=PROTEX_20812", uninstall)
+        self.assertIn("MODULE_NAMES=sale_custom", uninstall)
+        self.assertIn('odoo shell -c /home/odoo/srv/conf/odoo.conf -d "$ODOO_DB_NAME" --no-http', uninstall[-1])
+        self.assertIn("installed.button_immediate_uninstall()", uninstall[-1])
+        self.assertTrue(any("Redémarrage du serveur Odoo" in line for line in logs))
+
+    @patch("odoo_manager_core.platform.workspace_execution_path", return_value="/home/demo/Odoo-projects")
+    @patch("odoo_manager_core.project_service.platform.system", return_value="Windows")
+    def test_wsl_commands_receive_explicit_linux_working_directory(self, _system, _execution_path):
+        command = ["wsl.exe", "-d", "Ubuntu", "--exec", "docker", "compose", "ps"]
+
+        prepared, process_cwd = self.service.prepare_command(command, self.root)
+
+        self.assertEqual(
+            prepared[:6],
+            ["wsl.exe", "-d", "Ubuntu", "--cd", "/home/demo/Odoo-projects", "--exec"],
+        )
+        self.assertEqual(process_cwd, Path.home())
+
     @patch("odoo_manager_core.project_service.http.client.HTTPConnection")
     def test_http_probe_uses_loopback_with_traefik_host_header(self, connection_class):
         connection = connection_class.return_value

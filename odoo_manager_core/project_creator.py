@@ -7,15 +7,14 @@ import time
 from pathlib import Path
 
 from .platform import (
-    command_prefix,
     execution_path,
     host_executable_available,
     platform_id,
     resolve_executable,
-    workspace_command_prefix,
     workspace_execution_path,
     workspace_wsl_context,
     wsl_command_prefix,
+    wsl_executable_available,
     wsl_execution_path,
 )
 
@@ -87,25 +86,29 @@ class ProjectCreator:
         self.workspace = Path(detected_wsl.windows_path if detected_wsl else Path(workspace).expanduser().resolve())
         self.project_service = project_service
         self.wsl_context = detected_wsl
+        distribution = detected_wsl.distribution if detected_wsl else settings.wsl_distribution
+        native_git = host_executable_available("git")
+        wsl_git = platform_id() == "windows" and wsl_executable_available("git", distribution)
+        self.git_wsl_distribution = distribution if ((detected_wsl and wsl_git) or (not native_git and wsl_git)) else None
 
     @property
     def command_cwd(self):
-        return Path.home() if self.wsl_context else self.workspace
+        return Path.home() if self.git_wsl_distribution is not None else self.workspace
 
     def log(self, callback, message):
         if callback:
             callback(message)
 
     def command_path(self, path):
-        if self.wsl_context:
-            return workspace_execution_path(path, self.settings, self.workspace)
+        if self.git_wsl_distribution is not None:
+            return wsl_execution_path(path, self.git_wsl_distribution)
         if self.settings.execution_mode == "wsl":
             return execution_path(path, self.settings)
         return str(Path(path).resolve())
 
     def git(self, *arguments):
-        prefix = workspace_command_prefix(self.settings, self.workspace)
-        executable = "git" if self.wsl_context else resolve_executable("git", self.settings)
+        prefix = wsl_command_prefix(self.git_wsl_distribution) if self.git_wsl_distribution is not None else []
+        executable = "git" if self.git_wsl_distribution is not None else resolve_executable("git", self.settings)
         return [
             *prefix,
             executable,
@@ -135,7 +138,7 @@ class ProjectCreator:
             )
 
     def reference_repository(self, repository):
-        if self.wsl_context:
+        if self.git_wsl_distribution is not None:
             return None
         slug = repository_slug(repository)
         for project in sorted(self.workspace.iterdir(), key=lambda path: path.name.lower()):

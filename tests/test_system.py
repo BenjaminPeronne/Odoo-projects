@@ -2,11 +2,12 @@ import unittest
 from unittest import mock
 
 from odoo_manager_core.config import ManagerSettings
-from odoo_manager_core.system import docker_command, docker_status, shell_command
+from odoo_manager_core.system import docker_command, docker_status, reset_docker_backend_cache, shell_command
 
 
 class DockerStatusTests(unittest.TestCase):
     def setUp(self):
+        reset_docker_backend_cache()
         self.settings = ManagerSettings.from_dict({}, "/tmp/workspace")
 
     @mock.patch("odoo_manager_core.system.executable_available", return_value=False)
@@ -106,7 +107,30 @@ class DockerStatusTests(unittest.TestCase):
         status = docker_status(settings)
 
         self.assertEqual(status["state"], "ready")
-        self.assertEqual(run.call_args.args[0][0], r"C:\Docker\docker.exe")
+        self.assertEqual(status["backend"], "native")
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertTrue(any(command[0] == r"C:\Docker\docker.exe" for command in commands))
+        self.assertTrue(any(command[0] == "wsl.exe" for command in commands))
+
+    @mock.patch("odoo_manager_core.system.resolve_host_executable", return_value=r"C:\Docker\docker.exe")
+    @mock.patch("odoo_manager_core.system.host_executable_available", return_value=True)
+    @mock.patch("odoo_manager_core.system.platform_id", return_value="windows")
+    @mock.patch("odoo_manager_core.system.subprocess.run")
+    def test_windows_falls_back_to_running_wsl_docker(self, run, _platform, _available, _resolve):
+        def result(command, **_kwargs):
+            if command[0] == r"C:\Docker\docker.exe":
+                return mock.Mock(returncode=1, stdout="", stderr="Docker Desktop stopped")
+            if "--version" in command:
+                return mock.Mock(returncode=0, stdout="Docker version 28.0.0", stderr="")
+            return mock.Mock(returncode=0, stdout='"28.0.0"\n', stderr="")
+
+        run.side_effect = result
+
+        status = docker_status(self.settings)
+
+        self.assertEqual(status["state"], "ready")
+        self.assertEqual(status["backend"], "wsl")
+        self.assertEqual(docker_command(self.settings, "ps")[:3], ["wsl.exe", "--exec", "docker"])
 
 
 if __name__ == "__main__":

@@ -97,8 +97,9 @@ class ProjectCreatorTests(unittest.TestCase):
             )
             self.assertIn("--no-tags", command)
 
+    @mock.patch("odoo_manager_core.project_creator.wsl_executable_available", return_value=True)
     @mock.patch("odoo_manager_core.project_creator.platform_id", return_value="windows")
-    def test_wsl_workspace_uses_linux_git_without_manual_execution_mode(self, _platform):
+    def test_wsl_workspace_uses_linux_git_without_manual_execution_mode(self, _platform, _wsl_git):
         workspace = r"\\wsl.localhost\Ubuntu\home\demo\Odoo-projects"
         settings = ManagerSettings.from_dict({"execution_mode": "native"}, workspace)
         service = ProjectService(settings, Path(workspace), runner=FakeRunner())

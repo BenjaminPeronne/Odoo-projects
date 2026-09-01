@@ -456,6 +456,7 @@ class TraefikPathTests(unittest.TestCase):
 
 
 class ProjectCreationPrerequisitesTests(unittest.TestCase):
+    @patch("odoo_manager_web.wsl_executable_available", return_value=True)
     @patch("odoo_manager_web.host_executable_available", return_value=True)
     @patch("odoo_manager_web.platform_id", return_value="windows")
     @patch("odoo_manager_web.run_capture")
@@ -464,6 +465,7 @@ class ProjectCreationPrerequisitesTests(unittest.TestCase):
         run_capture,
         _platform,
         _host_available,
+        _wsl_available,
     ):
         def capture(command, **_kwargs):
             if "git" in command and "--version" in command:

@@ -202,6 +202,48 @@ def host_executable_available(executable):
     return shutil.which(executable, path=executable_search_path()) is not None
 
 
+def wsl_executable_available(executable, distribution="", timeout=6):
+    """Check an executable inside WSL without opening a console window."""
+    if platform.system() != "Windows" or not host_executable_available("wsl.exe"):
+        return False
+    command = [
+        *wsl_command_prefix(distribution),
+        "sh",
+        "-lc",
+        'command -v -- "$1" >/dev/null 2>&1',
+        "odoo-manager",
+        str(executable),
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            **hidden_process_kwargs(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def command_uses_wsl(command):
+    if not command:
+        return False
+    return Path(str(command[0])).name.casefold() in {"wsl", "wsl.exe"} and "--exec" in command
+
+
+def wsl_command_with_cwd(command, cwd, settings, workspace=None):
+    """Attach an explicit Linux cwd to an existing wsl.exe command."""
+    command = [str(argument) for argument in command]
+    if not cwd or not command_uses_wsl(command):
+        return command
+    linux_cwd = workspace_execution_path(cwd, settings, workspace)
+    exec_index = command.index("--exec")
+    return [*command[:exec_index], "--cd", linux_cwd, *command[exec_index:]]
+
+
 def wsl_execution_path(path, distribution=""):
     context = wsl_path_context(path)
     if context:
