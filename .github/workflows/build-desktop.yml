@@ -145,8 +145,23 @@ jobs:
             exit 1
           fi
 
+          write_github_env() {
+            local name="$1"
+            local value="$2"
+            local delimiter
+            delimiter="ODOO_MANAGER_$(openssl rand -hex 16)"
+            {
+              printf '%s<<%s\n' "$name" "$delimiter"
+              printf '%s\n' "$value"
+              printf '%s\n' "$delimiter"
+            } >> "$GITHUB_ENV"
+          }
+
           rm -f "$certificate_path"
-          echo "APPLE_SIGNING_IDENTITY=$signing_identity" >> "$GITHUB_ENV"
+          write_github_env APPLE_SIGNING_IDENTITY "$signing_identity"
+          write_github_env APPLE_ID "$APPLE_ID"
+          write_github_env APPLE_PASSWORD "$APPLE_PASSWORD"
+          write_github_env APPLE_TEAM_ID "$APPLE_TEAM_ID"
           echo "MACOS_SIGNING_CONFIGURED=true" >> "$GITHUB_ENV"
           echo "### macOS" >> "$GITHUB_STEP_SUMMARY"
           echo "Signature Developer ID et notarisation activées." >> "$GITHUB_STEP_SUMMARY"
@@ -220,9 +235,6 @@ jobs:
       - name: Build native sidecar and Tauri installer
         env:
           CI: "true"
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: python scripts/build_desktop.py --bundles ${{ matrix.bundles }}
 
       - name: Verify signed macOS packages
