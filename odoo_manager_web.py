@@ -4,6 +4,7 @@ import html
 import http.client
 import json
 import os
+import posixpath
 import queue
 import re
 import shlex
@@ -32,11 +33,18 @@ from odoo_manager_core.platform import (
     executable_available,
     executable_search_path,
     execution_path,
+    host_executable_available,
     hidden_process_kwargs,
     open_terminal_command,
     platform_id,
     resolve_executable,
     resolve_host_executable,
+    workspace_command_prefix,
+    workspace_execution_path,
+    workspace_wsl_context,
+    wsl_command_prefix,
+    wsl_path_context,
+    wsl_unc_path,
 )
 from odoo_manager_core.project_creator import (
     SUPPORTED_ODOO_VERSIONS,
@@ -117,10 +125,10 @@ def database_restore_staging_root(project):
 
 
 def module_import_roots(project):
-    return (
-        project_imports_root(project).resolve(),
-        project_staging_imports_root(project).resolve(),
-    )
+    roots = (project_imports_root(project), project_staging_imports_root(project))
+    if active_workspace_wsl_context():
+        return roots
+    return tuple(root.resolve() for root in roots)
 
 
 def project_odoo_root(project):
@@ -167,6 +175,20 @@ def command_env():
     return env
 
 
+def active_workspace_wsl_context():
+    if platform_id() != "windows":
+        return None
+    return workspace_wsl_context(SETTINGS, WORKSPACE)
+
+
+def workspace_tool_prefix():
+    return workspace_command_prefix(SETTINGS, WORKSPACE)
+
+
+def workspace_tool_cwd():
+    return Path.home() if active_workspace_wsl_context() else WORKSPACE
+
+
 def apply_settings(settings):
     global SETTINGS, WORKSPACE, DELETED_PROJECTS, DELETED_MODULES
     SETTINGS = settings
@@ -175,6 +197,7 @@ def apply_settings(settings):
     DELETED_MODULES = WORKSPACE / ".odoo_manager_deleted_modules"
     with MODULE_CACHE_LOCK:
         MODULE_CACHE.clear()
+        WSL_MODULE_METADATA.clear()
 
 
 def settings_snapshot():
@@ -379,20 +402,23 @@ def system_status_snapshot(docker=None):
 
 
 def project_creation_prerequisites():
-    git_probe_cwd = WORKSPACE if WORKSPACE.exists() else ROOT
+    wsl_context = active_workspace_wsl_context()
+    prefix = workspace_tool_prefix()
+    git_probe_cwd = workspace_tool_cwd() if wsl_context else (WORKSPACE if WORKSPACE.exists() else ROOT)
     git_code, git_output = run_capture(
-        [*command_prefix(SETTINGS), "git", "--version"],
+        [*prefix, "git", "--version"],
         cwd=git_probe_cwd,
         timeout=8,
     )
-    if SETTINGS.execution_mode == "wsl":
+    if wsl_context:
         key_code, key_output = run_capture(
             [
-                *command_prefix(SETTINGS),
+                *prefix,
                 "sh",
                 "-lc",
                 'find "$HOME/.ssh" -maxdepth 1 -type f -name "*.pub" -print 2>/dev/null',
             ],
+            cwd=git_probe_cwd,
             timeout=8,
         )
         ssh_keys = [Path(line.strip()).name for line in key_output.splitlines() if line.strip()] if key_code == 0 else []
@@ -400,28 +426,45 @@ def project_creation_prerequisites():
         ssh_dir = Path.home() / ".ssh"
         ssh_keys = sorted(path.name for path in ssh_dir.glob("*.pub") if path.is_file()) if ssh_dir.exists() else []
 
-    if SETTINGS.execution_mode == "wsl":
+    if wsl_context:
         keygen_code, _keygen_output = run_capture(
-            [*command_prefix(SETTINGS), "sh", "-lc", "command -v ssh-keygen >/dev/null 2>&1"],
+            [*prefix, "sh", "-lc", "command -v ssh-keygen >/dev/null 2>&1"],
+            cwd=git_probe_cwd,
             timeout=6,
         )
         ssh_keygen_available = keygen_code == 0
     else:
         ssh_keygen_available = executable_available("ssh-keygen", SETTINGS)
 
-    git_install_supported = (
-        platform_id() == "windows"
-        and SETTINGS.execution_mode == "native"
-        and executable_available("winget", SETTINGS)
+    git_install_supported = platform_id() == "windows" and (
+        (bool(wsl_context) and host_executable_available("wsl.exe"))
+        or (not wsl_context and executable_available("winget", SETTINGS))
     )
 
-    workspace_exists = WORKSPACE.exists() and WORKSPACE.is_dir()
-    writable_parent = WORKSPACE.parent
-    while not writable_parent.exists() and writable_parent != writable_parent.parent:
-        writable_parent = writable_parent.parent
-    workspace_ready = (
-        os.access(WORKSPACE, os.W_OK) if workspace_exists else writable_parent.is_dir() and os.access(writable_parent, os.W_OK)
-    )
+    if wsl_context:
+        workspace_linux = workspace_execution_path(WORKSPACE, SETTINGS, WORKSPACE)
+        workspace_code, _workspace_output = run_capture(
+            [*prefix, "test", "-d", workspace_linux],
+            cwd=git_probe_cwd,
+            timeout=6,
+        )
+        writable_code, _writable_output = run_capture(
+            [*prefix, "test", "-w", workspace_linux],
+            cwd=git_probe_cwd,
+            timeout=6,
+        )
+        workspace_exists = workspace_code == 0
+        workspace_ready = workspace_exists and writable_code == 0
+    else:
+        workspace_exists = WORKSPACE.exists() and WORKSPACE.is_dir()
+        writable_parent = WORKSPACE.parent
+        while not writable_parent.exists() and writable_parent != writable_parent.parent:
+            writable_parent = writable_parent.parent
+        workspace_ready = (
+            os.access(WORKSPACE, os.W_OK)
+            if workspace_exists
+            else writable_parent.is_dir() and os.access(writable_parent, os.W_OK)
+        )
 
     return {
         "workspace": str(WORKSPACE),
@@ -431,27 +474,35 @@ def project_creation_prerequisites():
         "git_version": git_output.splitlines()[0] if git_code == 0 and git_output else "",
         "git_install_supported": git_install_supported,
         "git_install_message": (
-            "Git peut être installé automatiquement avec Windows Package Manager."
+            f"Git peut être installé automatiquement dans WSL ({wsl_context.distribution})."
+            if wsl_context and git_install_supported
+            else "Git peut être installé automatiquement avec Windows Package Manager."
             if git_install_supported
-            else "Installe Git manuellement ou rends winget disponible sur Windows."
+            else "Installe Git dans l'environnement du dossier de projets."
         ),
         "ssh_key_present": bool(ssh_keys),
         "ssh_keys": ssh_keys,
         "ssh_keygen_available": ssh_keygen_available,
+        "tool_environment": f"WSL ({wsl_context.distribution})" if wsl_context else "Windows" if platform_id() == "windows" else "Système",
         "gitlab_ssh_keys_url": "https://gitlab.sudokeys.com/-/user_settings/ssh_keys",
         "supported_versions": list(SUPPORTED_ODOO_VERSIONS),
     }
 
 
 def ssh_public_keys_snapshot():
-    if SETTINGS.execution_mode == "wsl":
+    wsl_context = active_workspace_wsl_context()
+    if wsl_context:
         script = (
             'for key in "$HOME"/.ssh/*.pub; do '
             '[ -f "$key" ] || continue; '
             'printf "%s\\t" "${key##*/}"; tr -d "\\r\\n" < "$key"; printf "\\n"; '
             "done"
         )
-        code, output = run_capture([*command_prefix(SETTINGS), "sh", "-lc", script], timeout=8)
+        code, output = run_capture(
+            [*workspace_tool_prefix(), "sh", "-lc", script],
+            cwd=workspace_tool_cwd(),
+            timeout=8,
+        )
         if code != 0:
             raise RuntimeError("Impossible de lire les clés SSH dans WSL.")
         keys = []
@@ -488,7 +539,8 @@ def generate_ssh_key(comment=""):
     if default_existing:
         return {**default_existing, "created": False, "message": "La clé Ed25519 existe déjà."}
 
-    if SETTINGS.execution_mode == "wsl":
+    wsl_context = active_workspace_wsl_context()
+    if wsl_context:
         comment_argument = f" -C {shlex.quote(comment)}" if comment else ""
         script = (
             'mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh" && '
@@ -496,7 +548,11 @@ def generate_ssh_key(comment=""):
             'echo "Une clé privée id_ed25519 existe déjà sans clé publique." >&2; exit 3; fi; '
             f'ssh-keygen -t ed25519 -f "$HOME/.ssh/id_ed25519" -N ""{comment_argument}'
         )
-        code, output = run_capture([*command_prefix(SETTINGS), "sh", "-lc", script], timeout=30)
+        code, output = run_capture(
+            [*workspace_tool_prefix(), "sh", "-lc", script],
+            cwd=workspace_tool_cwd(),
+            timeout=30,
+        )
         if code != 0:
             raise RuntimeError(output or "Impossible de générer la clé SSH dans WSL.")
     else:
@@ -522,8 +578,45 @@ def generate_ssh_key(comment=""):
 
 
 def install_git_job(job):
-    if platform_id() != "windows" or SETTINGS.execution_mode != "native":
-        raise RuntimeError("L'installation automatique de Git est disponible sous Windows en mode natif.")
+    if platform_id() != "windows":
+        raise RuntimeError("L'installation automatique de Git est disponible sous Windows.")
+
+    wsl_context = active_workspace_wsl_context()
+    if wsl_context:
+        current_code, current_output = run_capture(
+            [*workspace_tool_prefix(), "git", "--version"],
+            cwd=workspace_tool_cwd(),
+            timeout=8,
+        )
+        if current_code == 0:
+            job.add(current_output or f"Git est déjà installé dans WSL ({wsl_context.distribution}).")
+            return
+        script = (
+            "set -eu; "
+            "if command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y git openssh-client; "
+            "elif command -v dnf >/dev/null 2>&1; then dnf install -y git openssh-clients; "
+            "elif command -v yum >/dev/null 2>&1; then yum install -y git openssh-clients; "
+            "elif command -v apk >/dev/null 2>&1; then apk add git openssh-client; "
+            "elif command -v zypper >/dev/null 2>&1; then zypper --non-interactive install git openssh; "
+            "elif command -v pacman >/dev/null 2>&1; then pacman -Sy --noconfirm git openssh; "
+            "else echo 'Gestionnaire de paquets WSL non pris en charge.' >&2; exit 2; fi"
+        )
+        job.add(f"Installation de Git dans WSL ({wsl_context.distribution})...")
+        code = run_stream(
+            job,
+            [*wsl_command_prefix(wsl_context.distribution, user="root"), "sh", "-lc", script],
+            cwd=workspace_tool_cwd(),
+        )
+        git_code, git_output = run_capture(
+            [*workspace_tool_prefix(), "git", "--version"],
+            cwd=workspace_tool_cwd(),
+            timeout=12,
+        )
+        if code != 0 or git_code != 0:
+            raise RuntimeError("Git n'a pas été détecté dans WSL après l'installation.")
+        job.add(git_output or "Git installé dans WSL.")
+        return
+
     if not executable_available("winget", SETTINGS):
         raise RuntimeError("Windows Package Manager (winget) est introuvable. Mets Windows à jour ou installe App Installer.")
 
@@ -778,7 +871,156 @@ def database_base_versions(project, databases):
     return versions
 
 
+WSL_MODULE_METADATA = {}
+
+
+def linux_path_is_relative_to(path, parent):
+    path = posixpath.normpath(path)
+    parent = posixpath.normpath(parent)
+    return path == parent or path.startswith(parent.rstrip("/") + "/")
+
+
+def wsl_module_metadata(project, linux_path, source_path, is_link, distribution):
+    link_parent = workspace_execution_path(project_addons_link_parent(project), SETTINGS, WORKSPACE)
+    storage_parent = workspace_execution_path(project_addons_storage_parent(project), SETTINGS, WORKSPACE)
+    legacy_parent = workspace_execution_path(project_legacy_addons_storage_parent(project), SETTINGS, WORKSPACE)
+    imports_roots = [workspace_execution_path(root, SETTINGS, WORKSPACE) for root in module_import_roots(project)]
+    parent = posixpath.dirname(linux_path)
+    source_parent = posixpath.dirname(source_path)
+    name = posixpath.basename(linux_path)
+    link_path = linux_path if parent == link_parent else ""
+    if not link_path:
+        candidate_link = posixpath.join(link_parent, name)
+        if candidate_link == linux_path:
+            link_path = candidate_link
+
+    direct_storage = source_parent == storage_parent
+    direct_legacy = source_parent == legacy_parent
+    imported = any(linux_path_is_relative_to(source_path, root) for root in imports_roots)
+    in_storage = linux_path_is_relative_to(source_path, storage_parent)
+
+    if parent == link_parent and is_link:
+        if direct_storage:
+            kind = "lien vers addons-store"
+            removal_mode = "link_and_storage"
+            removal_note = "Supprime le lien odoo/addons et le dossier dans odoo/addons-store."
+            removable = True
+        elif direct_legacy:
+            kind = "lien vers ancien stockage"
+            removal_mode = "link_and_legacy_storage"
+            removal_note = "Supprime le lien odoo/addons et le dossier dans l'ancien odoo/odoo/addons."
+            removable = True
+        elif imported:
+            kind = "lien vers import outil"
+            removal_mode = "link_and_import"
+            removal_note = "Supprime le lien odoo/addons et le dossier extrait géré par l'outil."
+            removable = True
+        elif in_storage:
+            kind = "lien vers dépôt addons-store"
+            removal_mode = "protected_store"
+            removal_note = "Module fourni par un dépôt sous addons-store; suppression du lien seule le ferait réapparaître."
+            removable = False
+        else:
+            kind = "lien vers source externe"
+            removal_mode = "link_only"
+            removal_note = "Supprime le lien dans odoo/addons. La source externe est conservée."
+            removable = True
+    elif parent == link_parent:
+        kind = "dossier direct dans odoo/addons"
+        removal_mode = "directory"
+        removal_note = "Déplace le dossier du module hors de odoo/addons."
+        removable = True
+    elif parent == storage_parent:
+        kind = "addons-store"
+        removal_mode = "protected_source"
+        removal_note = "Module dans odoo/addons-store sans lien géré dans odoo/addons."
+        removable = False
+    elif parent == legacy_parent:
+        kind = "ancien stockage"
+        removal_mode = "protected_legacy_source"
+        removal_note = "Module dans l'ancien dossier odoo/odoo/addons sans lien géré dans odoo/addons."
+        removable = False
+    elif in_storage:
+        kind = "addons-store"
+        removal_mode = "protected"
+        removal_note = "Module hors du dossier odoo/addons du projet."
+        removable = False
+    else:
+        kind = "source externe"
+        removal_mode = "protected"
+        removal_note = "Module hors du dossier odoo/addons du projet."
+        removable = False
+
+    host_path = wsl_unc_path(distribution, linux_path)
+    return host_path, {
+        "path": host_path,
+        "link_path": wsl_unc_path(distribution, link_path) if link_path else "",
+        "source_path": wsl_unc_path(distribution, source_path),
+        "path_kind": kind,
+        "removable": removable,
+        "removal_mode": removal_mode,
+        "removal_note": removal_note,
+    }
+
+
+def wsl_module_dirs(project):
+    context = active_workspace_wsl_context()
+    if not context:
+        return []
+    candidates = [
+        project_addons_link_parent(project),
+        project_addons_storage_parent(project),
+        project_legacy_addons_storage_parent(project),
+        project_odoo_root(project) / "odoo" / "odoo" / "addons",
+        project_odoo_root(project) / "addons-store" / "odoo_entreprise",
+        project_odoo_root(project) / "addons-store" / "odoo_enterprise",
+    ]
+    linux_candidates = [workspace_execution_path(path, SETTINGS, WORKSPACE) for path in candidates]
+    script = (
+        'for parent do [ -d "$parent" ] || continue; '
+        'find "$parent" -mindepth 1 -maxdepth 1 \\( -type d -o -type l \\) -print 2>/dev/null | '
+        'while IFS= read -r child; do '
+        '[ -f "$child/__manifest__.py" ] || [ -f "$child/__openerp__.py" ] || continue; '
+        'target=$(readlink -f -- "$child" 2>/dev/null || printf "%s" "$child"); '
+        'if [ -L "$child" ]; then linked=1; else linked=0; fi; '
+        'printf "%s\\t%s\\t%s\\n" "$child" "$target" "$linked"; '
+        'done; done'
+    )
+    code, output = run_capture(
+        [*workspace_tool_prefix(), "sh", "-c", script, "odoo-manager", *linux_candidates],
+        cwd=workspace_tool_cwd(),
+        timeout=30,
+    )
+    if code != 0:
+        return []
+
+    seen = set()
+    paths = []
+    for line in output.splitlines():
+        linux_path, separator, remainder = line.partition("\t")
+        source_path, second_separator, linked = remainder.partition("\t")
+        if not separator or not second_separator:
+            continue
+        name = posixpath.basename(linux_path)
+        if not SAFE_MODULE_RE.fullmatch(name) or name in seen:
+            continue
+        seen.add(name)
+        host_path, metadata = wsl_module_metadata(
+            project,
+            posixpath.normpath(linux_path),
+            posixpath.normpath(source_path or linux_path),
+            linked == "1",
+            context.distribution,
+        )
+        WSL_MODULE_METADATA[host_path.casefold()] = metadata
+        paths.append(Path(host_path))
+    return paths
+
+
 def module_dirs(project):
+    if active_workspace_wsl_context():
+        yield from wsl_module_dirs(project)
+        return
     base = project_odoo_root(project)
     candidates = [
         project_addons_link_parent(project),
@@ -914,6 +1156,8 @@ def modules_missing_from_code(states, available_names, accepted_states):
 def clear_project_module_cache(project):
     with MODULE_CACHE_LOCK:
         MODULE_CACHE.pop(project, None)
+        if active_workspace_wsl_context():
+            WSL_MODULE_METADATA.clear()
 
 
 def manifest_value(text, key):
@@ -962,6 +1206,12 @@ def parse_manifest(path):
 
 
 def module_location_info(project, path):
+    metadata = WSL_MODULE_METADATA.get(str(path).casefold())
+    if metadata:
+        return {
+            key: metadata[key]
+            for key in ("path", "link_path", "source_path", "path_kind")
+        }
     link_parent = project_addons_link_parent(project).resolve(strict=False)
     storage_parent = project_addons_storage_parent(project).resolve(strict=False)
     legacy_storage_parent = project_legacy_addons_storage_parent(project).resolve(strict=False)
@@ -1009,9 +1259,10 @@ def module_location_info(project, path):
 
 def basic_module(project, path):
     location = module_location_info(project, path)
+    name = posixpath.basename(str(path).replace("\\", "/")) if wsl_path_context(path) else path.name
     return {
-        "name": path.name,
-        "title": path.name,
+        "name": name,
+        "title": name,
         "summary": "",
         "version": "",
         "category": "",
@@ -1032,6 +1283,12 @@ def should_parse_manifest(path):
 
 
 def module_removal_info(project, path):
+    metadata = WSL_MODULE_METADATA.get(str(path).casefold())
+    if metadata:
+        return {
+            key: metadata[key]
+            for key in ("removable", "removal_mode", "removal_note")
+        }
     link_parent = project_addons_link_parent(project).resolve()
     storage_parent = project_addons_storage_parent(project).resolve()
     legacy_storage_parent = project_legacy_addons_storage_parent(project).resolve()

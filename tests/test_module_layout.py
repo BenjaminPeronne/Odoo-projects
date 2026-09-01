@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 import odoo_manager_web as web
 
@@ -60,6 +61,33 @@ class ModuleLayoutTests(unittest.TestCase):
         self.assertEqual(str(link), module["link_path"])
         self.assertEqual(str(storage.resolve(strict=False)), module["source_path"])
         self.assertEqual("lien vers addons-store", module["path_kind"])
+
+    @mock.patch("odoo_manager_web.platform_id", return_value="windows")
+    @mock.patch("odoo_manager_web.run_capture")
+    def test_wsl_workspace_scans_relative_addon_links_inside_linux(self, run_capture, _platform):
+        workspace = r"\\wsl.localhost\Ubuntu\home\demo\Odoo-projects"
+        run_capture.return_value = (
+            0,
+            "/home/demo/Odoo-projects/TEST_PROJECT/odoo/addons/custom_module\t"
+            "/home/demo/Odoo-projects/TEST_PROJECT/odoo/addons-store/custom_module\t1",
+        )
+        previous_settings = web.SETTINGS
+        try:
+            web.SETTINGS = web.ManagerSettings.from_dict({}, workspace)
+            web.WORKSPACE = Path(workspace)
+            web.WSL_MODULE_METADATA.clear()
+
+            modules = web.modules_for(self.project)
+        finally:
+            web.SETTINGS = previous_settings
+            web.WORKSPACE = self.root
+            web.clear_project_module_cache(self.project)
+
+        self.assertEqual([module["name"] for module in modules], ["custom_module"])
+        self.assertEqual(modules[0]["path_kind"], "lien vers addons-store")
+        self.assertEqual(modules[0]["removal_mode"], "link_and_storage")
+        command = run_capture.call_args.args[0]
+        self.assertEqual(command[:5], ["wsl.exe", "-d", "Ubuntu", "--exec", "sh"])
 
     def test_delete_module_removes_link_and_storage_copy(self):
         job = DummyJob()

@@ -74,6 +74,17 @@ class SettingsTests(unittest.TestCase):
         settings = ManagerSettings.from_dict({"execution_mode": "dos"}, "/tmp/workspace")
         self.assertEqual(settings.execution_mode, "native")
 
+    def test_wsl_unc_workspace_is_preserved_in_canonical_form(self):
+        settings = ManagerSettings.from_dict(
+            {},
+            r"\\wsl$\Ubuntu\home\demo\Odoo-projects",
+        )
+
+        self.assertEqual(
+            settings.workspace,
+            r"\\wsl.localhost\Ubuntu\home\demo\Odoo-projects",
+        )
+
     @mock.patch("odoo_manager_core.config.platform.system", return_value="Windows")
     def test_windows_legacy_wsl_mode_is_migrated_to_automatic_native(self, _system):
         with tempfile.TemporaryDirectory() as temporary:

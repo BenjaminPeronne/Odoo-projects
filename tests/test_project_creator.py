@@ -97,6 +97,21 @@ class ProjectCreatorTests(unittest.TestCase):
             )
             self.assertIn("--no-tags", command)
 
+    @mock.patch("odoo_manager_core.project_creator.platform_id", return_value="windows")
+    def test_wsl_workspace_uses_linux_git_without_manual_execution_mode(self, _platform):
+        workspace = r"\\wsl.localhost\Ubuntu\home\demo\Odoo-projects"
+        settings = ManagerSettings.from_dict({"execution_mode": "native"}, workspace)
+        service = ProjectService(settings, Path(workspace), runner=FakeRunner())
+        creator = ProjectCreator(settings, workspace, service)
+
+        command = creator.git("clone", "repo.git", "/home/demo/project")
+
+        self.assertEqual(command[:5], ["wsl.exe", "-d", "Ubuntu", "--exec", "git"])
+        self.assertEqual(
+            creator.command_path(workspace + r"\DEMO"),
+            "/home/demo/Odoo-projects/DEMO",
+        )
+
     def test_gitlab_addons_are_cloned_to_store_and_linked(self):
         target = self.creator().create(
             "CLIENT_V19",

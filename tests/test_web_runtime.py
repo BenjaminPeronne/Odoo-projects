@@ -456,6 +456,41 @@ class TraefikPathTests(unittest.TestCase):
 
 
 class ProjectCreationPrerequisitesTests(unittest.TestCase):
+    @patch("odoo_manager_web.host_executable_available", return_value=True)
+    @patch("odoo_manager_web.platform_id", return_value="windows")
+    @patch("odoo_manager_web.run_capture")
+    def test_wsl_workspace_uses_git_and_ssh_from_detected_distribution(
+        self,
+        run_capture,
+        _platform,
+        _host_available,
+    ):
+        def capture(command, **_kwargs):
+            if "git" in command and "--version" in command:
+                return 0, "git version 2.50.1"
+            if "find" in " ".join(command):
+                return 0, "/home/demo/.ssh/id_ed25519.pub"
+            return 0, ""
+
+        run_capture.side_effect = capture
+        previous_workspace = web.WORKSPACE
+        previous_settings = web.SETTINGS
+        try:
+            workspace = r"\\wsl.localhost\Ubuntu-24.04\home\demo\Odoo-projects"
+            web.SETTINGS = web.ManagerSettings.from_dict({"execution_mode": "native"}, workspace)
+            web.WORKSPACE = Path(workspace)
+
+            payload = web.project_creation_prerequisites()
+        finally:
+            web.WORKSPACE = previous_workspace
+            web.SETTINGS = previous_settings
+
+        self.assertTrue(payload["git_available"])
+        self.assertEqual(payload["ssh_keys"], ["id_ed25519.pub"])
+        self.assertEqual(payload["tool_environment"], "WSL (Ubuntu-24.04)")
+        git_command = next(command for command in (call.args[0] for call in run_capture.call_args_list) if "git" in command)
+        self.assertEqual(git_command[:5], ["wsl.exe", "-d", "Ubuntu-24.04", "--exec", "git"])
+
     @patch("odoo_manager_web.run_capture", return_value=(0, "git version 2.50.0"))
     @patch("odoo_manager_web.Path.home")
     def test_reports_git_workspace_and_public_keys_without_reading_private_key(self, home, _run_capture):
@@ -557,6 +592,28 @@ class GitInstallationTests(unittest.TestCase):
         self.assertIn("--silent", command)
         self.assertIn("--disable-interactivity", command)
         self.assertIn("git version 2.51.0", job.lines)
+
+    @patch("odoo_manager_web.run_stream", return_value=0)
+    @patch("odoo_manager_web.run_capture")
+    @patch("odoo_manager_web.platform_id", return_value="windows")
+    def test_installs_git_inside_distribution_selected_by_workspace(self, _platform, capture, stream):
+        capture.side_effect = [(127, "missing"), (0, "git version 2.51.0")]
+        previous_workspace = web.WORKSPACE
+        previous_settings = web.SETTINGS
+        try:
+            workspace = r"\\wsl.localhost\Debian\home\demo\Odoo-projects"
+            web.SETTINGS = web.ManagerSettings.from_dict({}, workspace)
+            web.WORKSPACE = Path(workspace)
+            job = self.LogJob()
+
+            web.install_git_job(job)
+        finally:
+            web.WORKSPACE = previous_workspace
+            web.SETTINGS = previous_settings
+
+        command = stream.call_args.args[1]
+        self.assertEqual(command[:7], ["wsl.exe", "-d", "Debian", "-u", "root", "--exec", "sh"])
+        self.assertIn("apt-get install -y git openssh-client", command[-1])
 
 
 class DiagnosticModuleTests(unittest.TestCase):

@@ -12,6 +12,9 @@ from .platform import (
     host_executable_available,
     platform_id,
     resolve_executable,
+    workspace_command_prefix,
+    workspace_execution_path,
+    workspace_wsl_context,
     wsl_command_prefix,
     wsl_execution_path,
 )
@@ -80,22 +83,32 @@ class ProjectCreator:
 
     def __init__(self, settings, workspace, project_service):
         self.settings = settings
-        self.workspace = Path(workspace).expanduser().resolve()
+        detected_wsl = workspace_wsl_context(settings, workspace) if platform_id() == "windows" else None
+        self.workspace = Path(detected_wsl.windows_path if detected_wsl else Path(workspace).expanduser().resolve())
         self.project_service = project_service
+        self.wsl_context = detected_wsl
+
+    @property
+    def command_cwd(self):
+        return Path.home() if self.wsl_context else self.workspace
 
     def log(self, callback, message):
         if callback:
             callback(message)
 
     def command_path(self, path):
+        if self.wsl_context:
+            return workspace_execution_path(path, self.settings, self.workspace)
         if self.settings.execution_mode == "wsl":
             return execution_path(path, self.settings)
         return str(Path(path).resolve())
 
     def git(self, *arguments):
+        prefix = workspace_command_prefix(self.settings, self.workspace)
+        executable = "git" if self.wsl_context else resolve_executable("git", self.settings)
         return [
-            *command_prefix(self.settings),
-            resolve_executable("git", self.settings),
+            *prefix,
+            executable,
             "-c",
             "core.longpaths=true",
             "-c",
@@ -110,7 +123,11 @@ class ProjectCreator:
         ]
 
     def require_git(self):
-        code, output = self.project_service.capture(self.git("--version"), timeout=8)
+        code, output = self.project_service.capture(
+            self.git("--version"),
+            cwd=self.command_cwd,
+            timeout=8,
+        )
         if code != 0:
             raise RuntimeError(
                 "Git est requis pour créer un projet. Installe Git puis relance la vérification."
@@ -118,6 +135,8 @@ class ProjectCreator:
             )
 
     def reference_repository(self, repository):
+        if self.wsl_context:
+            return None
         slug = repository_slug(repository)
         for project in sorted(self.workspace.iterdir(), key=lambda path: path.name.lower()):
             if not project.is_dir() or project.name.startswith(".odoo_manager"):
@@ -160,7 +179,7 @@ class ProjectCreator:
         clone_arguments.extend([repository, self.command_path(destination)])
         command = self.git(*clone_arguments)
         started_at = time.monotonic()
-        code = self.project_service.stream(command, cwd=self.workspace, log=log)
+        code = self.project_service.stream(command, cwd=self.command_cwd, log=log)
         if code != 0:
             raise RuntimeError(
                 "Le dépôt GitLab n'a pas pu être récupéré. Vérifie ta clé SSH, l'accès au dépôt et la branche. "
@@ -185,7 +204,7 @@ class ProjectCreator:
         return sorted(modules, key=lambda path: path.name.lower())
 
     def link_module_via_wsl(self, relative, link, log=None):
-        distribution = self.settings.wsl_distribution
+        distribution = self.wsl_context.distribution if self.wsl_context else self.settings.wsl_distribution
         relative_target = str(relative).replace("\\", "/")
         try:
             destination = wsl_execution_path(link, distribution)
@@ -196,7 +215,7 @@ class ProjectCreator:
                 relative_target,
                 destination,
             ]
-            code = self.project_service.stream(command, cwd=self.workspace, log=log)
+            code = self.project_service.stream(command, cwd=self.command_cwd, log=log)
         except (OSError, RuntimeError):
             return False
         if code == 0:
@@ -205,7 +224,7 @@ class ProjectCreator:
         return False
 
     def path_entry_exists_via_wsl(self, path):
-        distribution = self.settings.wsl_distribution
+        distribution = self.wsl_context.distribution if self.wsl_context else self.settings.wsl_distribution
         try:
             destination = wsl_execution_path(path, distribution)
         except (OSError, RuntimeError):
@@ -213,6 +232,7 @@ class ProjectCreator:
         for predicate in ("-e", "-L"):
             code, _output = self.project_service.capture(
                 [*wsl_command_prefix(distribution), "test", predicate, destination],
+                cwd=self.command_cwd,
                 timeout=8,
             )
             if code == 0:
@@ -232,12 +252,12 @@ class ProjectCreator:
             raise
 
     def remove_path_via_wsl(self, path, log=None):
-        distribution = self.settings.wsl_distribution
+        distribution = self.wsl_context.distribution if self.wsl_context else self.settings.wsl_distribution
         try:
             destination = wsl_execution_path(path, distribution)
             code = self.project_service.stream(
                 [*wsl_command_prefix(distribution), "rm", "-rf", "--", destination],
-                cwd=self.workspace,
+                cwd=self.command_cwd,
                 log=log,
             )
         except (OSError, RuntimeError):
@@ -271,7 +291,7 @@ class ProjectCreator:
         if platform_id() != "windows" or not host_executable_available("wsl.exe"):
             return None
 
-        distribution = self.settings.wsl_distribution
+        distribution = self.wsl_context.distribution if self.wsl_context else self.settings.wsl_distribution
         try:
             addons_wsl = wsl_execution_path(addons_dir, distribution).rstrip("/")
         except (OSError, RuntimeError):
@@ -323,7 +343,7 @@ class ProjectCreator:
             self.log(log, f"Préparation groupée de {total} lien(s) via WSL 2...")
             code = self.project_service.stream(
                 [*wsl_command_prefix(distribution), "sh", script_wsl],
-                cwd=self.workspace,
+                cwd=self.command_cwd,
                 log=log,
             )
         finally:
@@ -362,7 +382,7 @@ class ProjectCreator:
                     continue
                 self.remove_path_entry(link, log=log)
             relative = Path(os.path.relpath(module, addons_dir))
-            if self.settings.execution_mode == "wsl":
+            if self.wsl_context or self.settings.execution_mode == "wsl":
                 if not self.link_module_via_wsl(relative, link, log=log):
                     raise RuntimeError(
                         "Impossible de créer les liens symboliques des addons via WSL 2. "

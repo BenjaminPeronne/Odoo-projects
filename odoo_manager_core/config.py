@@ -4,8 +4,17 @@ import platform
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from .platform import wsl_path_context
+
 
 CONFIG_VERSION = 1
+
+
+def normalize_workspace_path(value):
+    context = wsl_path_context(value)
+    if context:
+        return context.windows_path
+    return str(Path(value).expanduser().resolve())
 
 
 def expand_home_reference(value, home=None):
@@ -68,7 +77,7 @@ class ManagerSettings:
         workspace = str(payload.get("workspace") or default_workspace).strip()
         return cls(
             version=CONFIG_VERSION,
-            workspace=str(Path(workspace).expanduser().resolve()),
+            workspace=normalize_workspace_path(workspace),
             execution_mode=mode,
             wsl_distribution=wsl_distribution,
             docker_executable=str(payload.get("docker_executable", "docker")).strip() or "docker",

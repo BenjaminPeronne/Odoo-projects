@@ -1,6 +1,8 @@
 import os
 import platform
 import json
+import posixpath
+import re
 import shlex
 import shutil
 import subprocess
@@ -70,6 +72,75 @@ class LaunchResult:
     message: str
 
 
+@dataclass(frozen=True)
+class WslPathContext:
+    distribution: str
+    linux_path: str
+
+    @property
+    def windows_path(self):
+        suffix = self.linux_path.lstrip("/").replace("/", "\\")
+        root = rf"\\wsl.localhost\{self.distribution}"
+        return f"{root}\\{suffix}" if suffix else root
+
+
+def wsl_path_context(path):
+    """Return the WSL distribution and Linux path represented by a UNC path."""
+    raw = os.fspath(path).strip()
+    normalized = raw.replace("\\", "/")
+    match = re.match(
+        r"^//(?:wsl\.localhost|wsl\$)/([^/]+)(?:/(.*))?$",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    distribution = match.group(1).strip()
+    if not distribution or distribution in {".", ".."}:
+        return None
+    relative = match.group(2) or ""
+    linux_path = posixpath.normpath("/" + relative)
+    return WslPathContext(distribution=distribution, linux_path=linux_path)
+
+
+def wsl_unc_path(distribution, linux_path):
+    linux_path = posixpath.normpath(str(linux_path or "/").replace("\\", "/"))
+    if not linux_path.startswith("/"):
+        linux_path = "/" + linux_path
+    return WslPathContext(distribution=str(distribution), linux_path=linux_path).windows_path
+
+
+def workspace_wsl_context(settings, workspace=None):
+    context = wsl_path_context(workspace or settings.workspace)
+    if context:
+        return context
+    if platform_id() == "windows" and settings.execution_mode == "wsl":
+        return WslPathContext(settings.wsl_distribution, "")
+    return None
+
+
+def workspace_command_prefix(settings, workspace=None):
+    context = workspace_wsl_context(settings, workspace)
+    if not context:
+        return command_prefix(settings)
+    return wsl_command_prefix(context.distribution)
+
+
+def workspace_execution_path(path, settings, workspace=None):
+    context = workspace_wsl_context(settings, workspace)
+    path_context = wsl_path_context(path)
+    if path_context:
+        if context and context.distribution.casefold() != path_context.distribution.casefold():
+            raise RuntimeError(
+                "Le chemin appartient à une autre distribution WSL "
+                f"({path_context.distribution} au lieu de {context.distribution})."
+            )
+        return path_context.linux_path
+    if context:
+        return wsl_execution_path(path, context.distribution)
+    return execution_path(path, settings)
+
+
 def platform_id():
     name = platform.system()
     if name == "Darwin":
@@ -79,10 +150,12 @@ def platform_id():
     return "linux"
 
 
-def wsl_command_prefix(distribution=""):
+def wsl_command_prefix(distribution="", user=""):
     command = ["wsl.exe"]
     if distribution:
         command.extend(["-d", distribution])
+    if user:
+        command.extend(["-u", user])
     # --exec bypasses the default Linux shell, which would otherwise consume
     # backslashes from Windows paths before wslpath receives them.
     command.append("--exec")
@@ -130,6 +203,14 @@ def host_executable_available(executable):
 
 
 def wsl_execution_path(path, distribution=""):
+    context = wsl_path_context(path)
+    if context:
+        if distribution and context.distribution.casefold() != distribution.casefold():
+            raise RuntimeError(
+                "Le chemin appartient à une autre distribution WSL "
+                f"({context.distribution} au lieu de {distribution})."
+            )
+        return context.linux_path
     path = str(Path(path).expanduser().resolve())
     path_for_wsl = path.replace("\\", "/")
     command = [*wsl_command_prefix(distribution), "wslpath", "-a", "-u", path_for_wsl]

@@ -9,6 +9,10 @@ from odoo_manager_core.platform import (
     hidden_process_kwargs,
     open_terminal_command,
     open_terminal_script,
+    workspace_command_prefix,
+    workspace_execution_path,
+    wsl_path_context,
+    wsl_unc_path,
 )
 
 
@@ -103,6 +107,43 @@ class TerminalLaunchTests(unittest.TestCase):
 
 
 class WindowsProcessTests(unittest.TestCase):
+    def test_wsl_unc_variants_are_translated_without_calling_wslpath(self):
+        localhost = wsl_path_context(r"\\wsl.localhost\Ubuntu-24.04\home\demo\Odoo-projects")
+        legacy = wsl_path_context(r"\\wsl$\Ubuntu-24.04\home\demo\Odoo-projects")
+
+        self.assertEqual(localhost, legacy)
+        self.assertEqual(localhost.distribution, "Ubuntu-24.04")
+        self.assertEqual(localhost.linux_path, "/home/demo/Odoo-projects")
+        self.assertEqual(
+            wsl_unc_path(localhost.distribution, localhost.linux_path),
+            r"\\wsl.localhost\Ubuntu-24.04\home\demo\Odoo-projects",
+        )
+
+    @mock.patch("odoo_manager_core.platform.platform_id", return_value="windows")
+    def test_workspace_path_selects_its_wsl_distribution_automatically(self, _platform):
+        workspace = r"\\wsl.localhost\Debian\home\demo\Odoo-projects"
+        module = workspace + r"\DEMO\odoo\addons\custom_module"
+        settings = ManagerSettings.from_dict({"execution_mode": "native"}, workspace)
+
+        self.assertEqual(
+            workspace_command_prefix(settings, workspace),
+            ["wsl.exe", "-d", "Debian", "--exec"],
+        )
+        self.assertEqual(
+            workspace_execution_path(module, settings, workspace),
+            "/home/demo/Odoo-projects/DEMO/odoo/addons/custom_module",
+        )
+
+    @mock.patch("odoo_manager_core.platform.platform_id", return_value="windows")
+    def test_rejects_cross_distribution_paths(self, _platform):
+        settings = ManagerSettings.from_dict({}, r"\\wsl.localhost\Ubuntu\home\demo\Odoo-projects")
+        with self.assertRaisesRegex(RuntimeError, "autre distribution WSL"):
+            workspace_execution_path(
+                r"\\wsl.localhost\Debian\home\demo\module",
+                settings,
+                settings.workspace,
+            )
+
     @mock.patch("odoo_manager_core.platform.platform.system", return_value="Windows")
     def test_background_commands_never_create_a_console_window(self, _system):
         self.assertEqual(hidden_process_kwargs()["creationflags"], 0x08000000)

@@ -135,6 +135,7 @@ type ProjectCreationPrerequisites = {
   ssh_key_present: boolean;
   ssh_keys: string[];
   ssh_keygen_available: boolean;
+  tool_environment?: string;
   gitlab_ssh_keys_url: string;
   supported_versions: string[];
 };
@@ -2539,7 +2540,10 @@ export default function Home() {
               ready={Boolean(creationPrerequisites?.git_available)}
               icon={GitBranch}
               title="Git"
-              detail={creationPrerequisites?.git_version || creationPrerequisites?.git_install_message || "Git doit être disponible sur la machine."}
+              detail={[
+                creationPrerequisites?.git_version || creationPrerequisites?.git_install_message || "Git doit être disponible sur la machine.",
+                creationPrerequisites?.tool_environment,
+              ].filter(Boolean).join(" · ")}
               action={
                 !creationPrerequisites?.git_available && creationPrerequisites?.git_install_supported ? (
                   <Button size="sm" variant="outline" onClick={requestGitInstall} disabled={loading || gitInstallRunning}>
@@ -2555,8 +2559,8 @@ export default function Home() {
               title="Clé SSH GitLab"
               detail={
                 creationPrerequisites?.ssh_key_present
-                  ? creationPrerequisites.ssh_keys.join(", ")
-                  : "Ajoute ta clé publique dans ton profil GitLab avant la première création."
+                  ? `${creationPrerequisites.ssh_keys.join(", ")}${creationPrerequisites.tool_environment ? ` · ${creationPrerequisites.tool_environment}` : ""}`
+                  : `Ajoute ta clé publique dans ton profil GitLab avant la première création.${creationPrerequisites?.tool_environment ? ` · ${creationPrerequisites.tool_environment}` : ""}`
               }
               action={
                 creationPrerequisites?.ssh_keygen_available || creationPrerequisites?.ssh_key_present ? (
