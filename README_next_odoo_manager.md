@@ -221,7 +221,7 @@ sh scripts/macos_allow_private_build.sh
 
 Ce script retire la quarantaine macOS et verifie la signature locale du bundle.
 
-La signature de distribution macOS et Windows est prise en charge par le
-workflow GitHub Actions dès que les certificats sont fournis comme secrets.
-La procédure complète, les noms des secrets et le contrôle bloquant des builds
-non signés sont documentés dans `docs/release-signing.md`.
+Une distribution publique sans alerte macOS necessitera un certificat Apple
+Developer ID, la signature Developer ID du sidecar et de l'app, puis la
+notarisation Apple du DMG. Les certificats ne doivent pas etre commités dans le
+depot ; ils devront etre injectes via les secrets GitHub Actions.
