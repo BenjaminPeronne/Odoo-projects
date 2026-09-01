@@ -14,6 +14,8 @@ import {
   FolderOpen,
   FolderPlus,
   GitBranch,
+  Heart,
+  Info,
   KeyRound,
   ListRestart,
   Loader2,
@@ -41,6 +43,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { cn } from "@/lib/utils";
+import packageMetadata from "../package.json";
 
 type Project = {
   name: string;
@@ -230,6 +233,7 @@ type ProjectDiagnostics = {
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_ODOO_MANAGER_API?.replace(/\/$/, "") || "";
+const FALLBACK_APP_VERSION = packageMetadata.version;
 const TAURI_API_RETRY_DELAYS_MS = [0, 250, 750, 1500, 2500];
 const BOOTSTRAP_RETRY_DELAYS_MS = [0, 500, 1000, 2000];
 const DOCKER_CONFIRM_DELAY_MS = 700;
@@ -336,6 +340,16 @@ function isTauriRuntime() {
 async function invokeDesktop<T>(command: string, args?: Record<string, unknown>) {
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<T>(command, args);
+}
+
+async function applicationVersion() {
+  if (!isTauriRuntime()) return FALLBACK_APP_VERSION;
+  try {
+    const { getVersion } = await import("@tauri-apps/api/app");
+    return await getVersion();
+  } catch {
+    return FALLBACK_APP_VERSION;
+  }
 }
 
 async function openExternalUrl(url?: string) {
@@ -536,6 +550,8 @@ export default function Home() {
   const [settings, setSettings] = useState<ManagerSettings | null>(null);
   const [settingsDraft, setSettingsDraft] = useState<ManagerSettings | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
+  const [appVersion, setAppVersion] = useState(FALLBACK_APP_VERSION);
   const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
   const [creationPrerequisites, setCreationPrerequisites] = useState<ProjectCreationPrerequisites | null>(null);
@@ -949,6 +965,7 @@ export default function Home() {
 
   useEffect(() => {
     setDesktopRuntime(isTauriRuntime());
+    void applicationVersion().then(setAppVersion);
     void initializeApplication();
     return () => {
       bootstrapGeneration.current += 1;
@@ -1790,6 +1807,14 @@ export default function Home() {
               >
                 <Settings className="h-4 w-4" />
                 Paramètres
+              </Button>
+              <Button
+                className="w-full"
+                variant="ghost"
+                onClick={() => setAboutOpen(true)}
+              >
+                <Info className="h-4 w-4" />
+                À propos
               </Button>
             </div>
           </div>
@@ -2772,6 +2797,33 @@ export default function Home() {
               Chargement des paramètres...
             </div>
           )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={aboutOpen} onOpenChange={setAboutOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>À propos d’Odoo Manager</DialogTitle>
+            <DialogDescription>
+              Gestionnaire local pour créer, administrer et maintenir des environnements Odoo.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4">
+            <div className="flex min-w-0 flex-col items-start justify-between gap-3 rounded-md border bg-muted/35 p-4 sm:flex-row sm:items-center">
+              <div className="min-w-0">
+                <div className="font-semibold">Odoo Manager</div>
+                <div className="mt-1 text-sm text-muted-foreground">Application desktop multi-plateforme</div>
+              </div>
+              <Badge className="shrink-0" variant="outline">Version {appVersion}</Badge>
+            </div>
+            <div className="rounded-md border p-4">
+              <div className="text-sm font-semibold">À propos du créateur</div>
+              <div className="mt-3 flex items-start gap-2 text-sm leading-relaxed text-muted-foreground">
+                <Heart className="mt-0.5 h-4 w-4 shrink-0 fill-current text-red-500" aria-hidden="true" />
+                <p>Fait avec amour par Aymerick Benjamin LAURETTA-PERONNE</p>
+              </div>
+            </div>
+          </div>
         </DialogContent>
       </Dialog>
 

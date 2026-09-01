@@ -54,6 +54,7 @@ Premiere tranche disponible :
 - mise a jour sans filestore complet et annulation locale securisee des operations de modules dont le code est absent ;
 - creation de base vide ou restauration directe d'une sauvegarde ZIP Odoo ;
 - historique des jobs ;
+- vue `A propos` avec la version de l'application et les informations du createur ;
 - actions principales projet ;
 - notification Docker et tentative de demarrage de Docker Desktop ;
 - parametres workspace, Docker et Traefik ; la coordination Windows/WSL 2 est automatique.
