@@ -1798,13 +1798,13 @@ export default function Home() {
                 />
               </div>
             </div>
-            <div className="min-h-0 max-h-[45vh] flex-1 overflow-auto p-2 sm:max-h-[50vh] lg:max-h-none">
+            <div className="min-h-0 max-h-[260px] flex-1 overflow-auto p-2 sm:max-h-[340px] lg:max-h-none">
               {filteredProjects.map((project) => (
                 <InteractiveCard
                   key={project.name}
                   className={cn(
                     "mb-1 w-full p-3",
-                    selectedProject?.name === project.name && "border-primary bg-primary/8 shadow-sm",
+                    selectedProject?.name === project.name && "border-primary bg-primary/[0.08] shadow-sm ring-1 ring-primary/25 dark:bg-primary/[0.14]",
                   )}
                   onClick={() => {
                     setSelectedProjectName(project.name);
@@ -1831,13 +1831,13 @@ export default function Home() {
                 </InteractiveCard>
               ))}
             </div>
-            <div className="grid gap-2 border-t p-3">
-              <Button className="w-full" variant="outline" onClick={openCreateProjectDialog}>
+            <div className="grid grid-cols-2 gap-2 border-t p-3 lg:grid-cols-1">
+              <Button className="col-span-2 w-full justify-start lg:col-span-1" onClick={openCreateProjectDialog}>
                 <FolderPlus className="h-4 w-4" />
                 Nouveau projet
               </Button>
               <Button
-                className="w-full"
+                className="w-full justify-start"
                 variant="ghost"
                 onClick={openSettingsDialog}
               >
@@ -1845,7 +1845,7 @@ export default function Home() {
                 Paramètres
               </Button>
               <Button
-                className="w-full"
+                className="w-full justify-start"
                 variant="ghost"
                 onClick={() => setAboutOpen(true)}
               >
@@ -1874,13 +1874,13 @@ export default function Home() {
                   {selectedProject?.url || "Sélectionne un projet."}
                 </p>
               </div>
-              <div className="flex w-full shrink-0 flex-wrap gap-2 xl:w-auto xl:max-w-[660px] xl:justify-end">
-                <Button className="w-full sm:w-auto" variant="outline" onClick={refreshAllViews}>
+              <div className="grid w-full shrink-0 grid-cols-2 gap-2 sm:grid-cols-4 xl:flex xl:w-auto xl:max-w-[660px] xl:flex-wrap xl:justify-end">
+                <Button className="w-full xl:w-auto" variant="outline" onClick={refreshAllViews}>
                   <RefreshCcw className="h-4 w-4" />
                   Actualiser
                 </Button>
                 <Button
-                  className="w-full sm:w-auto"
+                  className="w-full xl:w-auto"
                   disabled={!selectedProjectReady || loading || Boolean(selectedProjectLifecycleJob)}
                   onClick={requestStartProject}
                 >
@@ -1888,7 +1888,7 @@ export default function Home() {
                   {selectedProjectStarting ? "Démarrage…" : "Démarrer"}
                 </Button>
                 <Button
-                  className="w-full sm:w-auto"
+                  className="w-full xl:w-auto"
                   variant="outline"
                   disabled={!selectedProjectReady || !selectedProjectHasContainers || loading || Boolean(selectedProjectLifecycleJob)}
                   onClick={requestStopProject}
@@ -1898,7 +1898,7 @@ export default function Home() {
                 </Button>
                 {selectedProject && (
                   <Button
-                    className="w-full sm:w-auto"
+                    className="w-full xl:w-auto"
                     variant="outline"
                     disabled={
                       !selectedProjectReady ||
@@ -2054,21 +2054,21 @@ export default function Home() {
                 setActiveTab(value);
               }}
             >
-              <TabsList className="w-full justify-start overflow-x-auto lg:w-auto">
+              <TabsList className="grid w-full grid-cols-4 overflow-hidden lg:w-fit">
                 <TabsTrigger value="bases">
-                  <Database className="mr-2 h-4 w-4" />
+                  <Database className="mr-1.5 h-4 w-4" />
                   Bases
                 </TabsTrigger>
                 <TabsTrigger value="modules">
-                  <Boxes className="mr-2 h-4 w-4" />
+                  <Boxes className="mr-1.5 h-4 w-4" />
                   Modules
                 </TabsTrigger>
                 <TabsTrigger value="logs">
-                  <Logs className="mr-2 h-4 w-4" />
+                  <Logs className="mr-1.5 h-4 w-4" />
                   Logs
                 </TabsTrigger>
                 <TabsTrigger value="actions">
-                  <Settings className="mr-2 h-4 w-4" />
+                  <Settings className="mr-1.5 h-4 w-4" />
                   Actions
                 </TabsTrigger>
               </TabsList>
@@ -2088,7 +2088,7 @@ export default function Home() {
                               key={db}
                               className={cn(
                                 "min-w-0 p-4",
-                                selectedDb === db && "border-primary bg-primary/8",
+                                selectedDb === db && "border-primary bg-primary/[0.08] ring-1 ring-primary/25 dark:bg-primary/[0.14]",
                               )}
                               onClick={() => setSelectedDb(db)}
                             >
@@ -2321,7 +2321,7 @@ export default function Home() {
                                     )}
                                     <div className="min-w-0 text-xs">
                                       <span className="font-medium text-muted-foreground">Source</span>
-                                      <div className="break-all font-mono text-pink-700" title={sourcePath}>
+                                      <div className="break-all font-mono text-foreground/75 dark:text-foreground/80" title={sourcePath}>
                                         {displaySourcePath || "-"}
                                       </div>
                                     </div>
@@ -2393,43 +2393,47 @@ export default function Home() {
                       </Button>
                     </CardHeader>
                     <CardContent className="max-h-[min(62vh,680px)] min-w-0 space-y-3 overflow-y-auto">
-                      {jobs.map((job) => (
+                      {jobs.length ? jobs.map((job) => (
                         <div
                           key={job.id}
                           className={cn(
-                            "group min-w-0 rounded-md border p-3 transition-[background-color,border-color,box-shadow] hover:bg-muted hover:shadow-sm",
-                            !externalLogView && selectedJob?.id === job.id && "border-primary bg-primary/8",
+                            "group grid h-[172px] min-w-0 grid-rows-[minmax(0,1fr)_36px] gap-2 rounded-md border bg-card p-3 shadow-sm transition-[background-color,border-color,box-shadow] hover:border-primary/40 hover:shadow-md",
+                            !externalLogView && selectedJob?.id === job.id && "border-primary bg-primary/[0.08] ring-1 ring-primary/25 dark:bg-primary/[0.14]",
                           )}
                         >
-                          <Button
-                            variant="ghost"
-                            className="min-h-[92px] w-full min-w-0 justify-start whitespace-normal p-3 text-left"
+                          <button
+                            type="button"
+                            className="grid min-h-0 w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-3 rounded-md p-2 text-left transition-colors hover:bg-primary/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring dark:hover:bg-primary/[0.12]"
+                            aria-pressed={!externalLogView && selectedJob?.id === job.id}
+                            title={job.title}
                             onClick={() => selectJob(job.id)}
                           >
-                            <div className="flex items-start justify-between gap-2">
-                              <div className="min-w-0 flex-1">
-                                <div className="break-words text-base font-semibold leading-6">{job.title}</div>
-                                <div className="mt-2 text-sm text-muted-foreground">{job.started_at}</div>
-                              </div>
-                              <Badge className="shrink-0 px-2 py-1 text-xs" variant={statusVariant(job.status)}>{statusLabel(job.status)}</Badge>
-                            </div>
-                          </Button>
+                            <span className="flex h-full min-w-0 flex-col justify-between gap-2">
+                              <span className="line-clamp-3 break-words text-sm font-semibold leading-5">{job.title}</span>
+                              <span className="block text-xs tabular-nums text-muted-foreground">{job.started_at}</span>
+                            </span>
+                            <Badge className="min-w-[74px] shrink-0 justify-self-end" variant={statusVariant(job.status)}>
+                              {statusLabel(job.status)}
+                            </Badge>
+                          </button>
                           <Button
-                            className="relative z-10 mt-1 w-full shrink-0 border-red-200 text-red-700 hover:border-red-300 hover:bg-red-50 hover:text-red-800 active:bg-red-100 focus-visible:ring-red-500 dark:border-red-800 dark:text-red-300 dark:hover:border-red-700 dark:hover:bg-red-950/60 dark:hover:text-red-200 dark:active:bg-red-950"
+                            className="w-full border-red-300 text-red-700 hover:border-red-400 hover:bg-red-50 hover:text-red-800 active:bg-red-100 focus-visible:ring-red-500 dark:border-red-800 dark:text-red-300 dark:hover:border-red-700 dark:hover:bg-red-950/60 dark:hover:text-red-200 dark:active:bg-red-950"
                             variant="outline"
                             size="sm"
                             title={`Supprimer l'historique ${job.title}`}
                             aria-label={`Supprimer l'historique ${job.title}`}
-                            onClick={(event) => {
-                              event.preventDefault();
-                              event.stopPropagation();
-                              deleteJob(job.id);
-                            }}
+                            onClick={() => deleteJob(job.id)}
                           >
                             Supprimer
                           </Button>
                         </div>
-                      ))}
+                      )) : (
+                        <div className="rounded-md border border-dashed p-6 text-center">
+                          <Logs className="mx-auto h-6 w-6 text-muted-foreground" />
+                          <p className="mt-3 font-medium">Aucune action enregistrée</p>
+                          <p className="mt-1 text-sm text-muted-foreground">Les prochaines opérations apparaîtront ici avec leur statut.</p>
+                        </div>
+                      )}
                     </CardContent>
                   </Card>
                   <Card className="min-w-0">
@@ -2784,7 +2788,7 @@ export default function Home() {
                   <InteractiveCard
                     className={cn(
                       "flex min-h-24 items-center gap-3 p-3",
-                      settingsDraft.interface_icon === "manager" && "border-primary bg-primary/8 ring-1 ring-primary",
+                      settingsDraft.interface_icon === "manager" && "border-primary bg-primary/[0.08] ring-1 ring-primary/25 dark:bg-primary/[0.14]",
                     )}
                     role="radio"
                     aria-checked={settingsDraft.interface_icon === "manager"}
@@ -2800,7 +2804,7 @@ export default function Home() {
                   <InteractiveCard
                     className={cn(
                       "flex min-h-24 items-center gap-3 p-3",
-                      settingsDraft.interface_icon === "local" && "border-primary bg-primary/8 ring-1 ring-primary",
+                      settingsDraft.interface_icon === "local" && "border-primary bg-primary/[0.08] ring-1 ring-primary/25 dark:bg-primary/[0.14]",
                     )}
                     role="radio"
                     aria-checked={settingsDraft.interface_icon === "local"}

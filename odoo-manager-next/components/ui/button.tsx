@@ -7,9 +7,15 @@ type ButtonSize = "default" | "sm" | "icon";
 
 const buttonVariants = ({ variant = "default", size = "default", className }: { variant?: ButtonVariant | null; size?: ButtonSize | null; className?: string } = {}) =>
   cn(
-    "min-w-0 gap-2 text-center leading-snug [&_svg]:shrink-0",
+    "min-w-0 select-none justify-center gap-2 whitespace-nowrap text-center font-medium leading-none transition-[background-color,border-color,box-shadow,filter,transform] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:pointer-events-none disabled:!border-border disabled:!bg-muted disabled:!text-muted-foreground disabled:!shadow-none disabled:!filter-none disabled:opacity-60 [&_svg]:shrink-0",
+    variant === "default" && "shadow-sm hover:brightness-[0.97] active:brightness-[0.93]",
+    variant === "secondary" && "hover:bg-secondary/80 active:bg-secondary/70",
+    variant === "outline" && "hover:border-primary/45 hover:bg-primary/[0.06] active:bg-primary/[0.10] dark:hover:bg-primary/[0.12]",
+    variant === "ghost" && "hover:bg-muted active:bg-muted/80",
     variant === "destructive" && "app-destructive-button",
-    size === "icon" && "h-9 w-9 p-0",
+    size === "default" && "min-h-10 px-4",
+    size === "sm" && "min-h-9 px-3",
+    size === "icon" && "h-10 w-10 p-0",
     className,
   );
 

@@ -3,40 +3,40 @@
 @tailwind utilities;
 
 :root {
-  --background: 210 25% 97%;
-  --foreground: 222 30% 12%;
+  --background: 216 24% 96%;
+  --foreground: 222 32% 11%;
   --card: 0 0% 100%;
-  --card-foreground: 222 30% 12%;
-  --primary: 216 92% 52%;
+  --card-foreground: 222 32% 11%;
+  --primary: 213 91% 48%;
   --primary-foreground: 0 0% 100%;
-  --secondary: 214 25% 93%;
+  --secondary: 214 22% 91%;
   --secondary-foreground: 222 24% 18%;
-  --muted: 214 28% 94%;
-  --muted-foreground: 220 10% 42%;
-  --destructive: 354 72% 53%;
+  --muted: 214 22% 93%;
+  --muted-foreground: 220 12% 36%;
+  --destructive: 355 72% 49%;
   --destructive-foreground: 0 0% 100%;
-  --border: 214 22% 86%;
-  --input: 214 22% 86%;
-  --ring: 216 92% 52%;
+  --border: 216 18% 80%;
+  --input: 216 18% 76%;
+  --ring: 213 91% 48%;
   --radius: 8px;
 }
 
 .dark {
-  --background: 220 10% 8%;
-  --foreground: 210 16% 94%;
-  --card: 220 10% 11%;
-  --card-foreground: 210 16% 94%;
-  --primary: 214 92% 62%;
-  --primary-foreground: 220 16% 9%;
-  --secondary: 220 8% 18%;
-  --secondary-foreground: 210 14% 92%;
-  --muted: 220 8% 16%;
-  --muted-foreground: 216 10% 67%;
-  --destructive: 354 70% 57%;
+  --background: 220 11% 7%;
+  --foreground: 210 18% 96%;
+  --card: 220 10% 12%;
+  --card-foreground: 210 18% 96%;
+  --primary: 211 91% 62%;
+  --primary-foreground: 220 20% 8%;
+  --secondary: 220 9% 19%;
+  --secondary-foreground: 210 15% 94%;
+  --muted: 220 9% 17%;
+  --muted-foreground: 215 12% 70%;
+  --destructive: 355 74% 60%;
   --destructive-foreground: 0 0% 100%;
-  --border: 220 8% 25%;
-  --input: 220 8% 28%;
-  --ring: 214 92% 66%;
+  --border: 220 9% 28%;
+  --input: 220 9% 32%;
+  --ring: 211 91% 66%;
 }
 
 * {
@@ -47,6 +47,11 @@ body {
   background: hsl(var(--background));
   color: hsl(var(--foreground));
   transition: background-color 280ms ease, color 280ms ease;
+}
+
+::selection {
+  background: hsl(var(--primary) / 0.22);
+  color: hsl(var(--foreground));
 }
 
 html,

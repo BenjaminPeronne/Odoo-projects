@@ -3,7 +3,7 @@ import * as React from "react";
 import { cn } from "@/lib/utils";
 
 export function Card({ className, ...props }: React.ComponentPropsWithoutRef<typeof RadixCard>) {
-  return <RadixCard size="1" variant="surface" className={cn("min-w-0 overflow-hidden", className)} {...props} />;
+  return <RadixCard size="1" variant="surface" className={cn("min-w-0 overflow-hidden bg-card shadow-sm", className)} {...props} />;
 }
 
 export function InteractiveCard({ className, type = "button", ...props }: React.ButtonHTMLAttributes<HTMLButtonElement>) {
@@ -12,7 +12,7 @@ export function InteractiveCard({ className, type = "button", ...props }: React.
       <button
         type={type}
         className={cn(
-          "min-w-0 cursor-pointer text-left transition-[background-color,border-color,box-shadow,transform] duration-200 hover:-translate-y-px hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+          "min-w-0 cursor-pointer bg-card text-left transition-[background-color,border-color,box-shadow,transform] duration-150 hover:-translate-y-px hover:border-primary/45 hover:bg-primary/[0.04] hover:shadow-md active:translate-y-0 active:scale-[0.995] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background dark:hover:bg-primary/[0.10]",
           className,
         )}
         {...props}

@@ -8,10 +8,18 @@ export interface BadgeProps extends Omit<React.ComponentPropsWithoutRef<typeof R
   variant?: BadgeVariant;
 }
 
-export function Badge({ className, variant = "secondary", ...props }: BadgeProps) {
+export function Badge({ className, variant = "secondary", size = "2", ...props }: BadgeProps) {
   const color =
     variant === "success" ? "green" : variant === "warning" ? "amber" : variant === "destructive" ? "red" : variant === "default" ? "blue" : "gray";
   const radixVariant = variant === "outline" ? "outline" : variant === "default" || variant === "destructive" ? "solid" : "soft";
 
-  return <RadixBadge className={cn("font-semibold", className)} color={color} variant={radixVariant} {...props} />;
+  return (
+    <RadixBadge
+      className={cn("min-h-6 max-w-full items-center justify-center whitespace-nowrap px-2.5 text-xs font-semibold leading-none", className)}
+      color={color}
+      size={size}
+      variant={radixVariant}
+      {...props}
+    />
+  );
 }

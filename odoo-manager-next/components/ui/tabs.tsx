@@ -15,7 +15,16 @@ TabsList.displayName = "TabsList";
 export const TabsTrigger = React.forwardRef<
   React.ElementRef<typeof RadixTabs.Trigger>,
   React.ComponentPropsWithoutRef<typeof RadixTabs.Trigger>
->(({ className, ...props }, ref) => <RadixTabs.Trigger ref={ref} className={className} {...props} />);
+>(({ className, ...props }, ref) => (
+  <RadixTabs.Trigger
+    ref={ref}
+    className={cn(
+      "min-h-10 min-w-0 rounded-t-md px-2 font-medium text-muted-foreground transition-colors hover:bg-muted/75 hover:text-foreground data-[state=active]:bg-primary/[0.08] data-[state=active]:text-foreground sm:px-3 dark:data-[state=active]:bg-primary/[0.14]",
+      className,
+    )}
+    {...props}
+  />
+));
 TabsTrigger.displayName = "TabsTrigger";
 
 export const TabsContent = React.forwardRef<
