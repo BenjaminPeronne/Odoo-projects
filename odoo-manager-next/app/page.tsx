@@ -43,6 +43,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { cn } from "@/lib/utils";
+import appIcon from "./icon.png";
 import packageMetadata from "../package.json";
 
 type Project = {
@@ -1700,11 +1701,18 @@ export default function Home() {
     return (
       <main className="grid min-h-screen place-items-center bg-background px-6">
         <div className="w-full max-w-md rounded-lg border bg-card p-6 text-center shadow-sm">
-          {initializationError ? (
-            <AlertTriangle className="mx-auto h-8 w-8 text-amber-600" />
-          ) : (
-            <Loader2 className="mx-auto h-8 w-8 animate-spin text-primary" />
-          )}
+          <img
+            src={appIcon.src}
+            alt="Odoo Manager"
+            className="mx-auto h-16 w-16 rounded-[15px]"
+          />
+          <div className="mt-3 flex justify-center">
+            {initializationError ? (
+              <AlertTriangle className="h-6 w-6 text-amber-600" />
+            ) : (
+              <Loader2 className="h-6 w-6 animate-spin text-primary" />
+            )}
+          </div>
           <h1 className="mt-4 text-lg font-semibold">Chargement du gestionnaire</h1>
           <p className="mt-2 text-sm text-muted-foreground">
             {initializationMessage}
@@ -1741,7 +1749,15 @@ export default function Home() {
           <div className="flex h-full flex-col">
             <div className="border-b p-4">
               <div className="flex items-center justify-between gap-3">
-                <h1 className="min-w-0 truncate text-lg font-semibold">Gestionnaire Odoo</h1>
+                <div className="flex min-w-0 items-center gap-2.5">
+                  <img
+                    src={appIcon.src}
+                    alt=""
+                    aria-hidden="true"
+                    className="h-9 w-9 shrink-0 rounded-[9px]"
+                  />
+                  <h1 className="min-w-0 truncate text-lg font-semibold">Gestionnaire Odoo</h1>
+                </div>
                 <ThemeToggle />
               </div>
               <div className="mt-1 flex min-w-0 items-center gap-2">
@@ -2810,9 +2826,17 @@ export default function Home() {
           </DialogHeader>
           <div className="grid gap-4">
             <div className="flex min-w-0 flex-col items-start justify-between gap-3 rounded-md border bg-muted/35 p-4 sm:flex-row sm:items-center">
-              <div className="min-w-0">
-                <div className="font-semibold">Odoo Manager</div>
-                <div className="mt-1 text-sm text-muted-foreground">Application desktop multi-plateforme</div>
+              <div className="flex min-w-0 items-center gap-3">
+                <img
+                  src={appIcon.src}
+                  alt=""
+                  aria-hidden="true"
+                  className="h-14 w-14 shrink-0 rounded-[13px]"
+                />
+                <div className="min-w-0">
+                  <div className="font-semibold">Odoo Manager</div>
+                  <div className="mt-1 text-sm text-muted-foreground">Application desktop multi-plateforme</div>
+                </div>
               </div>
               <Badge className="shrink-0" variant="outline">Version {appVersion}</Badge>
             </div>
