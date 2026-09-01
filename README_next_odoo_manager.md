@@ -52,7 +52,7 @@ Premiere tranche disponible :
 - selection multiple de modules ;
 - import ZIP avec copie dans `PROJET/odoo/addons-store/` et lien relatif dans `PROJET/odoo/addons/` ;
 - mise a jour sans filestore complet et annulation locale securisee des operations de modules dont le code est absent ;
-- creation de base ;
+- creation de base vide ou restauration directe d'une sauvegarde ZIP Odoo ;
 - historique des jobs ;
 - actions principales projet ;
 - notification Docker et tentative de demarrage de Docker Desktop ;
@@ -76,6 +76,20 @@ operation, afin qu'un clone interrompu ne laisse pas de projet partiel.
 
 Le parcours `brainkeys riplika` reste disponible uniquement dans le client CLI
 historique pour les environnements Rika non couverts par l'interface graphique.
+
+### Restaurer une sauvegarde Odoo
+
+Dans l'onglet `Bases`, le bouton `Restaurer une sauvegarde ZIP` remplace le
+passage manuel par `/web/database/selector`. Le gestionnaire demande le ZIP et
+le nom de la nouvelle base, utilise `odoo` comme master password par defaut,
+demarre le projet puis transmet la sauvegarde au controleur officiel Odoo
+`/web/database/restore`.
+
+Le televersement est ecrit progressivement sur disque et transmis a Odoo en
+flux afin de ne pas charger une sauvegarde volumineuse en memoire. La base est
+declaree comme une copie et la neutralisation est activee par defaut pour les
+tests locaux. Le fichier temporaire est supprime a la fin du job, y compris en
+cas d'erreur.
 
 ### Modules absents sur une copie locale
 

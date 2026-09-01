@@ -27,6 +27,7 @@ import {
   Square,
   Terminal,
   Trash2,
+  Upload,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
@@ -147,6 +148,15 @@ type Job = {
   finished_at?: string | null;
   lines: string[];
   output?: string;
+};
+
+type RestoreDatabasePayload = {
+  project: string;
+  db: string;
+  masterPwd: string;
+  copy: boolean;
+  neutralize: boolean;
+  file: File;
 };
 
 type ModuleInfo = {
@@ -273,6 +283,48 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return payload as T;
 }
 
+function uploadDatabaseBackup(
+  payload: RestoreDatabasePayload,
+  onProgress: (progress: number) => void,
+): Promise<{ job: Job }> {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open(
+      "POST",
+      `${API_BASE}/api/projects/${encodeURIComponent(payload.project)}/database-restore`,
+    );
+    request.setRequestHeader("Content-Type", "application/zip");
+    request.setRequestHeader("X-Odoo-Database-Name", encodeURIComponent(payload.db));
+    request.setRequestHeader("X-Odoo-Master-Password", encodeURIComponent(payload.masterPwd));
+    request.setRequestHeader("X-Odoo-Copy", payload.copy ? "1" : "0");
+    request.setRequestHeader("X-Odoo-Neutralize", payload.neutralize ? "1" : "0");
+    request.setRequestHeader("X-File-Name", encodeURIComponent(payload.file.name));
+    request.upload.onprogress = (event) => {
+      if (event.lengthComputable && event.total > 0) {
+        onProgress(Math.min(100, Math.round((event.loaded * 100) / event.total)));
+      }
+    };
+    request.onerror = () => reject(new ApiUnavailableError("Le téléversement de la sauvegarde a échoué."));
+    request.onabort = () => reject(new Error("Le téléversement de la sauvegarde a été annulé."));
+    request.onload = () => {
+      let response: { job?: Job; error?: string } = {};
+      try {
+        response = request.responseText ? JSON.parse(request.responseText) : {};
+      } catch {
+        reject(new Error("Le backend a renvoyé une réponse de restauration illisible."));
+        return;
+      }
+      if (request.status < 200 || request.status >= 300 || !response.job) {
+        reject(new Error(response.error || `La restauration a été refusée (HTTP ${request.status}).`));
+        return;
+      }
+      onProgress(100);
+      resolve({ job: response.job });
+    };
+    request.send(payload.file);
+  });
+}
+
 function delay(milliseconds: number) {
   return new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds));
 }
@@ -310,6 +362,32 @@ async function pickDirectory(defaultPath?: string) {
     title: "Choisir le dossier des projets Odoo",
   });
   return typeof selected === "string" ? selected : null;
+}
+
+async function requestTaskNotificationPermission() {
+  if (isTauriRuntime()) {
+    const { isPermissionGranted, requestPermission } = await import("@tauri-apps/plugin-notification");
+    if (await isPermissionGranted()) return true;
+    return (await requestPermission()) === "granted";
+  }
+  if (typeof window === "undefined" || !("Notification" in window)) return false;
+  if (window.Notification.permission === "granted") return true;
+  if (window.Notification.permission === "denied") return false;
+  return (await window.Notification.requestPermission()) === "granted";
+}
+
+async function sendTaskNotification(job: Job) {
+  const successful = job.status === "done";
+  const title = successful ? "Tâche terminée" : "Tâche en erreur";
+  const body = job.title;
+  if (isTauriRuntime()) {
+    const { isPermissionGranted, sendNotification } = await import("@tauri-apps/plugin-notification");
+    if (await isPermissionGranted()) sendNotification({ title, body });
+    return;
+  }
+  if (typeof window !== "undefined" && "Notification" in window && window.Notification.permission === "granted") {
+    new window.Notification(title, { body });
+  }
 }
 
 function offlineDockerGuide(): InstallGuide {
@@ -392,6 +470,13 @@ function statusVariant(status: string): "success" | "warning" | "outline" | "des
   if (status === "error") return "destructive";
   if (status === "exited" || status === "created") return "warning";
   return "secondary";
+}
+
+function statusLabel(status: string) {
+  if (status === "running") return "En cours";
+  if (status === "done") return "Terminée";
+  if (status === "error") return "Erreur";
+  return status;
 }
 
 function statusDot(status: string) {
@@ -485,6 +570,7 @@ export default function Home() {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [zipDialogOpen, setZipDialogOpen] = useState(false);
   const [createDbOpen, setCreateDbOpen] = useState(false);
+  const [restoreDbOpen, setRestoreDbOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [updateAllDialogOpen, setUpdateAllDialogOpen] = useState(false);
   const [updateFilestoreStatus, setUpdateFilestoreStatus] = useState<FilestoreStatus | null>(null);
@@ -516,6 +602,8 @@ export default function Home() {
   const overviewRefreshInFlight = useRef(false);
   const systemRefreshInFlight = useRef(false);
   const jobsRefreshInFlight = useRef(false);
+  const jobStatuses = useRef<Map<number, string>>(new Map());
+  const jobNotificationsInitialized = useRef(false);
   const modulesRequestGeneration = useRef(0);
   const zipInspectionGeneration = useRef(0);
   const scheduledTimeouts = useRef<Set<number>>(new Set());
@@ -597,6 +685,29 @@ export default function Home() {
     schedule(() => setToasts((current) => current.filter((toast) => toast.id !== id)), 4200);
   }, [schedule]);
 
+  const notifyJobCompletion = useCallback((job: Job) => {
+    const successful = job.status === "done";
+    pushToast(successful ? "success" : "error", `${successful ? "Tâche terminée" : "Tâche en erreur"} : ${job.title}`);
+    void sendTaskNotification(job).catch(() => {
+      // A refused system permission must not affect job polling.
+    });
+  }, [pushToast]);
+
+  const applyJobs = useCallback((nextJobs: Job[], notify = true) => {
+    const previousStatuses = jobStatuses.current;
+    if (notify && jobNotificationsInitialized.current) {
+      for (const job of nextJobs) {
+        const previousStatus = previousStatuses.get(job.id);
+        if (previousStatus === "running" && (job.status === "done" || job.status === "error")) {
+          notifyJobCompletion(job);
+        }
+      }
+    }
+    jobStatuses.current = new Map(nextJobs.map((job) => [job.id, job.status]));
+    jobNotificationsInitialized.current = true;
+    setJobs(nextJobs);
+  }, [notifyJobCompletion]);
+
   const markApiSuccess = useCallback(() => {
     consecutiveApiFailures.current = 0;
     setApiUnavailable(false);
@@ -614,7 +725,7 @@ export default function Home() {
     setSystemStatus(payload.system_status);
     setSettings(payload.settings);
     setSettingsDraft(payload.settings);
-    setJobs(payload.jobs);
+    applyJobs(payload.jobs, false);
     setSelectedProjectName((currentName) => {
       const project = payload.overview.projects.find((item) => item.name === currentName) || payload.overview.projects[0];
       setSelectedDb((currentDb) => currentDb !== "postgres" && project?.databases?.includes(currentDb) ? currentDb : firstOdooDatabase(project));
@@ -625,7 +736,7 @@ export default function Home() {
     pendingDockerState.current = null;
     markApiSuccess();
     setError("");
-  }, [markApiSuccess]);
+  }, [applyJobs, markApiSuccess]);
 
   const commitSystemStatus = useCallback((payload: SystemStatus, immediate = false) => {
     markApiSuccess();
@@ -797,7 +908,7 @@ export default function Home() {
     jobsRefreshInFlight.current = true;
     try {
       const payload = await api<{ jobs: Job[] }>("/api/jobs");
-      setJobs(payload.jobs);
+      applyJobs(payload.jobs);
       markApiSuccess();
       if (!selectedJobId && payload.jobs[0]) setSelectedJobId(payload.jobs[0].id);
     } catch (err) {
@@ -806,7 +917,7 @@ export default function Home() {
     } finally {
       jobsRefreshInFlight.current = false;
     }
-  }, [markApiFailure, markApiSuccess, selectedJobId]);
+  }, [applyJobs, markApiFailure, markApiSuccess, selectedJobId]);
 
   const refreshModules = useCallback(async () => {
     const projectName = selectedProject?.name;
@@ -895,12 +1006,16 @@ export default function Home() {
 
   async function createJob(action: string, payload: Record<string, unknown> = {}) {
     setLoading(true);
+    void requestTaskNotificationPermission().catch(() => {
+      // The in-app completion toast remains available if system notifications are refused.
+    });
     try {
       const result = await api<{ job: Job }>("/api/jobs", {
         method: "POST",
         body: JSON.stringify({ action, ...payload }),
       });
       setSelectedJobId(result.job.id);
+      jobStatuses.current.set(result.job.id, result.job.status);
       setExternalLogView(null);
       enableLogAutoFollow();
       pushToast("success", `Action lancée : ${result.job.title}`);
@@ -918,7 +1033,7 @@ export default function Home() {
     const deadline = Date.now() + timeoutMilliseconds;
     while (Date.now() < deadline) {
       const payload = await api<{ jobs: Job[] }>("/api/jobs");
-      setJobs(payload.jobs);
+      applyJobs(payload.jobs);
       const current = payload.jobs.find((job) => job.id === jobId);
       if (!current) throw new Error("L'action de démarrage est introuvable dans l'historique.");
       if (current.status === "done") return current;
@@ -1367,6 +1482,33 @@ export default function Home() {
       await refreshJobs();
     } catch (err) {
       pushToast("error", err instanceof Error ? err.message : "Import ZIP impossible.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function restoreDatabaseBackup(
+    payload: RestoreDatabasePayload,
+    onProgress: (progress: number) => void,
+  ) {
+    setLoading(true);
+    void requestTaskNotificationPermission().catch(() => {
+      // The in-app completion toast remains available if system notifications are refused.
+    });
+    try {
+      const result = await uploadDatabaseBackup(payload, onProgress);
+      setSelectedJobId(result.job.id);
+      jobStatuses.current.set(result.job.id, result.job.status);
+      setExternalLogView(null);
+      enableLogAutoFollow();
+      setRestoreDbOpen(false);
+      pushToast("success", `Restauration lancée : ${payload.db}`);
+      await refreshJobs();
+      schedule(refreshOverview, 2500);
+      return true;
+    } catch (err) {
+      pushToast("error", err instanceof Error ? err.message : "Restauration impossible.");
+      return false;
     } finally {
       setLoading(false);
     }
@@ -1919,8 +2061,17 @@ export default function Home() {
                           <PlusCircle className="h-4 w-4" />
                           Créer une base Odoo
                         </Button>
+                        <Button
+                          className="w-full"
+                          variant="outline"
+                          disabled={!selectedProjectReady}
+                          onClick={() => setRestoreDbOpen(true)}
+                        >
+                          <Upload className="h-4 w-4" />
+                          Restaurer une sauvegarde ZIP
+                        </Button>
                         {selectedProject && (
-                          <Button className="w-full" variant="outline" onClick={() => openUrl(selectedProject.database_manager_url)}>
+                          <Button className="w-full" variant="ghost" onClick={() => openUrl(selectedProject.database_manager_url)}>
                             <ExternalLink className="h-4 w-4" />
                             Gestionnaire de bases Odoo
                           </Button>
@@ -2166,7 +2317,7 @@ export default function Home() {
               </TabsContent>
 
               <TabsContent value="logs">
-                <div className="grid min-w-0 gap-4 min-[1500px]:grid-cols-[minmax(300px,360px)_minmax(0,1fr)]">
+                <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(340px,400px)_minmax(0,1fr)]">
                   <Card className="min-w-0">
                     <CardHeader className="gap-3 sm:flex-row sm:items-center sm:justify-between">
                       <div className="min-w-0">
@@ -2178,26 +2329,26 @@ export default function Home() {
                         Effacer
                       </Button>
                     </CardHeader>
-                    <CardContent className="max-h-[min(58vh,620px)] min-w-0 space-y-2 overflow-y-auto">
+                    <CardContent className="max-h-[min(62vh,680px)] min-w-0 space-y-3 overflow-y-auto">
                       {jobs.map((job) => (
                         <div
                           key={job.id}
                           className={cn(
-                            "group min-w-0 rounded-md border p-2 transition-colors hover:bg-muted",
+                            "group min-w-0 rounded-md border p-3 transition-[background-color,border-color,box-shadow] hover:bg-muted hover:shadow-sm",
                             !externalLogView && selectedJob?.id === job.id && "border-primary bg-primary/8",
                           )}
                         >
                           <Button
                             variant="ghost"
-                            className="h-auto w-full min-w-0 justify-start whitespace-normal p-2 text-left"
+                            className="min-h-[92px] w-full min-w-0 justify-start whitespace-normal p-3 text-left"
                             onClick={() => selectJob(job.id)}
                           >
                             <div className="flex items-start justify-between gap-2">
                               <div className="min-w-0 flex-1">
-                                <div className="break-words font-medium leading-snug">{job.title}</div>
-                                <div className="mt-1 text-xs text-muted-foreground">{job.started_at}</div>
+                                <div className="break-words text-base font-semibold leading-6">{job.title}</div>
+                                <div className="mt-2 text-sm text-muted-foreground">{job.started_at}</div>
                               </div>
-                              <Badge className="shrink-0" variant={statusVariant(job.status)}>{job.status}</Badge>
+                              <Badge className="shrink-0 px-2 py-1 text-xs" variant={statusVariant(job.status)}>{statusLabel(job.status)}</Badge>
                             </div>
                           </Button>
                           <Button
@@ -2717,6 +2868,13 @@ export default function Home() {
         }}
       />
 
+      <RestoreDatabaseDialog
+        open={restoreDbOpen}
+        onOpenChange={setRestoreDbOpen}
+        project={selectedProject}
+        onSubmit={restoreDatabaseBackup}
+      />
+
       <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
         <DialogContent>
           <DialogHeader>
@@ -3230,6 +3388,158 @@ function CreateDatabaseDialog({
           <Database className="h-4 w-4" />
           Créer la base
         </Button>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function RestoreDatabaseDialog({
+  open,
+  onOpenChange,
+  project,
+  onSubmit,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  project?: Project;
+  onSubmit: (
+    payload: RestoreDatabasePayload,
+    onProgress: (progress: number) => void,
+  ) => Promise<boolean>;
+}) {
+  const [db, setDb] = useState("");
+  const [masterPwd, setMasterPwd] = useState("odoo");
+  const [neutralize, setNeutralize] = useState(true);
+  const [file, setFile] = useState<File | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [progress, setProgress] = useState(0);
+
+  useEffect(() => {
+    setDb("");
+    setFile(null);
+    setProgress(0);
+  }, [project?.name]);
+
+  async function submit() {
+    if (!project || !file || !db.trim() || !masterPwd) return;
+    setSubmitting(true);
+    setProgress(0);
+    const successful = await onSubmit(
+      {
+        project: project.name,
+        db: db.trim(),
+        masterPwd,
+        copy: true,
+        neutralize,
+        file,
+      },
+      setProgress,
+    );
+    if (successful) {
+      setDb("");
+      setFile(null);
+      setProgress(0);
+    }
+    setSubmitting(false);
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={(nextOpen) => !submitting && onOpenChange(nextOpen)}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Restaurer une sauvegarde Odoo</DialogTitle>
+          <DialogDescription>
+            {project
+              ? `Le ZIP sera restauré dans le projet ${project.name} sans ouvrir le gestionnaire de bases Odoo.`
+              : "Sélectionne un projet."}
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="grid gap-4">
+          <label className="grid min-w-0 gap-1.5 text-sm font-medium">
+            Sauvegarde ZIP Odoo
+            <Input
+              type="file"
+              accept=".zip,application/zip"
+              disabled={submitting}
+              onChange={(event) => setFile(event.target.files?.[0] || null)}
+            />
+            {file && (
+              <span className="break-all text-xs font-normal text-muted-foreground">
+                {file.name} · {(file.size / (1024 * 1024)).toLocaleString("fr-FR", { maximumFractionDigits: 1 })} Mo
+              </span>
+            )}
+          </label>
+
+          <div className="grid gap-3 md:grid-cols-2">
+            <label className="grid gap-1.5 text-sm font-medium">
+              Nom de la nouvelle base
+              <Input
+                value={db}
+                disabled={submitting}
+                onChange={(event) => setDb(event.target.value)}
+                placeholder="client_recette"
+              />
+            </label>
+            <label className="grid gap-1.5 text-sm font-medium">
+              Master password
+              <Input
+                value={masterPwd}
+                disabled={submitting}
+                onChange={(event) => setMasterPwd(event.target.value)}
+                type="password"
+              />
+            </label>
+          </div>
+
+          <label className="flex items-start gap-3 rounded-md border bg-muted/35 p-3 text-sm">
+            <Checkbox
+              className="mt-0.5"
+              checked={neutralize}
+              disabled={submitting}
+              onCheckedChange={(checked) => setNeutralize(checked === true)}
+            />
+            <span>
+              <span className="block font-medium">Neutraliser la base pour les tests</span>
+              <span className="mt-0.5 block text-xs text-muted-foreground">
+                Recommandé en local : désactive notamment les envois d’e-mails et les actions externes. La restauration est toujours déclarée comme une copie.
+              </span>
+            </span>
+          </label>
+
+          {submitting && (
+            <div className="grid gap-2" aria-live="polite">
+              <div className="flex items-center justify-between gap-3 text-sm">
+                <span className="font-medium">Téléversement vers le gestionnaire</span>
+                <span className="tabular-nums text-muted-foreground">{progress} %</span>
+              </div>
+              <div
+                className="h-2 overflow-hidden rounded-full bg-muted"
+                role="progressbar"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={progress}
+              >
+                <div
+                  className="h-full rounded-full bg-primary transition-[width] duration-200 ease-out"
+                  style={{ width: `${progress}%` }}
+                />
+              </div>
+              {progress === 100 && (
+                <p className="text-xs text-muted-foreground">Validation du ZIP et démarrage de la restauration…</p>
+              )}
+            </div>
+          )}
+
+          <Button
+            className="w-full"
+            disabled={!project || !file || !db.trim() || !masterPwd || submitting}
+            onClick={submit}
+          >
+            {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+            {submitting ? "Préparation de la restauration…" : "Restaurer la base"}
+          </Button>
+        </div>
       </DialogContent>
     </Dialog>
   );

@@ -100,6 +100,13 @@ Pour creer une base, selectionnez un projet puis cliquez sur `Creer base`.
 Le gestionnaire demarre le projet si necessaire, appelle Odoo, puis recharge la
 liste des bases. Le master password local habituel est `odoo`.
 
+Pour restaurer une sauvegarde, utilisez `Restaurer une sauvegarde ZIP` dans le
+meme onglet. Selectionnez le ZIP Odoo et saisissez le nom de la nouvelle base.
+Le gestionnaire reproduit le traitement officiel de `/web/database/restore`,
+affiche la progression du televersement et conserve les logs dans l'historique.
+La base est consideree comme une copie et peut etre neutralisee pour eviter les
+envois d'e-mails et autres actions externes pendant les tests locaux.
+
 L'onglet `Bases` separe les bases Odoo de leur serveur PostgreSQL. La base
 technique `postgres` n'est jamais proposee pour les actions Odoo. Le bouton
 `Ouvrir psql` lance, uniquement a la demande, une console connectee a la base

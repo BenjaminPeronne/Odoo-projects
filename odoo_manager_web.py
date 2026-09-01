@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import errno
 import html
+import http.client
 import json
 import os
 import queue
@@ -80,6 +81,8 @@ MAX_RETAINED_JOBS = 60
 MAX_RUNNING_JOBS = 4
 MAX_ZIP_ENTRIES = 100_000
 MAX_ZIP_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
+MAX_DATABASE_BACKUP_BYTES = int(os.environ.get("ODOO_MANAGER_MAX_BACKUP_BYTES", 100 * 1024 * 1024 * 1024))
+MAX_DATABASE_BACKUP_ENTRIES = 2_000_000
 
 JOBS = {}
 JOBS_LOCK = threading.Lock()
@@ -107,6 +110,10 @@ def project_imports_root(project):
 
 def project_staging_imports_root(project):
     return WORKSPACE / ".odoo_manager_imports" / project
+
+
+def database_restore_staging_root(project):
+    return WORKSPACE / ".odoo_manager_imports" / "database-restores" / project
 
 
 def module_import_roots(project):
@@ -1741,6 +1748,184 @@ def post_form_no_redirect(url, data, timeout=240):
         raise RuntimeError(f"Odoo a retourne HTTP {exc.code}: {content[:600]}")
 
 
+def validate_odoo_backup_archive(backup_path):
+    backup_path = Path(backup_path)
+    if not zipfile.is_zipfile(backup_path):
+        raise ValueError("La sauvegarde n'est pas une archive ZIP Odoo valide.")
+
+    try:
+        with zipfile.ZipFile(backup_path) as archive:
+            entries = archive.infolist()
+            if len(entries) > MAX_DATABASE_BACKUP_ENTRIES:
+                raise ValueError("La sauvegarde contient trop de fichiers.")
+            names = {entry.filename.replace("\\", "/") for entry in entries}
+            if "dump.sql" not in names:
+                raise ValueError("Archive Odoo invalide: le fichier dump.sql est absent.")
+            for entry in entries:
+                normalized = entry.filename.replace("\\", "/")
+                if normalized != "dump.sql" and not normalized.startswith("filestore/"):
+                    continue
+                parts = [part for part in normalized.split("/") if part]
+                if normalized.startswith("/") or ".." in parts:
+                    raise ValueError("Archive Odoo invalide: chemin de fichier dangereux.")
+                if entry.flag_bits & 0x1:
+                    raise ValueError("Les sauvegardes ZIP chiffrées ne sont pas prises en charge.")
+            return {
+                "entries": len(entries),
+                "has_filestore": any(name.startswith("filestore/") for name in names),
+                "has_manifest": "manifest.json" in names,
+            }
+    except zipfile.BadZipFile as exc:
+        raise ValueError("La sauvegarde ZIP est illisible ou endommagée.") from exc
+
+
+def save_request_body_to_file(stream, content_length, destination, chunk_size=1024 * 1024):
+    destination = Path(destination)
+    remaining = int(content_length)
+    with destination.open("wb") as output:
+        while remaining:
+            chunk = stream.read(min(chunk_size, remaining))
+            if not chunk:
+                raise ValueError("Le téléversement de la sauvegarde a été interrompu.")
+            output.write(chunk)
+            remaining -= len(chunk)
+    return destination
+
+
+def multipart_field(boundary, name, value):
+    return (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+        f"{value}\r\n"
+    ).encode("utf-8")
+
+
+def post_odoo_database_restore(job, url, backup_path, filename, db_name, master_pwd, copy, neutralize):
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise RuntimeError("URL Odoo invalide pour la restauration.")
+
+    boundary = f"----OdooManager{os.getpid()}{time.time_ns()}"
+    fields = [
+        ("master_pwd", master_pwd),
+        ("name", db_name),
+        ("copy", "true" if copy else "false"),
+    ]
+    if neutralize:
+        fields.append(("neutralize_database", "on"))
+    prefix = b"".join(multipart_field(boundary, name, value) for name, value in fields)
+    safe_filename = SAFE_IMPORT_NAME_RE.sub("_", Path(filename).name) or "backup.zip"
+    prefix += (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="backup_file"; filename="{safe_filename}"\r\n'
+        "Content-Type: application/zip\r\n\r\n"
+    ).encode("utf-8")
+    suffix = f"\r\n--{boundary}--\r\n".encode("utf-8")
+    backup_size = Path(backup_path).stat().st_size
+    content_length = len(prefix) + backup_size + len(suffix)
+    target = parsed.path or "/"
+    if parsed.query:
+        target += "?" + parsed.query
+
+    connection_type = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+    connection = connection_type(parsed.hostname, parsed.port, timeout=2 * 60 * 60)
+    sent = 0
+    next_progress = 10
+    try:
+        connection.putrequest("POST", target)
+        connection.putheader("Content-Type", f"multipart/form-data; boundary={boundary}")
+        connection.putheader("Content-Length", str(content_length))
+        connection.putheader("Connection", "close")
+        connection.endheaders()
+        connection.send(prefix)
+        with Path(backup_path).open("rb") as source:
+            while True:
+                chunk = source.read(1024 * 1024)
+                if not chunk:
+                    break
+                connection.send(chunk)
+                sent += len(chunk)
+                progress = int((sent * 100) / backup_size) if backup_size else 100
+                if progress >= next_progress:
+                    job.add(f"Envoi de la sauvegarde vers Odoo... {min(progress, 100)} %")
+                    next_progress = ((progress // 10) + 1) * 10
+        connection.send(suffix)
+        response = connection.getresponse()
+        content = response.read(1024 * 1024).decode("utf-8", errors="replace")
+        return response.status, content
+    except (OSError, http.client.HTTPException) as exc:
+        raise RuntimeError(f"La restauration n'a pas pu être transmise à Odoo: {exc}") from exc
+    finally:
+        connection.close()
+
+
+def odoo_restore_error(content):
+    if "Database restore error:" not in content:
+        return ""
+    plain = html.unescape(re.sub(r"<[^>]+>", " ", content))
+    plain = re.sub(r"\s+", " ", plain).strip()
+    marker = "Database restore error:"
+    return plain[plain.find(marker):plain.find(marker) + 800]
+
+
+def restore_database_job(job, project, backup_path, filename, db_name, master_pwd, copy=True, neutralize=True):
+    project = validate_project(project)
+    db_name = validate_new_db(db_name)
+    master_pwd = validate_required_text(master_pwd, "Master password")
+    backup_path = Path(backup_path)
+    try:
+        details = validate_odoo_backup_archive(backup_path)
+        size_mb = backup_path.stat().st_size / (1024 * 1024)
+        job.add(f"Restauration de {db_name} dans {project}")
+        job.add(f"Sauvegarde: {filename} ({size_mb:.1f} Mo)")
+        job.add("Filestore inclus: " + ("oui" if details["has_filestore"] else "non"))
+        job.add("Base déclarée comme copie: " + ("oui" if copy else "non"))
+        job.add("Neutralisation: " + ("activée" if neutralize else "désactivée"))
+        job.add("Démarrage du projet avant restauration...")
+        project_service().start_project(project, log=job.add)
+
+        if db_name in set(list_databases_for(project)):
+            raise RuntimeError(f"La base existe déjà: {db_name}")
+
+        url = urllib.parse.urljoin(project_url(project), "web/database/restore")
+        job.add(f"Restauration via Odoo: {url}")
+        status, content = post_odoo_database_restore(
+            job,
+            url,
+            backup_path,
+            filename,
+            db_name,
+            master_pwd,
+            bool(copy),
+            bool(neutralize),
+        )
+        job.add(f"Réponse Odoo: HTTP {status}")
+        restore_error = odoo_restore_error(content)
+        if restore_error:
+            raise RuntimeError(restore_error)
+        if status not in {200, 201, 202, 301, 302, 303}:
+            raise RuntimeError(f"Odoo a refusé la restauration avec le statut HTTP {status}.")
+
+        for waited in range(0, 122, 2):
+            if db_name in set(list_databases_for(project)):
+                job.add(f"Base restaurée: {db_name}")
+                clear_project_module_cache(project)
+                return
+            job.add(f"Attente apparition base... {waited}s/120s")
+            time.sleep(2)
+        raise RuntimeError("Odoo a accepté la sauvegarde, mais la base n'apparaît pas dans PostgreSQL.")
+    finally:
+        try:
+            backup_path.unlink(missing_ok=True)
+            job.add("Fichier temporaire de restauration supprimé.")
+        finally:
+            parent = backup_path.parent
+            try:
+                parent.rmdir()
+            except OSError:
+                pass
+
+
 def create_database_job(job, project, db_name, master_pwd, login, password, lang, country, demo):
     project = validate_project(project)
     db_name = validate_new_db(db_name)
@@ -2462,7 +2647,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(204)
         add_cors_headers(self)
         self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            "Content-Type, X-Odoo-Database-Name, X-Odoo-Master-Password, "
+            "X-Odoo-Copy, X-Odoo-Neutralize, X-File-Name",
+        )
         self.send_header("Access-Control-Max-Age", "600")
         self.end_headers()
 
@@ -2580,6 +2769,68 @@ class Handler(BaseHTTPRequestHandler):
                 payload = self.read_json()
                 return json_response(self, open_postgresql_console(project, payload.get("db", "")))
             except (ValueError, RuntimeError, OSError) as exc:
+                return json_response(self, {"error": str(exc)}, status=400)
+
+        restore_match = re.match(r"^/api/projects/([^/]+)/database-restore$", parsed.path)
+        if restore_match:
+            destination = None
+            try:
+                project = validate_project(urllib.parse.unquote(restore_match.group(1)))
+                content_length = int(self.headers.get("Content-Length", "0"))
+                if content_length <= 0:
+                    raise ValueError("Fichier de sauvegarde ZIP manquant.")
+                if content_length > MAX_DATABASE_BACKUP_BYTES:
+                    max_gb = MAX_DATABASE_BACKUP_BYTES / (1024 * 1024 * 1024)
+                    raise ValueError(f"Sauvegarde trop volumineuse. Limite configurée: {max_gb:.0f} Go.")
+                if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() not in {
+                    "application/zip",
+                    "application/octet-stream",
+                }:
+                    raise ValueError("Format de téléversement invalide. Sélectionne une sauvegarde ZIP Odoo.")
+
+                db_name = validate_new_db(urllib.parse.unquote(self.headers.get("X-Odoo-Database-Name", "")))
+                master_pwd = validate_required_text(
+                    urllib.parse.unquote(self.headers.get("X-Odoo-Master-Password", "odoo")),
+                    "Master password",
+                )
+                copy_database = truthy(self.headers.get("X-Odoo-Copy", "1"))
+                neutralize = truthy(self.headers.get("X-Odoo-Neutralize", "1"))
+                filename = urllib.parse.unquote(self.headers.get("X-File-Name", "backup.zip"))
+                filename = SAFE_IMPORT_NAME_RE.sub("_", Path(filename).name) or "backup.zip"
+                if not filename.lower().endswith(".zip"):
+                    raise ValueError("La sauvegarde doit être un fichier ZIP.")
+
+                staging_root = database_restore_staging_root(project)
+                staging_root.mkdir(parents=True, exist_ok=True)
+                free_space = shutil.disk_usage(staging_root).free
+                if free_space < content_length + 512 * 1024 * 1024:
+                    raise ValueError("Espace disque insuffisant pour préparer la restauration.")
+                destination = staging_root / f"{time.strftime('%Y%m%d_%H%M%S')}_{time.time_ns()}_{filename}"
+                save_request_body_to_file(self.rfile, content_length, destination)
+                details = validate_odoo_backup_archive(destination)
+                job = Job(
+                    f"Restaurer {db_name} dans {project}",
+                    restore_database_job,
+                    (project, destination, filename, db_name, master_pwd, copy_database, neutralize),
+                )
+                destination = None
+                return json_response(
+                    self,
+                    {
+                        "job": {
+                            "id": job.id,
+                            "title": job.title,
+                            "status": job.status,
+                            "started_at": job.started_at,
+                            "lines": job.lines,
+                        },
+                        "backup": details,
+                    },
+                    status=201,
+                )
+            except Exception as exc:
+                if destination is not None:
+                    destination.unlink(missing_ok=True)
                 return json_response(self, {"error": str(exc)}, status=400)
 
         zip_inspect_match = re.match(r"^/api/projects/([^/]+)/module-zip/inspect$", parsed.path)

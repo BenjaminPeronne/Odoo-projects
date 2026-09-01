@@ -284,6 +284,7 @@ fn run_command(command: &str, args: &[&str]) -> Result<(), String> {
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![backend_diagnostics, open_external_url, open_docker_desktop])
         .setup(|app| {
             let log_dir = app.path().app_log_dir()?;

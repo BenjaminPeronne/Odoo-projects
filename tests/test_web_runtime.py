@@ -1,6 +1,7 @@
 import time
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -70,6 +71,93 @@ class DatabaseNameValidationTests(unittest.TestCase):
         command = run_capture.call_args.args[0]
         database_option = command.index("-d")
         self.assertEqual(command[database_option + 1], "sodial_recette#1")
+
+
+class DatabaseRestoreTests(unittest.TestCase):
+    def make_backup(self, root, include_dump=True):
+        path = Path(root) / "backup.zip"
+        with zipfile.ZipFile(path, "w") as archive:
+            if include_dump:
+                archive.writestr("dump.sql", "CREATE TABLE test(id integer);\n")
+            archive.writestr("manifest.json", "{}")
+            archive.writestr("filestore/ab/abcdef", b"attachment")
+        return path
+
+    def test_accepts_odoo_zip_backup_with_dump_and_filestore(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            details = web.validate_odoo_backup_archive(self.make_backup(temporary))
+
+        self.assertTrue(details["has_filestore"])
+        self.assertTrue(details["has_manifest"])
+        self.assertEqual(details["entries"], 3)
+
+    def test_rejects_zip_without_database_dump(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self.make_backup(temporary, include_dump=False)
+            with self.assertRaisesRegex(ValueError, "dump.sql"):
+                web.validate_odoo_backup_archive(path)
+
+    @patch("odoo_manager_web.http.client.HTTPConnection")
+    def test_streams_restore_with_official_odoo_form_fields(self, connection_type):
+        connection = Mock()
+        response = Mock(status=303)
+        response.read.return_value = b""
+        connection.getresponse.return_value = response
+        connection_type.return_value = connection
+        job = Mock()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "backup.zip"
+            path.write_bytes(b"backup-content")
+            status, content = web.post_odoo_database_restore(
+                job,
+                "http://dev.demo.localhost/web/database/restore",
+                path,
+                "backup.zip",
+                "demo_restore",
+                "odoo",
+                True,
+                True,
+            )
+
+        self.assertEqual((status, content), (303, ""))
+        connection.putrequest.assert_called_once_with("POST", "/web/database/restore")
+        transmitted = b"".join(call.args[0] for call in connection.send.call_args_list)
+        self.assertIn(b'name="master_pwd"\r\n\r\nodoo', transmitted)
+        self.assertIn(b'name="name"\r\n\r\ndemo_restore', transmitted)
+        self.assertIn(b'name="copy"\r\n\r\ntrue', transmitted)
+        self.assertIn(b'name="neutralize_database"\r\n\r\non', transmitted)
+        self.assertIn(b'name="backup_file"; filename="backup.zip"', transmitted)
+
+    @patch("odoo_manager_web.project_url", return_value="http://dev.demo.localhost/")
+    @patch("odoo_manager_web.post_odoo_database_restore", return_value=(303, ""))
+    @patch("odoo_manager_web.list_databases_for", side_effect=[[], ["demo_restore"]])
+    @patch("odoo_manager_web.project_service")
+    @patch("odoo_manager_web.validate_project", return_value="DEMO")
+    def test_restore_job_removes_temporary_backup(
+        self,
+        _validate_project,
+        project_service,
+        _list_databases,
+        _post_restore,
+        _project_url,
+    ):
+        job = Mock()
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self.make_backup(temporary)
+            web.restore_database_job(
+                job,
+                "DEMO",
+                path,
+                "backup.zip",
+                "demo_restore",
+                "odoo",
+                True,
+                True,
+            )
+            self.assertFalse(path.exists())
+
+        project_service.return_value.start_project.assert_called_once()
 
 
 class PostgreSqlConsoleTests(unittest.TestCase):
