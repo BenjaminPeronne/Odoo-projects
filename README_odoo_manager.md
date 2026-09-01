@@ -127,7 +127,7 @@ Le gestionnaire arrete `docker compose down`, puis deplace le dossier dans
 
 ## Lancer le menu
 
-Depuis le dossier `Odoo-projects` :
+Depuis le dossier source `Odoo-Manager` :
 
 ```bash
 ./odoo_manager.sh
@@ -190,5 +190,5 @@ Repondez `Non`. Le gestionnaire detectera ensuite le nouveau projet, lancera lui
 - Pour mettre a jour un module deja installe apres modification de code, utilisez l'option `5` puis choisissez `Mettre a jour`, ou lancez `--update-module`.
 - Pour mettre a jour tous les modules d'une base, utilisez l'option `6` du menu ou lancez `--update-all-modules PROJET BASE`.
 - Le master password documente pour les bases locales est `odoo`.
-- Par defaut, le workspace est le dossier ou se trouve le script. Il peut etre surcharge avec `ODOO_WORKSPACE=/chemin/vers/Odoo-projects`.
+- Par defaut, le gestionnaire recherche les environnements dans `~/Documents/Developer/Odoo-projects`, puis dans les emplacements usuels. Il peut etre surcharge avec `ODOO_WORKSPACE=/chemin/vers/Odoo-projects`.
 - Sous Windows 10/11, l'application graphique utilise automatiquement Docker Desktop et les outils Windows. WSL 2 n'est appele qu'en interne pour Brainkeys ou comme secours lors de la creation de liens symboliques. L'utilisateur n'a aucun mode a choisir.

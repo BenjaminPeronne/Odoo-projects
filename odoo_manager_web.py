@@ -58,15 +58,15 @@ from odoo_manager_core.system import docker_command, shell_command
 
 
 ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)).resolve()
-if getattr(sys, "frozen", False):
-    workspace_candidates = (
-        Path.home() / "Documents" / "Developer" / "Odoo-projects",
-        Path.home() / "Documents" / "Odoo-projects",
-        Path.home() / "Odoo-projects",
-    )
-    DEFAULT_WORKSPACE_FALLBACK = next((path for path in workspace_candidates if path.is_dir()), workspace_candidates[-1])
-else:
-    DEFAULT_WORKSPACE_FALLBACK = ROOT
+workspace_candidates = (
+    Path.home() / "Documents" / "Developer" / "Odoo-projects",
+    Path.home() / "Documents" / "Odoo-projects",
+    Path.home() / "Odoo-projects",
+)
+DEFAULT_WORKSPACE_FALLBACK = next(
+    (path for path in workspace_candidates if path.is_dir()),
+    workspace_candidates[-1] if getattr(sys, "frozen", False) else ROOT,
+)
 DEFAULT_WORKSPACE = Path(os.environ.get("ODOO_WORKSPACE", DEFAULT_WORKSPACE_FALLBACK)).resolve()
 SETTINGS_STORE = SettingsStore(DEFAULT_WORKSPACE)
 SETTINGS = SETTINGS_STORE.load()

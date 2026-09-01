@@ -2,7 +2,18 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-WORKSPACE="${ODOO_WORKSPACE:-$SCRIPT_DIR}"
+DEFAULT_WORKSPACE="$SCRIPT_DIR"
+for candidate in \
+  "$HOME/Documents/Developer/Odoo-projects" \
+  "$HOME/Documents/Odoo-projects" \
+  "$HOME/Odoo-projects"
+do
+  if [ -d "$candidate" ]; then
+    DEFAULT_WORKSPACE="$candidate"
+    break
+  fi
+done
+WORKSPACE="${ODOO_WORKSPACE:-$DEFAULT_WORKSPACE}"
 TRAEFIK_DIR="${TRAEFIK_DIR:-$HOME/docker-local-tools/traefik}"
 TRAEFIK_REPO="${TRAEFIK_REPO:-ssh://git@gitlab.sudokeys.com:10022/devops/docker-local-tools.git}"
 VENV_DIR="${VENV_DIR:-$HOME/venv_3.12}"
