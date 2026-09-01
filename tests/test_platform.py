@@ -11,6 +11,7 @@ from odoo_manager_core.platform import (
     open_terminal_script,
     workspace_command_prefix,
     workspace_execution_path,
+    wsl_command_with_cwd,
     wsl_path_context,
     wsl_unc_path,
 )
@@ -118,6 +119,33 @@ class WindowsProcessTests(unittest.TestCase):
             wsl_unc_path(localhost.distribution, localhost.linux_path),
             r"\\wsl.localhost\Ubuntu-24.04\home\demo\Odoo-projects",
         )
+
+    @mock.patch("odoo_manager_core.platform.wsl_execution_path", return_value="/mnt/c/Odoo-projects")
+    @mock.patch("odoo_manager_core.platform.platform.system", return_value="Windows")
+    def test_wsl_command_cwd_translates_native_windows_path(self, _system, execution_path):
+        settings = ManagerSettings.from_dict({}, r"C:\Odoo-projects")
+
+        command = wsl_command_with_cwd(
+            ["wsl.exe", "-d", "Ubuntu", "--exec", "docker", "compose", "ps"],
+            r"C:\Odoo-projects",
+            settings,
+        )
+
+        self.assertEqual(
+            command,
+            [
+                "wsl.exe",
+                "-d",
+                "Ubuntu",
+                "--cd",
+                "/mnt/c/Odoo-projects",
+                "--exec",
+                "docker",
+                "compose",
+                "ps",
+            ],
+        )
+        execution_path.assert_called_once_with(r"C:\Odoo-projects", "Ubuntu")
 
     @mock.patch("odoo_manager_core.platform.platform_id", return_value="windows")
     def test_workspace_path_selects_its_wsl_distribution_automatically(self, _platform):

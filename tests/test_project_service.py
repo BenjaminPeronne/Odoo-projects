@@ -319,7 +319,7 @@ class ProjectServiceTests(unittest.TestCase):
         self.assertIn("installed.button_immediate_uninstall()", uninstall[-1])
         self.assertTrue(any("Redémarrage du serveur Odoo" in line for line in logs))
 
-    @patch("odoo_manager_core.platform.workspace_execution_path", return_value="/home/demo/Odoo-projects")
+    @patch("odoo_manager_core.platform.wsl_execution_path", return_value="/home/demo/Odoo-projects")
     @patch("odoo_manager_core.project_service.platform.system", return_value="Windows")
     def test_wsl_commands_receive_explicit_linux_working_directory(self, _system, _execution_path):
         command = ["wsl.exe", "-d", "Ubuntu", "--exec", "docker", "compose", "ps"]

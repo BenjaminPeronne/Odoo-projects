@@ -13,6 +13,15 @@ from odoo_manager_core.project_creator import (
 from odoo_manager_core.project_service import ProjectService
 
 
+def without_wsl_cwd(command):
+    command = list(command)
+    if "--cd" in command and "--exec" in command:
+        cd_index = command.index("--cd")
+        if cd_index < command.index("--exec") and cd_index + 1 < len(command):
+            del command[cd_index : cd_index + 2]
+    return command
+
+
 class FakeRunner:
     def __init__(self, fail_repository="", wsl_path_exists=False):
         self.fail_repository = fail_repository
@@ -153,7 +162,7 @@ class ProjectCreatorTests(unittest.TestCase):
 
         self.assertEqual(linked, 1)
         self.assertEqual(
-            runner.commands[-1],
+            without_wsl_cwd(runner.commands[-1]),
             [
                 "wsl.exe",
                 "-d",
@@ -193,7 +202,7 @@ class ProjectCreatorTests(unittest.TestCase):
 
         self.assertEqual(linked, 1)
         self.assertEqual(
-            runner.commands[-1],
+            without_wsl_cwd(runner.commands[-1]),
             [
                 "wsl.exe",
                 "--exec",
@@ -278,7 +287,7 @@ class ProjectCreatorTests(unittest.TestCase):
 
         self.assertTrue(exists)
         self.assertEqual(
-            runner.commands[-1],
+            without_wsl_cwd(runner.commands[-1]),
             [
                 "wsl.exe",
                 "--exec",
@@ -306,7 +315,7 @@ class ProjectCreatorTests(unittest.TestCase):
         creator.remove_path_entry(self.workspace / "DEMO" / "odoo" / "addons" / "account_3way_match")
 
         self.assertEqual(
-            runner.commands[-1],
+            without_wsl_cwd(runner.commands[-1]),
             [
                 "wsl.exe",
                 "--exec",

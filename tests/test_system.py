@@ -10,8 +10,9 @@ class DockerStatusTests(unittest.TestCase):
         reset_docker_backend_cache()
         self.settings = ManagerSettings.from_dict({}, "/tmp/workspace")
 
+    @mock.patch("odoo_manager_core.system.platform_id", return_value="linux")
     @mock.patch("odoo_manager_core.system.executable_available", return_value=False)
-    def test_missing_docker(self, _available):
+    def test_missing_docker(self, _available, _platform):
         status = docker_status(self.settings)
         self.assertEqual(status["state"], "missing")
         self.assertFalse(status["running"])
@@ -22,9 +23,10 @@ class DockerStatusTests(unittest.TestCase):
         self.assertTrue(status["install_guide"]["install_url"].startswith("https://docs.docker.com/"))
         self.assertGreaterEqual(len(status["install_guide"]["steps"]), 2)
 
+    @mock.patch("odoo_manager_core.system.platform_id", return_value="linux")
     @mock.patch("odoo_manager_core.system.executable_available", return_value=True)
     @mock.patch("odoo_manager_core.system.subprocess.run")
-    def test_ready_docker(self, run, _available):
+    def test_ready_docker(self, run, _available, _platform):
         run.return_value = mock.Mock(returncode=0, stdout='"28.0.0"\n', stderr="")
         status = docker_status(self.settings)
         self.assertEqual(status["state"], "ready")
@@ -32,9 +34,10 @@ class DockerStatusTests(unittest.TestCase):
         self.assertFalse(status["can_start"])
 
     @mock.patch("odoo_manager_core.platform.platform.system", return_value="Windows")
-    @mock.patch("odoo_manager_core.system.executable_available", return_value=True)
+    @mock.patch("odoo_manager_core.system.platform_id", return_value="windows")
+    @mock.patch("odoo_manager_core.system.host_executable_available", return_value=True)
     @mock.patch("odoo_manager_core.system.subprocess.run")
-    def test_windows_docker_probe_is_hidden(self, run, _available, _system):
+    def test_windows_docker_probe_is_hidden(self, run, _available, _platform, _system):
         run.return_value = mock.Mock(returncode=0, stdout='"28.0.0"\n', stderr="")
 
         docker_status(self.settings)
@@ -61,9 +64,10 @@ class DockerStatusTests(unittest.TestCase):
         self.assertEqual(command[0], "/usr/local/bin/docker")
         self.assertIn("/usr/local/bin", run.call_args.kwargs["env"]["PATH"])
 
+    @mock.patch("odoo_manager_core.system.platform_id", return_value="linux")
     @mock.patch("odoo_manager_core.system.executable_available", return_value=True)
     @mock.patch("odoo_manager_core.system.subprocess.run")
-    def test_stopped_docker(self, run, _available):
+    def test_stopped_docker(self, run, _available, _platform):
         run.return_value = mock.Mock(returncode=1, stdout="", stderr="daemon unavailable")
         status = docker_status(self.settings)
         self.assertEqual(status["state"], "stopped")
@@ -97,12 +101,9 @@ class DockerStatusTests(unittest.TestCase):
     @mock.patch("odoo_manager_core.system.host_executable_available", return_value=True)
     @mock.patch("odoo_manager_core.system.platform_id", return_value="windows")
     @mock.patch("odoo_manager_core.system.subprocess.run")
-    def test_windows_wsl_docker_status_probes_native_cli(self, run, _platform, _available, _resolve):
+    def test_windows_docker_status_probes_native_and_wsl(self, run, _platform, _available, _resolve):
         run.return_value = mock.Mock(returncode=0, stdout='"28.0.0"\n', stderr="")
-        settings = ManagerSettings.from_dict(
-            {"execution_mode": "wsl", "wsl_distribution": "Ubuntu"},
-            "/tmp/workspace",
-        )
+        settings = ManagerSettings.from_dict({}, "/tmp/workspace")
 
         status = docker_status(settings)
 

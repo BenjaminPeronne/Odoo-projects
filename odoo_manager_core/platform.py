@@ -234,12 +234,34 @@ def command_uses_wsl(command):
     return Path(str(command[0])).name.casefold() in {"wsl", "wsl.exe"} and "--exec" in command
 
 
+def wsl_command_distribution(command):
+    command = [str(argument) for argument in command]
+    for option in ("-d", "--distribution"):
+        if option in command:
+            index = command.index(option)
+            if index + 1 < len(command):
+                return command[index + 1]
+    return ""
+
+
 def wsl_command_with_cwd(command, cwd, settings, workspace=None):
     """Attach an explicit Linux cwd to an existing wsl.exe command."""
     command = [str(argument) for argument in command]
     if not cwd or not command_uses_wsl(command):
         return command
-    linux_cwd = workspace_execution_path(cwd, settings, workspace)
+    path_context = wsl_path_context(cwd)
+    distribution = wsl_command_distribution(command)
+    if path_context:
+        if distribution and path_context.distribution.casefold() != distribution.casefold():
+            raise RuntimeError(
+                "Le répertoire de travail appartient à une autre distribution WSL "
+                f"({path_context.distribution} au lieu de {distribution})."
+            )
+        linux_cwd = path_context.linux_path
+    elif platform.system() == "Windows":
+        linux_cwd = wsl_execution_path(cwd, distribution)
+    else:
+        linux_cwd = workspace_execution_path(cwd, settings, workspace)
     exec_index = command.index("--exec")
     return [*command[:exec_index], "--cd", linux_cwd, *command[exec_index:]]
 
