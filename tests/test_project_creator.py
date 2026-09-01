@@ -22,12 +22,20 @@ def without_wsl_cwd(command):
     return command
 
 
+def fake_wsl_command_with_cwd(command, _cwd, _settings, _workspace=None):
+    """Keep creator tests independent from the runner's installed WSL distributions."""
+    command = [str(argument) for argument in command]
+    exec_index = command.index("--exec")
+    return [*command[:exec_index], "--cd", "/mnt/c/Odoo", *command[exec_index:]]
+
+
 class FakeRunner:
     def __init__(self, fail_repository="", wsl_path_exists=False):
         self.fail_repository = fail_repository
         self.wsl_path_exists = wsl_path_exists
         self.commands = []
         self.batch_script = ""
+        self.search_root = None
 
     def capture(self, command, cwd=None, timeout=10):
         self.commands.append(command)
@@ -40,7 +48,7 @@ class FakeRunner:
         if "ln" in command or "rm" in command:
             return 0
         if "sh" in command:
-            scripts = list(Path(cwd).rglob(".odoo_manager_links.sh"))
+            scripts = list(Path(self.search_root or cwd).rglob(".odoo_manager_links.sh"))
             self.batch_script = scripts[0].read_text(encoding="utf-8") if scripts else ""
             return 0
         repository = next((item for item in command if isinstance(item, str) and item.endswith(".git")), "")
@@ -71,12 +79,20 @@ class ProjectCreatorTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.workspace = Path(self.temporary.name)
         self.settings = ManagerSettings.from_dict({}, self.workspace)
+        wsl_cwd_patcher = mock.patch(
+            "odoo_manager_core.project_service.wsl_command_with_cwd",
+            new=fake_wsl_command_with_cwd,
+        )
+        wsl_cwd_patcher.start()
+        self.addCleanup(wsl_cwd_patcher.stop)
 
     def tearDown(self):
         self.temporary.cleanup()
 
     def creator(self, runner=None):
-        service = ProjectService(self.settings, self.workspace, runner=runner or FakeRunner())
+        runner = runner or FakeRunner()
+        runner.search_root = self.workspace
+        service = ProjectService(self.settings, self.workspace, runner=runner)
         return ProjectCreator(self.settings, self.workspace, service)
 
     def test_standard_project_is_created_atomically_with_relative_enterprise_links(self):
