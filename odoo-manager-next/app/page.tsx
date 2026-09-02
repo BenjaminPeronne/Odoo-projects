@@ -5,6 +5,8 @@ import {
   AlertTriangle,
   Boxes,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   Circle,
   CloudDownload,
   Copy,
@@ -20,6 +22,7 @@ import {
   ListRestart,
   Loader2,
   Logs,
+  MoreHorizontal,
   PackageX,
   Play,
   PlusCircle,
@@ -31,12 +34,14 @@ import {
   Trash2,
   Upload,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { DropdownMenu } from "@radix-ui/themes";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, InteractiveCard } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { FilePicker } from "@/components/ui/file-picker";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -245,6 +250,7 @@ const BOOTSTRAP_RETRY_DELAYS_MS = [0, 500, 1000, 2000];
 const DOCKER_CONFIRM_DELAY_MS = 700;
 const API_TIMEOUT_MS = 20_000;
 const UPLOAD_TIMEOUT_MS = 120_000;
+const MODULES_PER_PAGE = 50;
 
 class ApiUnavailableError extends Error {
   constructor(message = "Service local Odoo Manager indisponible. L'application n'arrive pas à joindre l'API locale sur 127.0.0.1:8765.") {
@@ -337,6 +343,12 @@ function uploadDatabaseBackup(
 
 function delay(milliseconds: number) {
   return new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+function jobsFingerprint(items: Job[]) {
+  return items
+    .map((job) => `${job.id}:${job.status}:${job.finished_at || ""}:${job.lines.length}:${job.lines.at(-1) || ""}:${job.output?.length || 0}`)
+    .join("|");
 }
 
 function isTauriRuntime() {
@@ -576,6 +588,7 @@ export default function Home() {
   const [modules, setModules] = useState<ModuleInfo[]>([]);
   const [moduleSearch, setModuleSearch] = useState("");
   const [moduleFilter, setModuleFilter] = useState("all");
+  const [modulePage, setModulePage] = useState(1);
   const [selectedModules, setSelectedModules] = useState<Set<string>>(new Set());
   const [jobs, setJobs] = useState<Job[]>([]);
   const [selectedJobId, setSelectedJobId] = useState<number | null>(null);
@@ -605,6 +618,7 @@ export default function Home() {
   const [uninstallDialogOpen, setUninstallDialogOpen] = useState(false);
   const [deleteCodeDialogOpen, setDeleteCodeDialogOpen] = useState(false);
   const [replaceZipModules, setReplaceZipModules] = useState(true);
+  const [zipFile, setZipFile] = useState<File | null>(null);
   const [zipModuleCandidates, setZipModuleCandidates] = useState<string[]>([]);
   const [selectedZipModules, setSelectedZipModules] = useState<Set<string>>(new Set());
   const [inspectingZip, setInspectingZip] = useState(false);
@@ -625,6 +639,7 @@ export default function Home() {
   const overviewRefreshInFlight = useRef(false);
   const systemRefreshInFlight = useRef(false);
   const jobsRefreshInFlight = useRef(false);
+  const selectedJobIdRef = useRef<number | null>(null);
   const jobStatuses = useRef<Map<number, string>>(new Map());
   const jobNotificationsInitialized = useRef(false);
   const modulesRequestGeneration = useRef(0);
@@ -665,6 +680,7 @@ export default function Home() {
   );
 
   const selectedJob = useMemo(() => jobs.find((job) => job.id === selectedJobId) || jobs[0], [jobs, selectedJobId]);
+  const hasRunningJobs = useMemo(() => jobs.some((job) => job.status === "running"), [jobs]);
   const gitInstallRunning = jobs.some((job) => job.status === "running" && job.title === "Installer Git pour Windows");
   const traefikInstallRunning = jobs.some((job) => job.status === "running" && job.title === "Installer Traefik");
   const selectedSshKey = useMemo(
@@ -677,13 +693,18 @@ export default function Home() {
     return (overview?.projects || []).filter((project) => !query || project.name.toLowerCase().includes(query));
   }, [overview, projectsFilter]);
 
+  const deferredModuleSearch = useDeferredValue(moduleSearch);
   const filteredModules = useMemo(() => {
-    const query = moduleSearch.trim().toLowerCase();
+    const query = deferredModuleSearch.trim().toLowerCase();
     return modules
       .filter((module) => !query || module.name.toLowerCase().includes(query))
-      .filter((module) => moduleFilter === "all" || module.state === moduleFilter)
-      .slice(0, 300);
-  }, [modules, moduleFilter, moduleSearch]);
+      .filter((module) => moduleFilter === "all" || module.state === moduleFilter);
+  }, [deferredModuleSearch, modules, moduleFilter]);
+  const modulePageCount = Math.max(1, Math.ceil(filteredModules.length / MODULES_PER_PAGE));
+  const visibleModules = useMemo(() => {
+    const start = (modulePage - 1) * MODULES_PER_PAGE;
+    return filteredModules.slice(start, start + MODULES_PER_PAGE);
+  }, [filteredModules, modulePage]);
 
   const moduleByName = useMemo(() => new Map(modules.map((module) => [module.name, module])), [modules]);
   const filteredModuleNames = useMemo(() => filteredModules.map((module) => module.name), [filteredModules]);
@@ -729,7 +750,7 @@ export default function Home() {
     }
     jobStatuses.current = new Map(nextJobs.map((job) => [job.id, job.status]));
     jobNotificationsInitialized.current = true;
-    setJobs(nextJobs);
+    setJobs((current) => jobsFingerprint(current) === jobsFingerprint(nextJobs) ? current : nextJobs);
   }, [notifyJobCompletion]);
 
   const markApiSuccess = useCallback(() => {
@@ -841,21 +862,23 @@ export default function Home() {
     overviewRefreshInFlight.current = true;
     try {
       const payload = await api<Overview>("/api/overview");
-      setOverview(payload);
+      setOverview((currentOverview) =>
+        currentOverview && JSON.stringify(currentOverview) === JSON.stringify(payload) ? currentOverview : payload,
+      );
       markApiSuccess();
       setError("");
-      const current = payload.projects.find((project) => project.name === selectedProjectName) || payload.projects[0];
-      if (current && current.name !== selectedProjectName) {
-        setSelectedProjectName(current.name);
-        setSelectedDb(firstOdooDatabase(current));
-      }
+      setSelectedProjectName((currentName) => {
+        const current = payload.projects.find((project) => project.name === currentName) || payload.projects[0];
+        if (current && current.name !== currentName) setSelectedDb(firstOdooDatabase(current));
+        return current?.name || "";
+      });
     } catch (err) {
       markApiFailure(err);
       setError(!initializingRef.current && !(err instanceof ApiUnavailableError) ? err instanceof Error ? err.message : "Impossible de charger l'overview." : "");
     } finally {
       overviewRefreshInFlight.current = false;
     }
-  }, [markApiFailure, markApiSuccess, selectedProjectName]);
+  }, [markApiFailure, markApiSuccess]);
 
   const refreshSystemStatus = useCallback(async () => {
     if (systemRefreshInFlight.current) return;
@@ -927,21 +950,27 @@ export default function Home() {
     }
   }, [pushToast]);
 
-  const refreshJobs = useCallback(async () => {
+  const refreshJobs = useCallback(async (detailJobId?: number | null) => {
     if (jobsRefreshInFlight.current) return;
     jobsRefreshInFlight.current = true;
     try {
-      const payload = await api<{ jobs: Job[] }>("/api/jobs");
+      const requestedJobId = detailJobId ?? selectedJobIdRef.current;
+      const query = requestedJobId ? `?detail=${encodeURIComponent(requestedJobId)}` : "";
+      const payload = await api<{ jobs: Job[] }>(`/api/jobs${query}`);
       applyJobs(payload.jobs);
       markApiSuccess();
-      if (!selectedJobId && payload.jobs[0]) setSelectedJobId(payload.jobs[0].id);
+      setSelectedJobId((currentId) => currentId ?? payload.jobs[0]?.id ?? null);
     } catch (err) {
       markApiFailure(err);
       // Jobs polling should not break the whole screen.
     } finally {
       jobsRefreshInFlight.current = false;
     }
-  }, [applyJobs, markApiFailure, markApiSuccess, selectedJobId]);
+  }, [applyJobs, markApiFailure, markApiSuccess]);
+
+  useEffect(() => {
+    selectedJobIdRef.current = selectedJobId;
+  }, [selectedJobId]);
 
   const refreshModules = useCallback(async () => {
     const projectName = selectedProject?.name;
@@ -1005,17 +1034,33 @@ export default function Home() {
 
   useEffect(() => {
     if (initializing) return;
-    const timer = window.setInterval(() => {
-      refreshOverview();
-      refreshJobs();
-    }, 5000);
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") void refreshJobs();
+    };
+    const timer = window.setInterval(refreshWhenVisible, hasRunningJobs ? 1200 : 10000);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [hasRunningJobs, initializing, refreshJobs]);
+
+  useEffect(() => {
+    if (initializing) return;
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") void refreshOverview();
+    };
+    const timer = window.setInterval(refreshWhenVisible, hasRunningJobs ? 8000 : 20000);
     return () => window.clearInterval(timer);
-  }, [initializing, refreshJobs, refreshOverview]);
+  }, [hasRunningJobs, initializing, refreshOverview]);
 
   useEffect(() => {
     if (initializing) return;
     const interval = Math.max(3, settings?.docker_poll_interval || 10) * 1000;
-    const timer = window.setInterval(refreshSystemStatus, interval);
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") void refreshSystemStatus();
+    };
+    const timer = window.setInterval(refreshWhenVisible, interval);
     return () => window.clearInterval(timer);
   }, [initializing, refreshSystemStatus, settings?.docker_poll_interval]);
 
@@ -1418,7 +1463,9 @@ export default function Home() {
   function selectJob(jobId: number) {
     setExternalLogView(null);
     setSelectedJobId(jobId);
+    selectedJobIdRef.current = jobId;
     enableLogAutoFollow();
+    void refreshJobs(jobId);
   }
 
   function requestUninstall(moduleNames: string[]) {
@@ -1544,6 +1591,7 @@ export default function Home() {
 
   function resetZipImport() {
     zipInspectionGeneration.current += 1;
+    setZipFile(null);
     setZipModuleCandidates([]);
     setSelectedZipModules(new Set());
     setInspectingZip(false);
@@ -1552,6 +1600,7 @@ export default function Home() {
 
   async function inspectZipFile(file?: File) {
     const generation = ++zipInspectionGeneration.current;
+    setZipFile(file || null);
     setZipModuleCandidates([]);
     setSelectedZipModules(new Set());
     if (!file || !selectedProject) {
@@ -1604,6 +1653,10 @@ export default function Home() {
     () => selectedModuleList.filter((name) => moduleByName.get(name)?.state === "installed"),
     [moduleByName, selectedModuleList],
   );
+  const selectedInstallableModuleList = useMemo(
+    () => selectedModuleList.filter((name) => moduleByName.get(name)?.state !== "installed"),
+    [moduleByName, selectedModuleList],
+  );
   const selectedRemovableModuleList = useMemo(
     () =>
       selectedModuleList.filter((name) => {
@@ -1643,6 +1696,14 @@ export default function Home() {
     }
     if (logAutoFollow.current) scrollLogOutputToBottom();
   }, [activeTab, outputContent, outputSource, scrollLogOutputToBottom]);
+
+  useEffect(() => {
+    setModulePage(1);
+  }, [deferredModuleSearch, moduleFilter, selectedDb, selectedProject?.name]);
+
+  useEffect(() => {
+    if (modulePage > modulePageCount) setModulePage(modulePageCount);
+  }, [modulePage, modulePageCount]);
 
   const toggleModuleSelection = useCallback((name: string, checked: boolean) => {
     setSelectedModules((current) => {
@@ -1832,21 +1893,21 @@ export default function Home() {
               ))}
             </div>
             <div className="grid grid-cols-2 gap-2 border-t p-3 lg:grid-cols-1">
-              <Button className="col-span-2 w-full justify-start lg:col-span-1" onClick={openCreateProjectDialog}>
+              <Button className="col-span-2 w-full lg:col-span-1" onClick={openCreateProjectDialog}>
                 <FolderPlus className="h-4 w-4" />
                 Nouveau projet
               </Button>
               <Button
-                className="w-full justify-start"
-                variant="ghost"
+                className="w-full"
+                variant="outline"
                 onClick={openSettingsDialog}
               >
                 <Settings className="h-4 w-4" />
                 Paramètres
               </Button>
               <Button
-                className="w-full justify-start"
-                variant="ghost"
+                className="w-full"
+                variant="secondary"
                 onClick={() => setAboutOpen(true)}
               >
                 <Info className="h-4 w-4" />
@@ -2179,48 +2240,15 @@ export default function Home() {
 
               <TabsContent value="modules">
                 <Card>
-                  <CardHeader className="gap-3 xl:flex-row xl:items-start xl:justify-between">
+                  <CardHeader className="gap-3 sm:flex-row sm:items-start sm:justify-between">
                     <div className="min-w-0">
                       <CardTitle>Modules</CardTitle>
-                      <CardDescription>Recherche par nom technique, sélection multiple et actions groupées.</CardDescription>
+                      <CardDescription>Recherche, sélection et mise à jour des modules de la base Odoo choisie.</CardDescription>
                     </div>
-                    <div className="grid w-full min-w-0 grid-cols-1 gap-2 sm:grid-cols-2 xl:flex xl:w-auto xl:max-w-[760px] xl:flex-wrap xl:justify-end">
-                      <Button variant="outline" onClick={() => setZipDialogOpen(true)} disabled={!selectedProjectReady}>
-                        <FileArchive className="h-4 w-4" />
-                        Import ZIP
-                      </Button>
-                      <Button
-                        disabled={!selectedModuleList.length || !canUseDb || loading}
-                        onClick={() => createJob("install_module", { project: selectedProject?.name, db: selectedDb, modules: selectedModuleList.join(",") })}
-                      >
-                        <PlusCircle className="h-4 w-4" />
-                        Installer sélection
-                      </Button>
-                      <Button
-                        variant="outline"
-                        disabled={!selectedModuleList.length || !canUseDb || loading}
-                        onClick={() => createJob("update_module", { project: selectedProject?.name, db: selectedDb, modules: selectedModuleList.join(",") })}
-                      >
-                        <RefreshCcw className="h-4 w-4" />
-                        Mettre à jour sélection
-                      </Button>
-                      <Button
-                        variant="destructive"
-                        disabled={!selectedInstalledModuleList.length || !canUseDb || loading}
-                        onClick={() => requestUninstall(selectedModuleList)}
-                      >
-                        <Trash2 className="h-4 w-4" />
-                        Désinstaller sélection
-                      </Button>
-                      <Button
-                        variant="destructive"
-                        disabled={!selectedRemovableModuleList.length || loading}
-                        onClick={() => requestDeleteCode(selectedModuleList)}
-                      >
-                        <PackageX className="h-4 w-4" />
-                        Supprimer du projet
-                      </Button>
-                    </div>
+                    <Button className="w-full sm:w-auto" variant="outline" onClick={() => setZipDialogOpen(true)} disabled={!selectedProjectReady}>
+                      <FileArchive className="h-4 w-4" />
+                      Importer un ZIP
+                    </Button>
                   </CardHeader>
                   <CardContent>
                     <div className="mb-4 grid min-w-0 gap-3 md:grid-cols-[minmax(0,1fr)_minmax(150px,220px)] xl:grid-cols-[minmax(0,1fr)_220px_220px]">
@@ -2251,7 +2279,7 @@ export default function Home() {
                         </SelectContent>
                       </Select>
                     </div>
-                    <div className="mb-3 flex flex-col gap-2 rounded-md border bg-muted/45 p-3 text-sm sm:flex-row sm:items-center sm:justify-between">
+                    <div className="mb-3 flex flex-col gap-3 rounded-md border bg-muted/45 p-3 text-sm sm:flex-row sm:items-center sm:justify-between">
                       <label className="flex min-w-0 cursor-pointer items-start gap-3">
                         <Checkbox
                           className="mt-0.5"
@@ -2260,18 +2288,72 @@ export default function Home() {
                           onCheckedChange={(checked) => toggleFilteredModules(checked === true)}
                         />
                         <span className="min-w-0">
-                          <span className="block font-medium">Sélectionner les résultats affichés</span>
+                          <span className="block font-medium">Sélectionner les {filteredModuleNames.length} résultats</span>
                           <span className="block text-xs text-muted-foreground">
-                            Coche automatiquement les modules présents dans la recherche courante.
+                            La sélection s’applique à toutes les pages de la recherche courante.
                           </span>
                         </span>
                       </label>
-                      <Badge className="w-fit shrink-0" variant="outline">
-                        {selectedFilteredModuleCount}/{filteredModuleNames.length} sélectionné(s)
-                      </Badge>
+                      <div className="flex shrink-0 items-center gap-2">
+                        <Badge className="w-fit" variant="outline">
+                          {selectedModuleList.length} sélectionné(s)
+                        </Badge>
+                        {selectedModuleList.length > 0 && (
+                          <Button size="sm" variant="ghost" onClick={() => setSelectedModules(new Set())}>
+                            Effacer
+                          </Button>
+                        )}
+                      </div>
                     </div>
+                    {selectedModuleList.length > 0 && (
+                      <div className="mb-3 rounded-md border border-primary/25 bg-primary/[0.06] p-3 dark:bg-primary/[0.12]">
+                        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <div className="text-sm font-semibold">Actions sur la sélection</div>
+                            <div className="mt-0.5 text-xs text-muted-foreground">
+                              {selectedInstallableModuleList.length} disponible(s), {selectedInstalledModuleList.length} installé(s)
+                            </div>
+                          </div>
+                          <Badge variant="default">{selectedModuleList.length} module(s)</Badge>
+                        </div>
+                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                          <Button
+                            variant="secondary"
+                            disabled={!selectedInstallableModuleList.length || !canUseDb || loading}
+                            onClick={() => createJob("install_module", { project: selectedProject?.name, db: selectedDb, modules: selectedInstallableModuleList.join(",") })}
+                          >
+                            <PlusCircle className="h-4 w-4" />
+                            Installer ({selectedInstallableModuleList.length})
+                          </Button>
+                          <Button
+                            disabled={!selectedInstalledModuleList.length || !canUseDb || loading}
+                            onClick={() => createJob("update_module", { project: selectedProject?.name, db: selectedDb, modules: selectedInstalledModuleList.join(",") })}
+                          >
+                            <RefreshCcw className="h-4 w-4" />
+                            Mettre à jour ({selectedInstalledModuleList.length})
+                          </Button>
+                          <Button
+                            className="border-red-300 text-red-700 hover:border-red-400 hover:bg-red-50 hover:text-red-800 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-950/60"
+                            variant="outline"
+                            disabled={!selectedInstalledModuleList.length || !canUseDb || loading}
+                            onClick={() => requestUninstall(selectedInstalledModuleList)}
+                          >
+                            <PackageX className="h-4 w-4" />
+                            Désinstaller ({selectedInstalledModuleList.length})
+                          </Button>
+                          <Button
+                            variant="destructive"
+                            disabled={!selectedRemovableModuleList.length || loading}
+                            onClick={() => requestDeleteCode(selectedRemovableModuleList)}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                            Supprimer ({selectedRemovableModuleList.length})
+                          </Button>
+                        </div>
+                      </div>
+                    )}
                     <div className="overflow-hidden rounded-md border">
-                      <div className="hidden border-b bg-muted px-3 py-2 text-xs font-medium uppercase text-muted-foreground lg:grid lg:grid-cols-[minmax(220px,1.35fr)_120px_130px_minmax(260px,1.15fr)_168px] lg:items-center lg:gap-3">
+                      <div className="hidden border-b bg-muted px-3 py-2 text-xs font-medium uppercase text-muted-foreground xl:grid xl:grid-cols-[minmax(210px,1.35fr)_100px_110px_minmax(220px,1.15fr)_200px] xl:items-center xl:gap-3">
                         <div>Module</div>
                         <div>État</div>
                         <div>Version</div>
@@ -2279,8 +2361,8 @@ export default function Home() {
                         <div className="text-right">Actions</div>
                       </div>
                       <div className="max-h-[min(62vh,720px)] overflow-y-auto">
-                        {filteredModules.length ? (
-                          filteredModules.map((module) => {
+                        {visibleModules.length ? (
+                          visibleModules.map((module) => {
                             const sourcePath = module.source_path || module.path;
                             const linkPath = module.link_path || (module.path_kind?.startsWith("lien") ? module.path : "");
                             const displaySourcePath = compactWorkspacePath(sourcePath, overview?.workspace);
@@ -2289,30 +2371,33 @@ export default function Home() {
                             return (
                               <div
                                 key={module.name}
-                                className="grid min-w-0 gap-3 border-t p-3 first:border-t-0 lg:grid-cols-[minmax(220px,1.35fr)_120px_130px_minmax(260px,1.15fr)_168px] lg:items-center"
+                                className={cn(
+                                  "grid min-w-0 gap-3 border-t p-3 transition-colors first:border-t-0 hover:bg-muted/35 xl:grid-cols-[minmax(210px,1.35fr)_100px_110px_minmax(220px,1.15fr)_200px] xl:items-center",
+                                  selectedModules.has(module.name) && "bg-primary/[0.06] dark:bg-primary/[0.12]",
+                                )}
                               >
-                                <div className="flex min-w-0 items-start gap-3">
+                                <label className="flex min-w-0 cursor-pointer items-start gap-3 rounded-sm focus-within:ring-2 focus-within:ring-ring">
                                   <Checkbox
                                     className="mt-1"
                                     aria-label={`Sélectionner ${module.name}`}
                                     checked={selectedModules.has(module.name)}
                                     onCheckedChange={(checked) => toggleModuleSelection(module.name, checked === true)}
                                   />
-                                  <div className="min-w-0">
+                                  <span className="min-w-0">
                                     <div className="break-words font-medium">{module.name}</div>
                                     <div className="mt-0.5 break-words text-xs text-muted-foreground">{module.title || module.name}</div>
-                                  </div>
-                                </div>
-                                <div className="flex min-w-0 items-center justify-between gap-3 lg:block">
-                                  <span className="text-xs font-medium text-muted-foreground lg:hidden">État</span>
+                                  </span>
+                                </label>
+                                <div className="flex min-w-0 items-center justify-between gap-3 xl:block">
+                                  <span className="text-xs font-medium text-muted-foreground xl:hidden">État</span>
                                   <Badge className="shrink-0" variant={module.state === "installed" ? "success" : "secondary"}>{module.state}</Badge>
                                 </div>
-                                <div className="flex min-w-0 items-start justify-between gap-3 text-sm lg:block">
-                                  <span className="text-xs font-medium text-muted-foreground lg:hidden">Version</span>
+                                <div className="flex min-w-0 items-start justify-between gap-3 text-sm xl:block">
+                                  <span className="text-xs font-medium text-muted-foreground xl:hidden">Version</span>
                                   <span className="min-w-0 break-words">{module.installed_version || module.version || "-"}</span>
                                 </div>
                                 <div className="min-w-0">
-                                  <div className="mb-1 text-xs font-medium text-muted-foreground lg:hidden">Emplacements</div>
+                                  <div className="mb-1 text-xs font-medium text-muted-foreground xl:hidden">Emplacements</div>
                                   <div className="space-y-1">
                                     {module.path_kind && (
                                       <Badge className="w-fit max-w-full truncate" variant="outline" title={module.path_kind}>
@@ -2320,50 +2405,69 @@ export default function Home() {
                                       </Badge>
                                     )}
                                     <div className="min-w-0 text-xs">
-                                      <span className="font-medium text-muted-foreground">Source</span>
-                                      <div className="break-all font-mono text-foreground/75 dark:text-foreground/80" title={sourcePath}>
+                                      <span className="font-medium text-teal-700 dark:text-teal-300">Source</span>
+                                      <div className="truncate font-mono text-teal-800 dark:text-teal-200" title={sourcePath}>
                                         {displaySourcePath || "-"}
                                       </div>
                                     </div>
                                     {displayLinkPath && !samePaths && (
                                       <div className="min-w-0 text-xs">
-                                        <span className="font-medium text-muted-foreground">Lien Odoo</span>
-                                        <div className="break-all font-mono text-slate-600 dark:text-slate-300" title={linkPath}>
+                                        <span className="font-medium text-blue-700 dark:text-blue-300">Lien Odoo</span>
+                                        <div className="truncate font-mono text-blue-800 dark:text-blue-200" title={linkPath}>
                                           {displayLinkPath}
                                         </div>
                                       </div>
                                     )}
                                   </div>
                                 </div>
-                                <div className="flex flex-wrap justify-end gap-2">
-                                  <Button size="icon" variant="outline" disabled={!canUseDb} title={`Installer ${module.name}`} aria-label={`Installer ${module.name}`} onClick={() => createJob("install_module", { project: selectedProject?.name, db: selectedDb, modules: module.name })}>
-                                    <PlusCircle className="h-4 w-4" />
-                                  </Button>
-                                  <Button size="icon" disabled={!canUseDb} title={`Mettre à jour ${module.name}`} aria-label={`Mettre à jour ${module.name}`} onClick={() => createJob("update_module", { project: selectedProject?.name, db: selectedDb, modules: module.name })}>
-                                    <RefreshCcw className="h-4 w-4" />
-                                  </Button>
-                                  <Button
-                                    size="icon"
-                                    variant="destructive"
-                                    disabled={!canUseDb || module.state !== "installed"}
-                                    title={`Désinstaller ${module.name}`}
-                                    aria-label={`Désinstaller ${module.name}`}
-                                    onClick={() => requestUninstall([module.name])}
-                                  >
-                                    <PackageX className="h-4 w-4" />
-                                  </Button>
-                                  {module.removal_mode !== "link_only" && (
+                                <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_40px] gap-2">
+                                  {module.state === "installed" ? (
                                     <Button
-                                      size="icon"
-                                      variant="destructive"
-                                      disabled={!module.removable}
-                                      title={module.removal_note || `Supprimer ${module.name} du projet`}
-                                      aria-label={`Supprimer le code ${module.name}`}
-                                      onClick={() => requestDeleteCode([module.name])}
+                                      className="w-full"
+                                      size="sm"
+                                      disabled={!canUseDb}
+                                      onClick={() => createJob("update_module", { project: selectedProject?.name, db: selectedDb, modules: module.name })}
                                     >
-                                      <Trash2 className="h-4 w-4" />
+                                      <RefreshCcw className="h-4 w-4" />
+                                      Mettre à jour
+                                    </Button>
+                                  ) : (
+                                    <Button
+                                      className="w-full"
+                                      size="sm"
+                                      variant="secondary"
+                                      disabled={!canUseDb}
+                                      onClick={() => createJob("install_module", { project: selectedProject?.name, db: selectedDb, modules: module.name })}
+                                    >
+                                      <PlusCircle className="h-4 w-4" />
+                                      Installer
                                     </Button>
                                   )}
+                                  <DropdownMenu.Root>
+                                    <DropdownMenu.Trigger>
+                                      <Button size="icon" variant="outline" title={`Autres actions pour ${module.name}`} aria-label={`Autres actions pour ${module.name}`}>
+                                        <MoreHorizontal className="h-4 w-4" />
+                                      </Button>
+                                    </DropdownMenu.Trigger>
+                                    <DropdownMenu.Content align="end" className="min-w-52">
+                                      <DropdownMenu.Label>Actions sur {module.name}</DropdownMenu.Label>
+                                      {module.state === "installed" && (
+                                        <DropdownMenu.Item color="red" disabled={!canUseDb} onSelect={() => requestUninstall([module.name])}>
+                                          <PackageX className="h-4 w-4" />
+                                          Désinstaller de la base
+                                        </DropdownMenu.Item>
+                                      )}
+                                      {module.removal_mode !== "link_only" && (
+                                        <DropdownMenu.Item color="red" disabled={!module.removable} onSelect={() => requestDeleteCode([module.name])}>
+                                          <Trash2 className="h-4 w-4" />
+                                          Supprimer du projet
+                                        </DropdownMenu.Item>
+                                      )}
+                                      {module.state !== "installed" && module.removal_mode === "link_only" && (
+                                        <DropdownMenu.Item disabled>Module protégé</DropdownMenu.Item>
+                                      )}
+                                    </DropdownMenu.Content>
+                                  </DropdownMenu.Root>
                                 </div>
                               </div>
                             );
@@ -2374,6 +2478,22 @@ export default function Home() {
                           </div>
                         )}
                       </div>
+                      {filteredModules.length > 0 && (
+                        <div className="flex flex-col gap-3 border-t bg-muted/30 px-3 py-2 text-sm sm:flex-row sm:items-center sm:justify-between">
+                          <span className="text-muted-foreground">
+                            {Math.min((modulePage - 1) * MODULES_PER_PAGE + 1, filteredModules.length)}–{Math.min(modulePage * MODULES_PER_PAGE, filteredModules.length)} sur {filteredModules.length} module(s)
+                          </span>
+                          <div className="flex items-center gap-2">
+                            <Button size="icon" variant="outline" disabled={modulePage <= 1} onClick={() => setModulePage((page) => Math.max(1, page - 1))} aria-label="Page précédente" title="Page précédente">
+                              <ChevronLeft className="h-4 w-4" />
+                            </Button>
+                            <span className="min-w-20 text-center tabular-nums">Page {modulePage}/{modulePageCount}</span>
+                            <Button size="icon" variant="outline" disabled={modulePage >= modulePageCount} onClick={() => setModulePage((page) => Math.min(modulePageCount, page + 1))} aria-label="Page suivante" title="Page suivante">
+                              <ChevronRight className="h-4 w-4" />
+                            </Button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </CardContent>
                 </Card>
@@ -2940,10 +3060,11 @@ export default function Home() {
               Analyse l’archive, choisis les modules à copier dans addons-store, puis confirme l’import.
             </DialogDescription>
           </DialogHeader>
-          <Input
+          <FilePicker
             ref={zipInputRef}
-            type="file"
             accept=".zip"
+            file={zipFile}
+            buttonLabel="Choisir un ZIP"
             disabled={loading || inspectingZip}
             onChange={(event) => void inspectZipFile(event.target.files?.[0])}
           />
@@ -3607,11 +3728,13 @@ function RestoreDatabaseDialog({
         </DialogHeader>
 
         <div className="grid gap-4">
-          <label className="grid min-w-0 gap-1.5 text-sm font-medium">
-            Sauvegarde ZIP Odoo
-            <Input
-              type="file"
+          <div className="grid min-w-0 gap-1.5 text-sm font-medium">
+            <label htmlFor="database-backup-file">Sauvegarde ZIP Odoo</label>
+            <FilePicker
+              id="database-backup-file"
               accept=".zip,application/zip"
+              file={file}
+              buttonLabel="Choisir une sauvegarde"
               disabled={submitting}
               onChange={(event) => setFile(event.target.files?.[0] || null)}
             />
@@ -3620,7 +3743,7 @@ function RestoreDatabaseDialog({
                 {file.name} · {(file.size / (1024 * 1024)).toLocaleString("fr-FR", { maximumFractionDigits: 1 })} Mo
               </span>
             )}
-          </label>
+          </div>
 
           <div className="grid gap-3 md:grid-cols-2">
             <label className="grid gap-1.5 text-sm font-medium">

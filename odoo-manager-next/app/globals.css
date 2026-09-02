@@ -54,6 +54,18 @@ body {
   color: hsl(var(--foreground));
 }
 
+.app-tabs-list {
+  box-shadow: none !important;
+}
+
+.app-tabs-list .rt-BaseTabListTrigger::before {
+  display: none !important;
+}
+
+.app-tabs-list .rt-BaseTabListTriggerInner {
+  background: transparent !important;
+}
+
 html,
 body {
   min-width: 0;

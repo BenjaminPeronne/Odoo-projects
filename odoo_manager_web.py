@@ -1720,7 +1720,7 @@ def bootstrap_snapshot():
         "overview": overview(docker),
         "system_status": system_status_snapshot(docker),
         "settings": settings_snapshot(),
-        "jobs": jobs_snapshot(),
+        "jobs": jobs_snapshot(compact=True),
     }
 
 
@@ -2821,9 +2821,11 @@ def import_zip_modules_job(job, project, filename, data, replace_existing=False,
             job.add(f"Archive temporaire nettoyée: {import_dir}")
 
 
-def jobs_snapshot():
+def jobs_snapshot(detail_job_id=None, compact=False):
     with JOBS_LOCK:
         values = list(JOBS.values())[-30:]
+        if compact and detail_job_id is None and values:
+            detail_job_id = values[-1].id
         return [
             {
                 "id": job.id,
@@ -2831,8 +2833,8 @@ def jobs_snapshot():
                 "status": job.status,
                 "started_at": job.started_at,
                 "finished_at": job.finished_at,
-                "lines": list(job.lines),
-                "output": job.output,
+                "lines": list(job.lines) if not compact or job.id == detail_job_id else [],
+                "output": job.output if not compact or job.id == detail_job_id else "",
             }
             for job in reversed(values)
         ]
@@ -3016,7 +3018,10 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/system/ssh-keys":
                 return json_response(self, ssh_public_keys_snapshot())
             if path == "/api/jobs":
-                return json_response(self, {"jobs": jobs_snapshot()})
+                params = urllib.parse.parse_qs(parsed.query)
+                detail_value = params.get("detail", [""])[0]
+                detail_job_id = int(detail_value) if detail_value.isdigit() else None
+                return json_response(self, {"jobs": jobs_snapshot(detail_job_id=detail_job_id, compact=True)})
 
             match = re.match(r"^/api/projects/([^/]+)/modules$", path)
             if match:

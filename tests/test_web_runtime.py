@@ -250,6 +250,20 @@ class JobResourceTests(unittest.TestCase):
         with web.JOBS_LOCK:
             self.assertLessEqual(len(web.JOBS), web.MAX_RETAINED_JOBS)
 
+    def test_compact_job_snapshot_only_includes_selected_output(self):
+        first = web.Job("First", lambda job: job.add("first output"))
+        second = web.Job("Second", lambda job: job.add("second output"))
+        self.wait_for(first)
+        self.wait_for(second)
+
+        snapshot = web.jobs_snapshot(detail_job_id=second.id, compact=True)
+        by_id = {job["id"]: job for job in snapshot}
+
+        self.assertEqual(by_id[first.id]["lines"], [])
+        self.assertEqual(by_id[first.id]["output"], "")
+        self.assertEqual(by_id[second.id]["lines"], ["second output"])
+        self.assertIn("second output", by_id[second.id]["output"])
+
 
 class ContainerStatusBatchTests(unittest.TestCase):
     @patch("odoo_manager_web.run_capture")
