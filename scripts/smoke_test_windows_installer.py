@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
 import os
 import shutil
@@ -16,6 +17,11 @@ from pathlib import Path
 
 
 TAURI_WINDOWS_ORIGIN = "http://tauri.localhost"
+PACKAGED_PROCESS_NAMES = (
+    "Odoo Manager.exe",
+    "odoo-manager.exe",
+    "odoo-manager-backend.exe",
+)
 
 
 def request(
@@ -53,18 +59,73 @@ def log_tail(path: Path, limit: int = 16_000) -> str:
 
 
 def stop_process_tree(process: subprocess.Popen[bytes]) -> None:
-    if process.poll() is not None:
-        return
     taskkill = shutil.which("taskkill")
-    if taskkill:
+    if taskkill and process.poll() is None:
         subprocess.run(
             [taskkill, "/PID", str(process.pid), "/T", "/F"],
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-    else:
+    elif process.poll() is None:
         process.kill()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def stop_packaged_processes() -> None:
+    taskkill = shutil.which("taskkill")
+    if not taskkill:
+        return
+    for image_name in PACKAGED_PROCESS_NAMES:
+        subprocess.run(
+            [taskkill, "/F", "/T", "/IM", image_name],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+
+def wait_for_backend_shutdown(timeout: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            request("http://127.0.0.1:8765/api/health", timeout=0.5)
+        except (OSError, urllib.error.URLError):
+            return
+        time.sleep(0.2)
+    raise RuntimeError("Le backend Windows reste actif après la fermeture de l'application.")
+
+
+def remove_tree_with_retry(path: Path, timeout: float = 15.0) -> None:
+    deadline = time.monotonic() + timeout
+    last_error: OSError | None = None
+    while path.exists():
+        try:
+            shutil.rmtree(path)
+            return
+        except OSError as error:
+            last_error = error
+            if time.monotonic() >= deadline:
+                break
+            stop_packaged_processes()
+            time.sleep(0.5)
+    if path.exists():
+        raise RuntimeError(
+            f"Le dossier d'installation temporaire reste verrouillé: {path} ({last_error})"
+        ) from last_error
+
+
+@contextmanager
+def temporary_install_directory():
+    root = Path(tempfile.mkdtemp(prefix="odoo-manager-installed-"))
+    try:
+        yield root
+    finally:
+        remove_tree_with_retry(root)
 
 
 def wait_for_health(process: subprocess.Popen[bytes], timeout: float) -> None:
@@ -118,6 +179,8 @@ def shutdown_application(process: subprocess.Popen[bytes]) -> None:
     except (OSError, urllib.error.URLError):
         pass
     stop_process_tree(process)
+    stop_packaged_processes()
+    wait_for_backend_shutdown()
 
 
 def main() -> None:
@@ -132,8 +195,7 @@ def main() -> None:
     if not installer.is_file():
         raise SystemExit(f"Installateur introuvable: {installer}")
 
-    with tempfile.TemporaryDirectory(prefix="odoo-manager-installed-") as temporary:
-        root = Path(temporary)
+    with temporary_install_directory() as root:
         install_dir = root / "app"
         # Reproduce a real first launch: the configured workspace may not exist yet.
         workspace = root / "workspace"
