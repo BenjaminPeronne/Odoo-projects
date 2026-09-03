@@ -19,6 +19,11 @@ projets peut etre change depuis `Parametres` sans deplacer le gestionnaire.
 ./odoo_next_gui.sh
 ```
 
+Cette commande est le lanceur de previsualisation du design. Elle demarre
+l'API Python sur `127.0.0.1:8765`, lance Next.js, attend que les deux services
+soient disponibles puis ouvre automatiquement `http://127.0.0.1:3000/` dans
+le navigateur. `Ctrl+C` arrete les processus demarres par cette commande.
+
 Pour lancer en arriere-plan via tmux si disponible :
 
 ```sh

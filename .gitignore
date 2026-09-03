@@ -3,6 +3,8 @@
 
 !/.gitignore
 !/.github/
+!/.vscode/
+!/.vscode/tasks.json
 !/docs/
 !/odoo-manager-next/
 !/odoo_manager_core/

@@ -34,7 +34,7 @@ import {
   Trash2,
   Upload,
 } from "lucide-react";
-import { DropdownMenu, Switch } from "@radix-ui/themes";
+import { DropdownMenu } from "@radix-ui/themes";
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -1351,7 +1351,7 @@ export default function Home() {
       setUpdateFilestoreStatus(database?.filestore || null);
       setUpdatePendingModules(
         database?.pending_modules ||
-          (database?.pending_missing_modules || []).map((name) => ({ name, state: "en attente", code_available: false })),
+        (database?.pending_missing_modules || []).map((name) => ({ name, state: "en attente", code_available: false })),
       );
       setUpdateLocalExcludedModules(database?.local_excluded_modules || database?.ignored_missing_modules || []);
     } catch (err) {
@@ -1688,7 +1688,7 @@ export default function Home() {
   const selectedProjectReady = Boolean(selectedProject);
   const selectedProjectHasContainers = Boolean(
     selectedProject &&
-      [selectedProject.odoo_status, selectedProject.postgres_status].some((status) => status && status !== "absent" && status !== "docker off"),
+    [selectedProject.odoo_status, selectedProject.postgres_status].some((status) => status && status !== "absent" && status !== "docker off"),
   );
   const selectedProjectLifecycleJob = useMemo(
     () =>
@@ -1764,13 +1764,6 @@ export default function Home() {
       schedule(refreshOverview, 1200);
       schedule(refreshSystemStatus, 1600);
     }
-  }
-
-  async function requestProjectPower(project: Project, running: boolean) {
-    const job = await createJob(running ? "start_project" : "stop_project", { project: project.name });
-    if (!job) return;
-    schedule(refreshOverview, running ? 1800 : 1200);
-    schedule(refreshSystemStatus, running ? 2200 : 1600);
   }
 
   async function requestOpenOdoo() {
@@ -1926,14 +1919,13 @@ export default function Home() {
                         {lifecycleJob ? (
                           <Loader2 className="h-4 w-4 animate-spin text-primary" aria-label="Changement d’état en cours" />
                         ) : (
-                          <Switch
-                            size="2"
-                            color={displayedRunning ? "green" : "gray"}
-                            checked={displayedRunning}
-                            disabled={loading || !systemStatus?.docker.running}
-                            aria-label={`${displayedRunning ? "Arrêter" : "Démarrer"} ${project.name}`}
-                            onCheckedChange={(checked) => void requestProjectPower(project, checked)}
-                          />
+                          <span
+                            className={cn("inline-flex h-6 w-6 shrink-0 items-center justify-center", displayedRunning ? "text-emerald-500" : "text-red-500")}
+                            role="img"
+                            aria-label={`${project.name} : ${displayedRunning ? "allumé" : "éteint"}`}
+                          >
+                            <Circle className="h-5 w-5 fill-current" aria-hidden="true" />
+                          </span>
                         )}
                         <span className={cn("w-7 text-xs font-semibold", displayedRunning ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground")}>
                           {displayedRunning ? "ON" : "OFF"}

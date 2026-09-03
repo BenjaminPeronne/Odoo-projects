@@ -1,0 +1,41 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Odoo Manager: Previsualiser l'interface",
+      "type": "process",
+      "command": "sh",
+      "args": ["./odoo_next_gui.sh"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true,
+        "focus": false
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Odoo Manager: Arreter la previsualisation",
+      "type": "process",
+      "command": "sh",
+      "args": ["./odoo_next_gui.sh", "--stop"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "reveal": "silent",
+        "panel": "dedicated",
+        "clear": false,
+        "focus": false
+      },
+      "problemMatcher": []
+    }
+  ]
+}
