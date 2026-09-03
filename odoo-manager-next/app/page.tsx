@@ -34,7 +34,7 @@ import {
   Trash2,
   Upload,
 } from "lucide-react";
-import { DropdownMenu } from "@radix-ui/themes";
+import { DropdownMenu, Switch } from "@radix-ui/themes";
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -126,6 +126,7 @@ type ManagerSettings = {
   traefik_directory: string;
   docker_poll_interval: number;
   start_project_before_open: boolean;
+  show_technical_details: boolean;
   interface_icon: InterfaceIcon;
   onboarding_completed: boolean;
   config_file?: string;
@@ -555,6 +556,7 @@ function fallbackManagerSettings(
     traefik_directory: current?.traefik_directory || systemStatus?.traefik?.path || "",
     docker_poll_interval: current?.docker_poll_interval || 10,
     start_project_before_open: current?.start_project_before_open ?? false,
+    show_technical_details: current?.show_technical_details ?? false,
     interface_icon: current?.interface_icon === "local" ? "local" : "manager",
     onboarding_completed: current?.onboarding_completed ?? false,
     config_file: current?.config_file,
@@ -681,6 +683,13 @@ export default function Home() {
 
   const selectedJob = useMemo(() => jobs.find((job) => job.id === selectedJobId) || jobs[0], [jobs, selectedJobId]);
   const hasRunningJobs = useMemo(() => jobs.some((job) => job.status === "running"), [jobs]);
+  const projectLifecycleJobs = useMemo(() => {
+    const runningJobs = new Map<string, Job>();
+    for (const job of jobs) {
+      if (job.status === "running") runningJobs.set(job.title, job);
+    }
+    return runningJobs;
+  }, [jobs]);
   const gitInstallRunning = jobs.some((job) => job.status === "running" && job.title === "Installer Git pour Windows");
   const traefikInstallRunning = jobs.some((job) => job.status === "running" && job.title === "Installer Traefik");
   const selectedSshKey = useMemo(
@@ -690,7 +699,18 @@ export default function Home() {
 
   const filteredProjects = useMemo(() => {
     const query = projectsFilter.trim().toLowerCase();
-    return (overview?.projects || []).filter((project) => !query || project.name.toLowerCase().includes(query));
+    return (overview?.projects || [])
+      .filter((project) => !query || project.name.toLowerCase().includes(query))
+      .map((project, index) => ({ project, index }))
+      .sort((left, right) => {
+        const rank = (project: Project) => {
+          if (project.odoo_status === "running") return 0;
+          if (project.odoo_status === "absent" || project.odoo_status === "docker off") return 2;
+          return 1;
+        };
+        return rank(left.project) - rank(right.project) || left.index - right.index;
+      })
+      .map(({ project }) => project);
   }, [overview, projectsFilter]);
 
   const deferredModuleSearch = useDeferredValue(moduleSearch);
@@ -1746,6 +1766,13 @@ export default function Home() {
     }
   }
 
+  async function requestProjectPower(project: Project, running: boolean) {
+    const job = await createJob(running ? "start_project" : "stop_project", { project: project.name });
+    if (!job) return;
+    schedule(refreshOverview, running ? 1800 : 1200);
+    schedule(refreshSystemStatus, running ? 2200 : 1600);
+  }
+
   async function requestOpenOdoo() {
     const startBeforeOpen = settings?.start_project_before_open ?? false;
     if (!selectedProject || openingOdoo || (startBeforeOpen && selectedProjectLifecycleJob)) return;
@@ -1859,38 +1886,72 @@ export default function Home() {
                 />
               </div>
             </div>
-            <div className="min-h-0 max-h-[260px] flex-1 overflow-auto p-2 sm:max-h-[340px] lg:max-h-none">
-              {filteredProjects.map((project) => (
-                <InteractiveCard
-                  key={project.name}
-                  className={cn(
-                    "mb-1 w-full p-3",
-                    selectedProject?.name === project.name && "border-primary bg-primary/[0.08] shadow-sm ring-1 ring-primary/25 dark:bg-primary/[0.14]",
-                  )}
-                  onClick={() => {
-                    setSelectedProjectName(project.name);
-                    setSelectedDb(firstOdooDatabase(project));
-                    setExternalLogView(null);
-                  }}
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="truncate font-semibold">{project.name}</div>
-                      <div className="mt-1 text-xs text-muted-foreground">
-                        {project.odoo_version ? `Odoo ${project.odoo_version}` : "Version inconnue"}
+            <div className="min-h-0 max-h-[260px] flex-1 overflow-auto px-2 py-1 sm:max-h-[340px] lg:max-h-none">
+              {filteredProjects.map((project) => {
+                const running = project.odoo_status === "running";
+                const absent = project.odoo_status === "absent" || project.odoo_status === "docker off";
+                const lifecycleJob =
+                  projectLifecycleJobs.get(`Démarrer ${project.name}`) ||
+                  projectLifecycleJobs.get(`Arrêter ${project.name}`);
+                const switchingOn = lifecycleJob?.title.startsWith("Démarrer ") ?? false;
+                const displayedRunning = running || switchingOn;
+
+                return (
+                  <div
+                    key={project.name}
+                    className={cn(
+                      "border-b border-border/70 transition-colors last:border-b-0",
+                      selectedProject?.name === project.name && "bg-primary/[0.07] dark:bg-primary/[0.12]",
+                      absent && "bg-muted/35 text-muted-foreground",
+                    )}
+                  >
+                    <div className="flex min-h-16 items-center gap-2 px-2">
+                      <button
+                        type="button"
+                        className="min-w-0 flex-1 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                        onClick={() => {
+                          setSelectedProjectName(project.name);
+                          setSelectedDb(firstOdooDatabase(project));
+                          setExternalLogView(null);
+                        }}
+                      >
+                        <span className={cn("block truncate text-sm font-semibold", absent ? "text-muted-foreground" : "text-foreground")}>
+                          {project.name}
+                        </span>
+                        <span className="mt-0.5 block text-xs text-muted-foreground">
+                          {project.odoo_version ? `Odoo ${project.odoo_version}` : "Version inconnue"}
+                        </span>
+                      </button>
+                      <div className="flex w-[74px] shrink-0 items-center justify-end gap-2">
+                        {lifecycleJob ? (
+                          <Loader2 className="h-4 w-4 animate-spin text-primary" aria-label="Changement d’état en cours" />
+                        ) : (
+                          <Switch
+                            size="2"
+                            color={displayedRunning ? "green" : "gray"}
+                            checked={displayedRunning}
+                            disabled={loading || !systemStatus?.docker.running}
+                            aria-label={`${displayedRunning ? "Arrêter" : "Démarrer"} ${project.name}`}
+                            onCheckedChange={(checked) => void requestProjectPower(project, checked)}
+                          />
+                        )}
+                        <span className={cn("w-7 text-xs font-semibold", displayedRunning ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground")}>
+                          {displayedRunning ? "ON" : "OFF"}
+                        </span>
                       </div>
                     </div>
-                    <div className="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-xs text-muted-foreground">
-                      <span className={cn("h-2 w-2 rounded-full", statusDot(project.odoo_status))} />
-                      {project.odoo_status}
-                    </div>
+                    {settings?.show_technical_details && (
+                      <div className="flex flex-wrap items-center gap-1.5 px-2 pb-2 text-xs">
+                        <Badge variant={statusVariant(project.odoo_status)}>Odoo {project.odoo_status}</Badge>
+                        <Badge variant={statusVariant(project.postgres_status)}>PostgreSQL {project.postgres_status}</Badge>
+                        <Badge variant="outline">
+                          {project.databases?.filter((db) => db !== "postgres").length || 0} base(s)
+                        </Badge>
+                      </div>
+                    )}
                   </div>
-                  <div className="mt-3 flex flex-wrap gap-2 text-xs">
-                    <Badge variant={statusVariant(project.postgres_status)}>PostgreSQL {project.postgres_status}</Badge>
-                    <Badge variant="outline">{project.databases?.filter((db) => db !== "postgres").length || 0} base(s)</Badge>
-                  </div>
-                </InteractiveCard>
-              ))}
+                );
+              })}
             </div>
             <div className="grid grid-cols-2 gap-2 border-t p-3 lg:grid-cols-1">
               <Button className="col-span-2 w-full lg:col-span-1" onClick={openCreateProjectDialog}>
@@ -2939,6 +3000,23 @@ export default function Home() {
                   </InteractiveCard>
                 </div>
               </div>
+
+              <label className="flex cursor-pointer items-start gap-3 rounded-md border p-3 text-sm">
+                <Checkbox
+                  className="mt-0.5"
+                  checked={settingsDraft.show_technical_details}
+                  onCheckedChange={(checked) =>
+                    setSettingsDraft({ ...settingsDraft, show_technical_details: checked === true })
+                  }
+                />
+                <span className="min-w-0">
+                  <span className="block font-medium">Afficher les détails techniques</span>
+                  <span className="mt-1 block text-xs font-normal leading-relaxed text-muted-foreground">
+                    Affiche les états Odoo et PostgreSQL ainsi que le nombre de bases dans la liste des projets.
+                    Désactivé, le gestionnaire présente uniquement un interrupteur ON/OFF.
+                  </span>
+                </span>
+              </label>
 
               <label className="flex cursor-pointer items-start gap-3 rounded-md border p-3 text-sm">
                 <Checkbox

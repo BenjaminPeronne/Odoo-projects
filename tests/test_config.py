@@ -41,6 +41,7 @@ class SettingsTests(unittest.TestCase):
                     "execution_mode": "wsl",
                     "wsl_distribution": "Ubuntu",
                     "docker_poll_interval": 1,
+                    "show_technical_details": True,
                     "interface_icon": "local",
                     "onboarding_completed": True,
                 },
@@ -51,6 +52,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(loaded.execution_mode, "wsl")
             self.assertEqual(loaded.docker_poll_interval, 3)
             self.assertFalse(loaded.start_project_before_open)
+            self.assertTrue(loaded.show_technical_details)
             self.assertEqual(loaded.interface_icon, "local")
             self.assertTrue(loaded.onboarding_completed)
 
@@ -58,6 +60,7 @@ class SettingsTests(unittest.TestCase):
         settings = ManagerSettings.from_dict({}, "/tmp/workspace")
 
         self.assertFalse(settings.start_project_before_open)
+        self.assertFalse(settings.show_technical_details)
 
     def test_interface_icon_defaults_to_manager_for_unknown_value(self):
         settings = ManagerSettings.from_dict({"interface_icon": "unknown"}, "/tmp/workspace")

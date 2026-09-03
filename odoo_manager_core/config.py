@@ -60,6 +60,7 @@ class ManagerSettings:
     terminal: str = "auto"
     docker_poll_interval: int = 10
     start_project_before_open: bool = False
+    show_technical_details: bool = False
     interface_icon: str = "manager"
     onboarding_completed: bool = False
 
@@ -91,6 +92,7 @@ class ManagerSettings:
             terminal=str(payload.get("terminal", "auto")).strip() or "auto",
             docker_poll_interval=poll_interval,
             start_project_before_open=bool(payload.get("start_project_before_open", False)),
+            show_technical_details=bool(payload.get("show_technical_details", False)),
             interface_icon=interface_icon,
             onboarding_completed=bool(payload.get("onboarding_completed", False)),
         )
