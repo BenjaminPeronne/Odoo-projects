@@ -1318,6 +1318,16 @@ def module_location_info(project, path):
     }
 
 
+def module_origin(source_path):
+    normalized_path = str(source_path).replace("\\", "/").casefold()
+    if (
+        "/addons-store/odoo_entreprise/" in normalized_path
+        or "/addons-store/odoo_enterprise/" in normalized_path
+    ):
+        return "enterprise"
+    return "other"
+
+
 def basic_module(project, path):
     location = module_location_info(project, path)
     name = posixpath.basename(str(path).replace("\\", "/")) if wsl_path_context(path) else path.name
@@ -1328,6 +1338,7 @@ def basic_module(project, path):
         "version": "",
         "category": "",
         "installable": True,
+        "origin": module_origin(location["source_path"]),
         **location,
     }
 

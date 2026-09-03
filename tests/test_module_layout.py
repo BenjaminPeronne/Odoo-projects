@@ -62,6 +62,21 @@ class ModuleLayoutTests(unittest.TestCase):
         self.assertEqual(str(storage.resolve(strict=False)), module["source_path"])
         self.assertEqual("lien vers addons-store", module["path_kind"])
 
+    def test_modules_report_enterprise_and_other_origins(self):
+        community = self.project_root / "odoo" / "odoo" / "addons" / "community_module"
+        enterprise = self.project_root / "odoo" / "addons-store" / "odoo_enterprise" / "enterprise_module"
+        for module in (community, enterprise):
+            module.mkdir(parents=True)
+            (module / "__manifest__.py").write_text("{'name': 'Test'}\n", encoding="utf-8")
+
+        web.link_module_candidates(DummyJob(), self.project, [self.external])
+
+        origins = {module["name"]: module["origin"] for module in web.modules_for(self.project)}
+
+        self.assertEqual("other", origins["community_module"])
+        self.assertEqual("enterprise", origins["enterprise_module"])
+        self.assertEqual("other", origins["custom_module"])
+
     @mock.patch("odoo_manager_web.platform_id", return_value="windows")
     @mock.patch("odoo_manager_web.run_capture")
     def test_wsl_workspace_scans_relative_addon_links_inside_linux(self, run_capture, _platform):

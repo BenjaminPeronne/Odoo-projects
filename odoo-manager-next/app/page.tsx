@@ -19,7 +19,6 @@ import {
   Heart,
   Info,
   KeyRound,
-  ListRestart,
   Loader2,
   Logs,
   MoreHorizontal,
@@ -174,10 +173,13 @@ type RestoreDatabasePayload = {
   file: File;
 };
 
+type ModuleOrigin = "enterprise" | "other";
+
 type ModuleInfo = {
   name: string;
   title: string;
   state: string;
+  origin?: string;
   version?: string;
   installed_version?: string;
   path: string;
@@ -519,6 +521,18 @@ function statusDot(status: string) {
   return "bg-slate-400";
 }
 
+function normalizedModuleOrigin(origin?: string, sourcePath?: string): ModuleOrigin {
+  if (origin === "enterprise") return "enterprise";
+  const normalizedPath = (sourcePath || "").replace(/\\/g, "/").toLowerCase();
+  return normalizedPath.includes("/addons-store/odoo_entreprise/") || normalizedPath.includes("/addons-store/odoo_enterprise/")
+    ? "enterprise"
+    : "other";
+}
+
+function moduleOriginLabel(origin: ModuleOrigin) {
+  return origin === "enterprise" ? "Odoo Enterprise" : "Autre";
+}
+
 function firstOdooDatabase(project?: Project) {
   return project?.databases?.find((db) => db !== "postgres") || "";
 }
@@ -590,6 +604,7 @@ export default function Home() {
   const [modules, setModules] = useState<ModuleInfo[]>([]);
   const [moduleSearch, setModuleSearch] = useState("");
   const [moduleFilter, setModuleFilter] = useState("all");
+  const [moduleOriginFilter, setModuleOriginFilter] = useState("all");
   const [modulePage, setModulePage] = useState(1);
   const [selectedModules, setSelectedModules] = useState<Set<string>>(new Set());
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -718,8 +733,9 @@ export default function Home() {
     const query = deferredModuleSearch.trim().toLowerCase();
     return modules
       .filter((module) => !query || module.name.toLowerCase().includes(query))
-      .filter((module) => moduleFilter === "all" || module.state === moduleFilter);
-  }, [deferredModuleSearch, modules, moduleFilter]);
+      .filter((module) => moduleFilter === "all" || module.state === moduleFilter)
+      .filter((module) => moduleOriginFilter === "all" || normalizedModuleOrigin(module.origin, module.source_path || module.path) === moduleOriginFilter);
+  }, [deferredModuleSearch, modules, moduleFilter, moduleOriginFilter]);
   const modulePageCount = Math.max(1, Math.ceil(filteredModules.length / MODULES_PER_PAGE));
   const visibleModules = useMemo(() => {
     const start = (modulePage - 1) * MODULES_PER_PAGE;
@@ -735,6 +751,10 @@ export default function Home() {
   const allFilteredModulesSelected = filteredModuleNames.length > 0 && selectedFilteredModuleCount === filteredModuleNames.length;
   const someFilteredModulesSelected = selectedFilteredModuleCount > 0 && !allFilteredModulesSelected;
   const fallbackDockerGuide = useMemo(() => offlineDockerGuide(), []);
+  const showModuleLocations = settings?.show_technical_details ?? false;
+  const moduleTableGridColumns = showModuleLocations
+    ? "xl:grid-cols-[minmax(210px,1.35fr)_100px_110px_150px_minmax(220px,1.15fr)_200px]"
+    : "xl:grid-cols-[minmax(210px,1.35fr)_100px_110px_150px_200px]";
 
   const schedule = useCallback((callback: () => void | Promise<void>, delay: number) => {
     const timeout = window.setTimeout(() => {
@@ -1329,13 +1349,6 @@ export default function Home() {
     return selectedDb;
   }
 
-  async function requestUpdateLocalModules() {
-    const db = selectedDatabaseOrNotify("la MAJ addons projet");
-    if (!db || !selectedProject) return;
-    await createJob("update_local_modules", { project: selectedProject.name, db });
-    schedule(refreshModules, 2500);
-  }
-
   async function requestUpdateAllOdooModules() {
     const db = selectedDatabaseOrNotify("la MAJ complète Odoo");
     if (!db || !selectedProject) return;
@@ -1719,7 +1732,7 @@ export default function Home() {
 
   useEffect(() => {
     setModulePage(1);
-  }, [deferredModuleSearch, moduleFilter, selectedDb, selectedProject?.name]);
+  }, [deferredModuleSearch, moduleFilter, moduleOriginFilter, selectedDb, selectedProject?.name]);
 
   useEffect(() => {
     if (modulePage > modulePageCount) setModulePage(modulePageCount);
@@ -2298,13 +2311,23 @@ export default function Home() {
                       <CardTitle>Modules</CardTitle>
                       <CardDescription>Recherche, sélection et mise à jour des modules de la base Odoo choisie.</CardDescription>
                     </div>
-                    <Button className="w-full sm:w-auto" variant="outline" onClick={() => setZipDialogOpen(true)} disabled={!selectedProjectReady}>
-                      <FileArchive className="h-4 w-4" />
-                      Importer un ZIP
-                    </Button>
+                    <div className="grid w-full gap-2 sm:w-auto sm:grid-cols-2">
+                      <Button
+                        className="w-full"
+                        disabled={!selectedProjectReady || loading || checkingUpdatePrerequisites}
+                        onClick={requestUpdateAllOdooModules}
+                      >
+                        {checkingUpdatePrerequisites ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
+                        MAJ complète Odoo
+                      </Button>
+                      <Button className="w-full" variant="outline" onClick={() => setZipDialogOpen(true)} disabled={!selectedProjectReady}>
+                        <FileArchive className="h-4 w-4" />
+                        Importer un ZIP
+                      </Button>
+                    </div>
                   </CardHeader>
                   <CardContent>
-                    <div className="mb-4 grid min-w-0 gap-3 md:grid-cols-[minmax(0,1fr)_minmax(150px,220px)] xl:grid-cols-[minmax(0,1fr)_220px_220px]">
+                    <div className="mb-4 grid min-w-0 gap-3 md:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_180px_180px_220px]">
                       <div className="relative">
                         <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
                         <Input className="pl-9" placeholder="Rechercher par nom de module" value={moduleSearch} onChange={(event) => setModuleSearch(event.target.value)} />
@@ -2317,6 +2340,16 @@ export default function Home() {
                           <SelectItem value="all">Tous les états</SelectItem>
                           <SelectItem value="installed">Installés</SelectItem>
                           <SelectItem value="uninstalled">Disponibles</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <Select value={moduleOriginFilter} onValueChange={setModuleOriginFilter}>
+                        <SelectTrigger placeholder="Origine">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">Toutes les origines</SelectItem>
+                          <SelectItem value="enterprise">Odoo Enterprise</SelectItem>
+                          <SelectItem value="other">Autre</SelectItem>
                         </SelectContent>
                       </Select>
                       <Select value={selectedDb} onValueChange={setSelectedDb}>
@@ -2406,11 +2439,12 @@ export default function Home() {
                       </div>
                     )}
                     <div className="overflow-hidden rounded-md border">
-                      <div className="hidden border-b bg-muted px-3 py-2 text-xs font-medium uppercase text-muted-foreground xl:grid xl:grid-cols-[minmax(210px,1.35fr)_100px_110px_minmax(220px,1.15fr)_200px] xl:items-center xl:gap-3">
+                      <div className={cn("hidden border-b bg-muted px-3 py-2 text-xs font-medium uppercase text-muted-foreground xl:grid xl:items-center xl:gap-3", moduleTableGridColumns)}>
                         <div>Module</div>
                         <div>État</div>
                         <div>Version</div>
-                        <div>Emplacements</div>
+                        <div>Origine</div>
+                        {showModuleLocations && <div>Emplacements</div>}
                         <div className="text-right">Actions</div>
                       </div>
                       <div className="max-h-[min(62vh,720px)] overflow-y-auto">
@@ -2421,11 +2455,13 @@ export default function Home() {
                             const displaySourcePath = compactWorkspacePath(sourcePath, overview?.workspace);
                             const displayLinkPath = compactWorkspacePath(linkPath, overview?.workspace);
                             const samePaths = Boolean(linkPath && sourcePath && linkPath === sourcePath);
+                            const origin = normalizedModuleOrigin(module.origin, sourcePath);
                             return (
                               <div
                                 key={module.name}
                                 className={cn(
-                                  "grid min-w-0 gap-3 border-t p-3 transition-colors first:border-t-0 hover:bg-muted/35 xl:grid-cols-[minmax(210px,1.35fr)_100px_110px_minmax(220px,1.15fr)_200px] xl:items-center",
+                                  "grid min-w-0 gap-3 border-t p-3 transition-colors first:border-t-0 hover:bg-muted/35 xl:items-center",
+                                  moduleTableGridColumns,
                                   selectedModules.has(module.name) && "bg-primary/[0.06] dark:bg-primary/[0.12]",
                                 )}
                               >
@@ -2449,30 +2485,36 @@ export default function Home() {
                                   <span className="text-xs font-medium text-muted-foreground xl:hidden">Version</span>
                                   <span className="min-w-0 break-words">{module.installed_version || module.version || "-"}</span>
                                 </div>
-                                <div className="min-w-0">
-                                  <div className="mb-1 text-xs font-medium text-muted-foreground xl:hidden">Emplacements</div>
-                                  <div className="space-y-1">
-                                    {module.path_kind && (
-                                      <Badge className="w-fit max-w-full truncate" variant="outline" title={module.path_kind}>
-                                        {module.path_kind}
-                                      </Badge>
-                                    )}
-                                    <div className="min-w-0 text-xs">
-                                      <span className="font-medium text-teal-700 dark:text-teal-300">Source</span>
-                                      <div className="truncate font-mono text-teal-800 dark:text-teal-200" title={sourcePath}>
-                                        {displaySourcePath || "-"}
-                                      </div>
-                                    </div>
-                                    {displayLinkPath && !samePaths && (
+                                <div className="flex min-w-0 items-center justify-between gap-3 xl:block">
+                                  <span className="text-xs font-medium text-muted-foreground xl:hidden">Origine</span>
+                                  <Badge className="shrink-0" variant="outline">{moduleOriginLabel(origin)}</Badge>
+                                </div>
+                                {showModuleLocations && (
+                                  <div className="min-w-0">
+                                    <div className="mb-1 text-xs font-medium text-muted-foreground xl:hidden">Emplacements</div>
+                                    <div className="space-y-1">
+                                      {module.path_kind && (
+                                        <Badge className="w-fit max-w-full truncate" variant="outline" title={module.path_kind}>
+                                          {module.path_kind}
+                                        </Badge>
+                                      )}
                                       <div className="min-w-0 text-xs">
-                                        <span className="font-medium text-blue-700 dark:text-blue-300">Lien Odoo</span>
-                                        <div className="truncate font-mono text-blue-800 dark:text-blue-200" title={linkPath}>
-                                          {displayLinkPath}
+                                        <span className="font-medium text-teal-700 dark:text-teal-300">Source</span>
+                                        <div className="truncate font-mono text-teal-800 dark:text-teal-200" title={sourcePath}>
+                                          {displaySourcePath || "-"}
                                         </div>
                                       </div>
-                                    )}
+                                      {displayLinkPath && !samePaths && (
+                                        <div className="min-w-0 text-xs">
+                                          <span className="font-medium text-blue-700 dark:text-blue-300">Lien Odoo</span>
+                                          <div className="truncate font-mono text-blue-800 dark:text-blue-200" title={linkPath}>
+                                            {displayLinkPath}
+                                          </div>
+                                        </div>
+                                      )}
+                                    </div>
                                   </div>
-                                </div>
+                                )}
                                 <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_40px] gap-2">
                                   {module.state === "installed" ? (
                                     <Button
@@ -2649,43 +2691,25 @@ export default function Home() {
               </TabsContent>
 
               <TabsContent value="actions">
-                <div className="grid gap-4 xl:grid-cols-3">
-                  <Card>
-                    <CardHeader>
-                      <CardTitle>Actions Odoo</CardTitle>
-                      <CardDescription>Met à jour les modules dans la base sélectionnée.</CardDescription>
-                    </CardHeader>
-                    <CardContent className="space-y-2">
-                      <Button className="w-full" variant="outline" disabled={!selectedProjectReady || loading} onClick={requestUpdateLocalModules}>
-                        <ListRestart className="h-4 w-4" />
-                        MAJ addons projet
-                      </Button>
-                      <Button
-                        className="w-full"
-                        disabled={!selectedProjectReady || loading || checkingUpdatePrerequisites}
-                        onClick={requestUpdateAllOdooModules}
-                      >
-                        {checkingUpdatePrerequisites ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
-                        MAJ complète Odoo (-u all)
-                      </Button>
-                    </CardContent>
-                  </Card>
-                  <Card>
-                    <CardHeader>
-                      <CardTitle>Code et images</CardTitle>
-                      <CardDescription>Met à jour les sources et images Docker.</CardDescription>
-                    </CardHeader>
-                    <CardContent className="space-y-2">
-                      <Button className="w-full" variant="outline" disabled={!selectedProjectReady} onClick={() => createJob("update_project", { project: selectedProject?.name })}>
-                        <CloudDownload className="h-4 w-4" />
-                        MAJ projet
-                      </Button>
-                      <Button className="w-full" onClick={() => createJob("update_all")}>
-                        <CloudDownload className="h-4 w-4" />
-                        MAJ tous les projets
-                      </Button>
-                    </CardContent>
-                  </Card>
+                <div className={cn("grid gap-4", settings?.show_technical_details && "xl:grid-cols-2")}>
+                  {settings?.show_technical_details && (
+                    <Card>
+                      <CardHeader>
+                        <CardTitle>Code et images</CardTitle>
+                        <CardDescription>Met à jour les sources et images Docker.</CardDescription>
+                      </CardHeader>
+                      <CardContent className="space-y-2">
+                        <Button className="w-full" variant="outline" disabled={!selectedProjectReady} onClick={() => createJob("update_project", { project: selectedProject?.name })}>
+                          <CloudDownload className="h-4 w-4" />
+                          MAJ projet
+                        </Button>
+                        <Button className="w-full" onClick={() => createJob("update_all")}>
+                          <CloudDownload className="h-4 w-4" />
+                          MAJ tous les projets
+                        </Button>
+                      </CardContent>
+                    </Card>
+                  )}
                   <Card>
                     <CardHeader>
                       <CardTitle>Zone sensible</CardTitle>
@@ -3004,8 +3028,9 @@ export default function Home() {
                 <span className="min-w-0">
                   <span className="block font-medium">Afficher les détails techniques</span>
                   <span className="mt-1 block text-xs font-normal leading-relaxed text-muted-foreground">
-                    Affiche les états Odoo et PostgreSQL ainsi que le nombre de bases dans la liste des projets.
-                    Désactivé, le gestionnaire présente uniquement un interrupteur ON/OFF.
+                    Affiche les états Odoo et PostgreSQL ainsi que le nombre de bases dans la liste des projets,
+                    les emplacements des modules, et les actions de mise à jour du code et des images Docker.
+                    Désactivé, le gestionnaire présente uniquement le voyant d’état des projets et une liste de modules compacte.
                   </span>
                 </span>
               </label>
