@@ -252,7 +252,7 @@ class JobResourceTests(unittest.TestCase):
 
     def test_compact_job_snapshot_only_includes_selected_output(self):
         first = web.Job("First", lambda job: job.add("first output"))
-        second = web.Job("Second", lambda job: job.add("second output"))
+        second = web.Job("Second", lambda job: job.add("second output"), project="DEMO")
         self.wait_for(first)
         self.wait_for(second)
 
@@ -261,6 +261,7 @@ class JobResourceTests(unittest.TestCase):
 
         self.assertEqual(by_id[first.id]["lines"], [])
         self.assertEqual(by_id[first.id]["output"], "")
+        self.assertEqual(by_id[second.id]["project"], "DEMO")
         self.assertEqual(by_id[second.id]["lines"], ["second output"])
         self.assertIn("second output", by_id[second.id]["output"])
 

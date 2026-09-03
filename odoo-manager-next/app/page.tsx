@@ -157,6 +157,7 @@ type SshPublicKey = {
 type Job = {
   id: number;
   title: string;
+  project?: string | null;
   status: "running" | "done" | "error" | string;
   started_at: string;
   finished_at?: string | null;
@@ -609,7 +610,7 @@ export default function Home() {
   const [selectedModules, setSelectedModules] = useState<Set<string>>(new Set());
   const [jobs, setJobs] = useState<Job[]>([]);
   const [selectedJobId, setSelectedJobId] = useState<number | null>(null);
-  const [externalLogView, setExternalLogView] = useState<{ title: string; content: string } | null>(null);
+  const [externalLogView, setExternalLogView] = useState<{ title: string; content: string; project: string } | null>(null);
   const [loading, setLoading] = useState(false);
   const [openingOdoo, setOpeningOdoo] = useState(false);
   const [openingPostgresql, setOpeningPostgresql] = useState(false);
@@ -696,7 +697,14 @@ export default function Home() {
     [selectedProject],
   );
 
-  const selectedJob = useMemo(() => jobs.find((job) => job.id === selectedJobId) || jobs[0], [jobs, selectedJobId]);
+  const projectJobs = useMemo(
+    () => jobs.filter((job) => job.project === selectedProject?.name),
+    [jobs, selectedProject?.name],
+  );
+  const selectedJob = useMemo(
+    () => projectJobs.find((job) => job.id === selectedJobId) || projectJobs[0],
+    [projectJobs, selectedJobId],
+  );
   const hasRunningJobs = useMemo(() => jobs.some((job) => job.status === "running"), [jobs]);
   const projectLifecycleJobs = useMemo(() => {
     const runningJobs = new Map<string, Job>();
@@ -1447,6 +1455,7 @@ export default function Home() {
       setExternalLogView({
         title: `Logs Odoo - ${selectedProject.name}`,
         content: payload.logs || "Aucun log.",
+        project: selectedProject.name,
       });
       enableLogAutoFollow();
     } catch (err) {
@@ -1461,6 +1470,7 @@ export default function Home() {
       setExternalLogView({
         title: `Diagnostic - ${selectedProject.name}`,
         content: formatDiagnostics(payload),
+        project: selectedProject.name,
       });
       enableLogAutoFollow();
       pushToast("info", "Diagnostic projet chargé.");
@@ -1699,6 +1709,7 @@ export default function Home() {
     [moduleByName, selectedModuleList],
   );
   const selectedProjectReady = Boolean(selectedProject);
+  const selectedProjectOnline = selectedProject?.odoo_status === "running";
   const selectedProjectHasContainers = Boolean(
     selectedProject &&
     [selectedProject.odoo_status, selectedProject.postgres_status].some((status) => status && status !== "absent" && status !== "docker off"),
@@ -1717,9 +1728,10 @@ export default function Home() {
   const selectedProjectStopping = selectedProjectLifecycleJob?.title.startsWith("Arrêter ") ?? false;
   const canUseDb = Boolean(selectedDb && odooDatabases.includes(selectedDb));
   const selectedOdooUrl = odooAccessUrl(selectedProject, selectedDb);
-  const outputTitle = externalLogView?.title || selectedJob?.title || "Aucune action sélectionnée";
-  const outputContent = externalLogView?.content || selectedJob?.output || selectedJob?.lines?.join("\n") || "Aucune sortie.";
-  const outputSource = externalLogView ? `external:${externalLogView.title}` : `job:${selectedJob?.id || "none"}`;
+  const scopedExternalLogView = externalLogView?.project === selectedProject?.name ? externalLogView : null;
+  const outputTitle = scopedExternalLogView?.title || selectedJob?.title || "Aucune action sélectionnée";
+  const outputContent = scopedExternalLogView?.content || selectedJob?.output || selectedJob?.lines?.join("\n") || "Aucune sortie.";
+  const outputSource = scopedExternalLogView ? `external:${scopedExternalLogView.title}` : `job:${selectedJob?.id || "none"}`;
 
   useEffect(() => {
     if (activeTab !== "logs") return;
@@ -1729,6 +1741,12 @@ export default function Home() {
     }
     if (logAutoFollow.current) scrollLogOutputToBottom();
   }, [activeTab, outputContent, outputSource, scrollLogOutputToBottom]);
+
+  useEffect(() => {
+    if (!selectedProjectOnline && (activeTab === "bases" || activeTab === "modules")) {
+      setActiveTab("logs");
+    }
+  }, [activeTab, selectedProjectOnline]);
 
   useEffect(() => {
     setModulePage(1);
@@ -1906,8 +1924,8 @@ export default function Home() {
                   <div
                     key={project.name}
                     className={cn(
-                      "border-b border-border/70 transition-colors last:border-b-0",
-                      selectedProject?.name === project.name && "bg-primary/[0.07] dark:bg-primary/[0.12]",
+                      "border-b border-border/70 transition-[background-color,border-color] duration-150 hover:border-primary/35 hover:bg-muted/70 dark:hover:bg-muted/60 last:border-b-0",
+                      selectedProject?.name === project.name && "bg-primary/[0.07] hover:bg-primary/[0.10] dark:bg-primary/[0.12] dark:hover:bg-primary/[0.16]",
                       absent && "bg-muted/35 text-muted-foreground",
                     )}
                   >
@@ -1919,6 +1937,7 @@ export default function Home() {
                           setSelectedProjectName(project.name);
                           setSelectedDb(firstOdooDatabase(project));
                           setExternalLogView(null);
+                          setActiveTab(project.odoo_status === "running" ? "bases" : "logs");
                         }}
                       >
                         <span className={cn("block truncate text-sm font-semibold", absent ? "text-muted-foreground" : "text-foreground")}>
@@ -2006,23 +2025,26 @@ export default function Home() {
                   <RefreshCcw className="h-4 w-4" />
                   Actualiser
                 </Button>
-                <Button
-                  className="w-full xl:w-auto"
-                  disabled={!selectedProjectReady || loading || Boolean(selectedProjectLifecycleJob)}
-                  onClick={requestStartProject}
-                >
-                  {selectedProjectStarting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-                  {selectedProjectStarting ? "Démarrage…" : "Démarrer"}
-                </Button>
-                <Button
-                  className="w-full xl:w-auto"
-                  variant="outline"
-                  disabled={!selectedProjectReady || !selectedProjectHasContainers || loading || Boolean(selectedProjectLifecycleJob)}
-                  onClick={requestStopProject}
-                >
-                  {selectedProjectStopping ? <Loader2 className="h-4 w-4 animate-spin" /> : <Square className="h-4 w-4" />}
-                  {selectedProjectStopping ? "Arrêt…" : "Arrêter"}
-                </Button>
+                {selectedProjectOnline ? (
+                  <Button
+                    className="w-full xl:w-auto"
+                    variant="destructive"
+                    disabled={!selectedProjectReady || !selectedProjectHasContainers || loading || Boolean(selectedProjectLifecycleJob)}
+                    onClick={requestStopProject}
+                  >
+                    {selectedProjectStopping ? <Loader2 className="h-4 w-4 animate-spin" /> : <Square className="h-4 w-4" />}
+                    {selectedProjectStopping ? "Arrêt…" : "Arrêter"}
+                  </Button>
+                ) : (
+                  <Button
+                    className="w-full xl:w-auto"
+                    disabled={!selectedProjectReady || loading || Boolean(selectedProjectLifecycleJob)}
+                    onClick={requestStartProject}
+                  >
+                    {selectedProjectStarting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                    {selectedProjectStarting ? "Démarrage…" : "Démarrer"}
+                  </Button>
+                )}
                 {selectedProject && (
                   <Button
                     className="w-full xl:w-auto"
@@ -2181,12 +2203,33 @@ export default function Home() {
                 setActiveTab(value);
               }}
             >
-              <TabsList className="grid w-full grid-cols-4 overflow-hidden lg:w-fit">
-                <TabsTrigger value="bases">
+              <TabsList
+                className={cn(
+                  "grid w-full overflow-hidden transition-[grid-template-columns] duration-200 ease-out motion-reduce:transition-none lg:w-fit",
+                  selectedProjectOnline
+                    ? "grid-cols-4"
+                    : "[grid-template-columns:minmax(0,0fr)_minmax(0,0fr)_minmax(0,1fr)_minmax(0,1fr)]",
+                )}
+              >
+                <TabsTrigger
+                  value="bases"
+                  disabled={!selectedProjectOnline}
+                  className={cn(
+                    "transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none",
+                    !selectedProjectOnline && "pointer-events-none -translate-x-1 opacity-0",
+                  )}
+                >
                   <Database className="mr-1.5 h-4 w-4" />
                   Bases
                 </TabsTrigger>
-                <TabsTrigger value="modules">
+                <TabsTrigger
+                  value="modules"
+                  disabled={!selectedProjectOnline}
+                  className={cn(
+                    "transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none",
+                    !selectedProjectOnline && "pointer-events-none -translate-x-1 opacity-0",
+                  )}
+                >
                   <Boxes className="mr-1.5 h-4 w-4" />
                   Modules
                 </TabsTrigger>
@@ -2200,399 +2243,403 @@ export default function Home() {
                 </TabsTrigger>
               </TabsList>
 
-              <TabsContent value="bases">
-                <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_400px]">
+              {selectedProjectOnline && (
+                <TabsContent value="bases">
+                  <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_400px]">
+                    <Card>
+                      <CardHeader>
+                        <CardTitle>Bases Odoo</CardTitle>
+                        <CardDescription>Sélectionne l’environnement Odoo utilisé pour les modules et les actions.</CardDescription>
+                      </CardHeader>
+                      <CardContent>
+                        {odooDatabases.length ? (
+                          <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+                            {odooDatabases.map((db) => (
+                              <InteractiveCard
+                                key={db}
+                                className={cn(
+                                  "min-w-0 p-4",
+                                  selectedDb === db && "border-primary bg-primary/[0.08] ring-1 ring-primary/25 dark:bg-primary/[0.14]",
+                                )}
+                                onClick={() => setSelectedDb(db)}
+                              >
+                                <div className="flex min-w-0 items-start justify-between gap-2">
+                                  <span className="min-w-0 break-words font-medium">{db}</span>
+                                  {db === selectedDb && <CheckCircle2 className="h-4 w-4 shrink-0 text-primary" />}
+                                </div>
+                                <div className="mt-2 text-sm text-muted-foreground">
+                                  {selectedProject?.database_versions?.[db] || "Base Odoo"}
+                                </div>
+                              </InteractiveCard>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="rounded-md border border-dashed p-6 text-center">
+                            <Database className="mx-auto h-6 w-6 text-muted-foreground" />
+                            <p className="mt-3 font-medium">Aucune base Odoo</p>
+                            <p className="mt-1 text-sm text-muted-foreground">Crée une base pour commencer à utiliser ce projet.</p>
+                          </div>
+                        )}
+                      </CardContent>
+                    </Card>
+                    <div className="grid min-w-0 content-start gap-4">
+                      <Card>
+                        <CardHeader>
+                          <CardTitle>Créer une base Odoo</CardTitle>
+                          <CardDescription>Ajoute une nouvelle base métier au projet sélectionné.</CardDescription>
+                        </CardHeader>
+                        <CardContent className="space-y-3">
+                          <Button className="w-full" disabled={!selectedProjectReady} onClick={() => setCreateDbOpen(true)}>
+                            <PlusCircle className="h-4 w-4" />
+                            Créer une base Odoo
+                          </Button>
+                          <Button
+                            className="w-full"
+                            variant="outline"
+                            disabled={!selectedProjectReady}
+                            onClick={() => setRestoreDbOpen(true)}
+                          >
+                            <Upload className="h-4 w-4" />
+                            Restaurer une sauvegarde ZIP
+                          </Button>
+                          {selectedProject && (
+                            <Button className="w-full" variant="ghost" onClick={() => openUrl(selectedProject.database_manager_url)}>
+                              <ExternalLink className="h-4 w-4" />
+                              Gestionnaire de bases Odoo
+                            </Button>
+                          )}
+                        </CardContent>
+                      </Card>
+
+                      <Card>
+                        <CardHeader>
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <CardTitle>Serveur PostgreSQL</CardTitle>
+                              <CardDescription className="mt-1">
+                                Service technique qui stocke les bases Odoo. Il ne se sélectionne pas comme une base métier.
+                              </CardDescription>
+                            </div>
+                            <Badge variant={statusVariant(selectedProject?.postgres_status || "absent")} className="shrink-0">
+                              {selectedProject?.postgres_status || "absent"}
+                            </Badge>
+                          </div>
+                        </CardHeader>
+                        <CardContent className="space-y-4">
+                          <div className="min-w-0 rounded-md bg-muted/55 p-3 text-sm">
+                            <div className="text-muted-foreground">Conteneur</div>
+                            <div className="mt-1 break-all font-medium">{selectedProject ? `postgresql-${selectedProject.name}` : "-"}</div>
+                            <div className="mt-3 text-muted-foreground">Base Odoo ciblée</div>
+                            <div className="mt-1 break-words font-medium">{selectedDb || "Aucune base sélectionnée"}</div>
+                          </div>
+                          <Button
+                            className="w-full"
+                            variant="outline"
+                            disabled={!canUseDb || selectedProject?.postgres_status !== "running" || openingPostgresql}
+                            onClick={openPostgresqlConsole}
+                          >
+                            {openingPostgresql ? <Loader2 className="h-4 w-4 animate-spin" /> : <Terminal className="h-4 w-4" />}
+                            Ouvrir psql
+                          </Button>
+                          <p className="text-xs text-muted-foreground">La console s’ouvre dans le terminal du système avec la base Odoo sélectionnée.</p>
+                        </CardContent>
+                      </Card>
+                    </div>
+                  </div>
+                </TabsContent>
+              )}
+
+              {selectedProjectOnline && (
+                <TabsContent value="modules">
                   <Card>
-                    <CardHeader>
-                      <CardTitle>Bases Odoo</CardTitle>
-                      <CardDescription>Sélectionne l’environnement Odoo utilisé pour les modules et les actions.</CardDescription>
+                    <CardHeader className="gap-3 sm:flex-row sm:items-start sm:justify-between">
+                      <div className="min-w-0">
+                        <CardTitle>Modules</CardTitle>
+                        <CardDescription>Recherche, sélection et mise à jour des modules de la base Odoo choisie.</CardDescription>
+                      </div>
+                      <div className="grid w-full gap-2 sm:w-auto sm:grid-cols-2">
+                        <Button
+                          className="w-full"
+                          disabled={!selectedProjectReady || loading || checkingUpdatePrerequisites}
+                          onClick={requestUpdateAllOdooModules}
+                        >
+                          {checkingUpdatePrerequisites ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
+                          MAJ complète Odoo
+                        </Button>
+                        <Button className="w-full" variant="outline" onClick={() => setZipDialogOpen(true)} disabled={!selectedProjectReady}>
+                          <FileArchive className="h-4 w-4" />
+                          Importer un ZIP
+                        </Button>
+                      </div>
                     </CardHeader>
                     <CardContent>
-                      {odooDatabases.length ? (
-                        <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
-                          {odooDatabases.map((db) => (
-                            <InteractiveCard
-                              key={db}
-                              className={cn(
-                                "min-w-0 p-4",
-                                selectedDb === db && "border-primary bg-primary/[0.08] ring-1 ring-primary/25 dark:bg-primary/[0.14]",
-                              )}
-                              onClick={() => setSelectedDb(db)}
-                            >
-                              <div className="flex min-w-0 items-start justify-between gap-2">
-                                <span className="min-w-0 break-words font-medium">{db}</span>
-                                {db === selectedDb && <CheckCircle2 className="h-4 w-4 shrink-0 text-primary" />}
-                              </div>
-                              <div className="mt-2 text-sm text-muted-foreground">
-                                {selectedProject?.database_versions?.[db] || "Base Odoo"}
-                              </div>
-                            </InteractiveCard>
-                          ))}
+                      <div className="mb-4 grid min-w-0 gap-3 md:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_180px_180px_220px]">
+                        <div className="relative">
+                          <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+                          <Input className="pl-9" placeholder="Rechercher par nom de module" value={moduleSearch} onChange={(event) => setModuleSearch(event.target.value)} />
                         </div>
-                      ) : (
-                        <div className="rounded-md border border-dashed p-6 text-center">
-                          <Database className="mx-auto h-6 w-6 text-muted-foreground" />
-                          <p className="mt-3 font-medium">Aucune base Odoo</p>
-                          <p className="mt-1 text-sm text-muted-foreground">Crée une base pour commencer à utiliser ce projet.</p>
+                        <Select value={moduleFilter} onValueChange={setModuleFilter}>
+                          <SelectTrigger placeholder="État">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="all">Tous les états</SelectItem>
+                            <SelectItem value="installed">Installés</SelectItem>
+                            <SelectItem value="uninstalled">Disponibles</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <Select value={moduleOriginFilter} onValueChange={setModuleOriginFilter}>
+                          <SelectTrigger placeholder="Origine">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="all">Toutes les origines</SelectItem>
+                            <SelectItem value="enterprise">Odoo Enterprise</SelectItem>
+                            <SelectItem value="other">Autre</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <Select value={selectedDb} onValueChange={setSelectedDb}>
+                          <SelectTrigger placeholder="Base Odoo">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {odooDatabases.map((db) => (
+                              <SelectItem key={db} value={db}>
+                                {db}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="mb-3 flex flex-col gap-3 rounded-md border bg-muted/45 p-3 text-sm sm:flex-row sm:items-center sm:justify-between">
+                        <label className="flex min-w-0 cursor-pointer items-start gap-3">
+                          <Checkbox
+                            className="mt-0.5"
+                            checked={someFilteredModulesSelected ? "indeterminate" : allFilteredModulesSelected}
+                            disabled={!filteredModuleNames.length}
+                            onCheckedChange={(checked) => toggleFilteredModules(checked === true)}
+                          />
+                          <span className="min-w-0">
+                            <span className="block font-medium">Sélectionner les {filteredModuleNames.length} résultats</span>
+                            <span className="block text-xs text-muted-foreground">
+                              La sélection s’applique à toutes les pages de la recherche courante.
+                            </span>
+                          </span>
+                        </label>
+                        <div className="flex shrink-0 items-center gap-2">
+                          <Badge className="w-fit" variant="outline">
+                            {selectedModuleList.length} sélectionné(s)
+                          </Badge>
+                          {selectedModuleList.length > 0 && (
+                            <Button size="sm" variant="ghost" onClick={() => setSelectedModules(new Set())}>
+                              Effacer
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                      {selectedModuleList.length > 0 && (
+                        <div className="mb-3 rounded-md border border-primary/25 bg-primary/[0.06] p-3 dark:bg-primary/[0.12]">
+                          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                            <div>
+                              <div className="text-sm font-semibold">Actions sur la sélection</div>
+                              <div className="mt-0.5 text-xs text-muted-foreground">
+                                {selectedInstallableModuleList.length} disponible(s), {selectedInstalledModuleList.length} installé(s)
+                              </div>
+                            </div>
+                            <Badge variant="default">{selectedModuleList.length} module(s)</Badge>
+                          </div>
+                          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                            <Button
+                              variant="secondary"
+                              disabled={!selectedInstallableModuleList.length || !canUseDb || loading}
+                              onClick={() => createJob("install_module", { project: selectedProject?.name, db: selectedDb, modules: selectedInstallableModuleList.join(",") })}
+                            >
+                              <PlusCircle className="h-4 w-4" />
+                              Installer ({selectedInstallableModuleList.length})
+                            </Button>
+                            <Button
+                              disabled={!selectedInstalledModuleList.length || !canUseDb || loading}
+                              onClick={() => createJob("update_module", { project: selectedProject?.name, db: selectedDb, modules: selectedInstalledModuleList.join(",") })}
+                            >
+                              <RefreshCcw className="h-4 w-4" />
+                              Mettre à jour ({selectedInstalledModuleList.length})
+                            </Button>
+                            <Button
+                              className="border-red-300 text-red-700 hover:border-red-400 hover:bg-red-50 hover:text-red-800 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-950/60"
+                              variant="outline"
+                              disabled={!selectedInstalledModuleList.length || !canUseDb || loading}
+                              onClick={() => requestUninstall(selectedInstalledModuleList)}
+                            >
+                              <PackageX className="h-4 w-4" />
+                              Désinstaller ({selectedInstalledModuleList.length})
+                            </Button>
+                            <Button
+                              variant="destructive"
+                              disabled={!selectedRemovableModuleList.length || loading}
+                              onClick={() => requestDeleteCode(selectedRemovableModuleList)}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                              Supprimer ({selectedRemovableModuleList.length})
+                            </Button>
+                          </div>
                         </div>
                       )}
-                    </CardContent>
-                  </Card>
-                  <div className="grid min-w-0 content-start gap-4">
-                    <Card>
-                      <CardHeader>
-                        <CardTitle>Créer une base Odoo</CardTitle>
-                        <CardDescription>Ajoute une nouvelle base métier au projet sélectionné.</CardDescription>
-                      </CardHeader>
-                      <CardContent className="space-y-3">
-                        <Button className="w-full" disabled={!selectedProjectReady} onClick={() => setCreateDbOpen(true)}>
-                          <PlusCircle className="h-4 w-4" />
-                          Créer une base Odoo
-                        </Button>
-                        <Button
-                          className="w-full"
-                          variant="outline"
-                          disabled={!selectedProjectReady}
-                          onClick={() => setRestoreDbOpen(true)}
-                        >
-                          <Upload className="h-4 w-4" />
-                          Restaurer une sauvegarde ZIP
-                        </Button>
-                        {selectedProject && (
-                          <Button className="w-full" variant="ghost" onClick={() => openUrl(selectedProject.database_manager_url)}>
-                            <ExternalLink className="h-4 w-4" />
-                            Gestionnaire de bases Odoo
-                          </Button>
-                        )}
-                      </CardContent>
-                    </Card>
-
-                    <Card>
-                      <CardHeader>
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <CardTitle>Serveur PostgreSQL</CardTitle>
-                            <CardDescription className="mt-1">
-                              Service technique qui stocke les bases Odoo. Il ne se sélectionne pas comme une base métier.
-                            </CardDescription>
-                          </div>
-                          <Badge variant={statusVariant(selectedProject?.postgres_status || "absent")} className="shrink-0">
-                            {selectedProject?.postgres_status || "absent"}
-                          </Badge>
+                      <div className="overflow-hidden rounded-md border">
+                        <div className={cn("hidden border-b bg-muted px-3 py-2 text-xs font-medium uppercase text-muted-foreground xl:grid xl:items-center xl:gap-3", moduleTableGridColumns)}>
+                          <div>Module</div>
+                          <div>État</div>
+                          <div>Version</div>
+                          <div>Origine</div>
+                          {showModuleLocations && <div>Emplacements</div>}
+                          <div className="text-right">Actions</div>
                         </div>
-                      </CardHeader>
-                      <CardContent className="space-y-4">
-                        <div className="min-w-0 rounded-md bg-muted/55 p-3 text-sm">
-                          <div className="text-muted-foreground">Conteneur</div>
-                          <div className="mt-1 break-all font-medium">{selectedProject ? `postgresql-${selectedProject.name}` : "-"}</div>
-                          <div className="mt-3 text-muted-foreground">Base Odoo ciblée</div>
-                          <div className="mt-1 break-words font-medium">{selectedDb || "Aucune base sélectionnée"}</div>
-                        </div>
-                        <Button
-                          className="w-full"
-                          variant="outline"
-                          disabled={!canUseDb || selectedProject?.postgres_status !== "running" || openingPostgresql}
-                          onClick={openPostgresqlConsole}
-                        >
-                          {openingPostgresql ? <Loader2 className="h-4 w-4 animate-spin" /> : <Terminal className="h-4 w-4" />}
-                          Ouvrir psql
-                        </Button>
-                        <p className="text-xs text-muted-foreground">La console s’ouvre dans le terminal du système avec la base Odoo sélectionnée.</p>
-                      </CardContent>
-                    </Card>
-                  </div>
-                </div>
-              </TabsContent>
-
-              <TabsContent value="modules">
-                <Card>
-                  <CardHeader className="gap-3 sm:flex-row sm:items-start sm:justify-between">
-                    <div className="min-w-0">
-                      <CardTitle>Modules</CardTitle>
-                      <CardDescription>Recherche, sélection et mise à jour des modules de la base Odoo choisie.</CardDescription>
-                    </div>
-                    <div className="grid w-full gap-2 sm:w-auto sm:grid-cols-2">
-                      <Button
-                        className="w-full"
-                        disabled={!selectedProjectReady || loading || checkingUpdatePrerequisites}
-                        onClick={requestUpdateAllOdooModules}
-                      >
-                        {checkingUpdatePrerequisites ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
-                        MAJ complète Odoo
-                      </Button>
-                      <Button className="w-full" variant="outline" onClick={() => setZipDialogOpen(true)} disabled={!selectedProjectReady}>
-                        <FileArchive className="h-4 w-4" />
-                        Importer un ZIP
-                      </Button>
-                    </div>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="mb-4 grid min-w-0 gap-3 md:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_180px_180px_220px]">
-                      <div className="relative">
-                        <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
-                        <Input className="pl-9" placeholder="Rechercher par nom de module" value={moduleSearch} onChange={(event) => setModuleSearch(event.target.value)} />
-                      </div>
-                      <Select value={moduleFilter} onValueChange={setModuleFilter}>
-                        <SelectTrigger placeholder="État">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="all">Tous les états</SelectItem>
-                          <SelectItem value="installed">Installés</SelectItem>
-                          <SelectItem value="uninstalled">Disponibles</SelectItem>
-                        </SelectContent>
-                      </Select>
-                      <Select value={moduleOriginFilter} onValueChange={setModuleOriginFilter}>
-                        <SelectTrigger placeholder="Origine">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="all">Toutes les origines</SelectItem>
-                          <SelectItem value="enterprise">Odoo Enterprise</SelectItem>
-                          <SelectItem value="other">Autre</SelectItem>
-                        </SelectContent>
-                      </Select>
-                      <Select value={selectedDb} onValueChange={setSelectedDb}>
-                        <SelectTrigger placeholder="Base Odoo">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {odooDatabases.map((db) => (
-                            <SelectItem key={db} value={db}>
-                              {db}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div className="mb-3 flex flex-col gap-3 rounded-md border bg-muted/45 p-3 text-sm sm:flex-row sm:items-center sm:justify-between">
-                      <label className="flex min-w-0 cursor-pointer items-start gap-3">
-                        <Checkbox
-                          className="mt-0.5"
-                          checked={someFilteredModulesSelected ? "indeterminate" : allFilteredModulesSelected}
-                          disabled={!filteredModuleNames.length}
-                          onCheckedChange={(checked) => toggleFilteredModules(checked === true)}
-                        />
-                        <span className="min-w-0">
-                          <span className="block font-medium">Sélectionner les {filteredModuleNames.length} résultats</span>
-                          <span className="block text-xs text-muted-foreground">
-                            La sélection s’applique à toutes les pages de la recherche courante.
-                          </span>
-                        </span>
-                      </label>
-                      <div className="flex shrink-0 items-center gap-2">
-                        <Badge className="w-fit" variant="outline">
-                          {selectedModuleList.length} sélectionné(s)
-                        </Badge>
-                        {selectedModuleList.length > 0 && (
-                          <Button size="sm" variant="ghost" onClick={() => setSelectedModules(new Set())}>
-                            Effacer
-                          </Button>
-                        )}
-                      </div>
-                    </div>
-                    {selectedModuleList.length > 0 && (
-                      <div className="mb-3 rounded-md border border-primary/25 bg-primary/[0.06] p-3 dark:bg-primary/[0.12]">
-                        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                          <div>
-                            <div className="text-sm font-semibold">Actions sur la sélection</div>
-                            <div className="mt-0.5 text-xs text-muted-foreground">
-                              {selectedInstallableModuleList.length} disponible(s), {selectedInstalledModuleList.length} installé(s)
-                            </div>
-                          </div>
-                          <Badge variant="default">{selectedModuleList.length} module(s)</Badge>
-                        </div>
-                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
-                          <Button
-                            variant="secondary"
-                            disabled={!selectedInstallableModuleList.length || !canUseDb || loading}
-                            onClick={() => createJob("install_module", { project: selectedProject?.name, db: selectedDb, modules: selectedInstallableModuleList.join(",") })}
-                          >
-                            <PlusCircle className="h-4 w-4" />
-                            Installer ({selectedInstallableModuleList.length})
-                          </Button>
-                          <Button
-                            disabled={!selectedInstalledModuleList.length || !canUseDb || loading}
-                            onClick={() => createJob("update_module", { project: selectedProject?.name, db: selectedDb, modules: selectedInstalledModuleList.join(",") })}
-                          >
-                            <RefreshCcw className="h-4 w-4" />
-                            Mettre à jour ({selectedInstalledModuleList.length})
-                          </Button>
-                          <Button
-                            className="border-red-300 text-red-700 hover:border-red-400 hover:bg-red-50 hover:text-red-800 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-950/60"
-                            variant="outline"
-                            disabled={!selectedInstalledModuleList.length || !canUseDb || loading}
-                            onClick={() => requestUninstall(selectedInstalledModuleList)}
-                          >
-                            <PackageX className="h-4 w-4" />
-                            Désinstaller ({selectedInstalledModuleList.length})
-                          </Button>
-                          <Button
-                            variant="destructive"
-                            disabled={!selectedRemovableModuleList.length || loading}
-                            onClick={() => requestDeleteCode(selectedRemovableModuleList)}
-                          >
-                            <Trash2 className="h-4 w-4" />
-                            Supprimer ({selectedRemovableModuleList.length})
-                          </Button>
-                        </div>
-                      </div>
-                    )}
-                    <div className="overflow-hidden rounded-md border">
-                      <div className={cn("hidden border-b bg-muted px-3 py-2 text-xs font-medium uppercase text-muted-foreground xl:grid xl:items-center xl:gap-3", moduleTableGridColumns)}>
-                        <div>Module</div>
-                        <div>État</div>
-                        <div>Version</div>
-                        <div>Origine</div>
-                        {showModuleLocations && <div>Emplacements</div>}
-                        <div className="text-right">Actions</div>
-                      </div>
-                      <div className="max-h-[min(62vh,720px)] overflow-y-auto">
-                        {visibleModules.length ? (
-                          visibleModules.map((module) => {
-                            const sourcePath = module.source_path || module.path;
-                            const linkPath = module.link_path || (module.path_kind?.startsWith("lien") ? module.path : "");
-                            const displaySourcePath = compactWorkspacePath(sourcePath, overview?.workspace);
-                            const displayLinkPath = compactWorkspacePath(linkPath, overview?.workspace);
-                            const samePaths = Boolean(linkPath && sourcePath && linkPath === sourcePath);
-                            const origin = normalizedModuleOrigin(module.origin, sourcePath);
-                            return (
-                              <div
-                                key={module.name}
-                                className={cn(
-                                  "grid min-w-0 gap-3 border-t p-3 transition-colors first:border-t-0 hover:bg-muted/35 xl:items-center",
-                                  moduleTableGridColumns,
-                                  selectedModules.has(module.name) && "bg-primary/[0.06] dark:bg-primary/[0.12]",
-                                )}
-                              >
-                                <label className="flex min-w-0 cursor-pointer items-start gap-3 rounded-sm focus-within:ring-2 focus-within:ring-ring">
-                                  <Checkbox
-                                    className="mt-1"
-                                    aria-label={`Sélectionner ${module.name}`}
-                                    checked={selectedModules.has(module.name)}
-                                    onCheckedChange={(checked) => toggleModuleSelection(module.name, checked === true)}
-                                  />
-                                  <span className="min-w-0">
-                                    <div className="break-words font-medium">{module.name}</div>
-                                    <div className="mt-0.5 break-words text-xs text-muted-foreground">{module.title || module.name}</div>
-                                  </span>
-                                </label>
-                                <div className="flex min-w-0 items-center justify-between gap-3 xl:block">
-                                  <span className="text-xs font-medium text-muted-foreground xl:hidden">État</span>
-                                  <Badge className="shrink-0" variant={module.state === "installed" ? "success" : "secondary"}>{module.state}</Badge>
-                                </div>
-                                <div className="flex min-w-0 items-start justify-between gap-3 text-sm xl:block">
-                                  <span className="text-xs font-medium text-muted-foreground xl:hidden">Version</span>
-                                  <span className="min-w-0 break-words">{module.installed_version || module.version || "-"}</span>
-                                </div>
-                                <div className="flex min-w-0 items-center justify-between gap-3 xl:block">
-                                  <span className="text-xs font-medium text-muted-foreground xl:hidden">Origine</span>
-                                  <Badge className="shrink-0" variant="outline">{moduleOriginLabel(origin)}</Badge>
-                                </div>
-                                {showModuleLocations && (
-                                  <div className="min-w-0">
-                                    <div className="mb-1 text-xs font-medium text-muted-foreground xl:hidden">Emplacements</div>
-                                    <div className="space-y-1">
-                                      {module.path_kind && (
-                                        <Badge className="w-fit max-w-full truncate" variant="outline" title={module.path_kind}>
-                                          {module.path_kind}
-                                        </Badge>
-                                      )}
-                                      <div className="min-w-0 text-xs">
-                                        <span className="font-medium text-teal-700 dark:text-teal-300">Source</span>
-                                        <div className="truncate font-mono text-teal-800 dark:text-teal-200" title={sourcePath}>
-                                          {displaySourcePath || "-"}
-                                        </div>
-                                      </div>
-                                      {displayLinkPath && !samePaths && (
+                        <div className="max-h-[min(62vh,720px)] overflow-y-auto">
+                          {visibleModules.length ? (
+                            visibleModules.map((module) => {
+                              const sourcePath = module.source_path || module.path;
+                              const linkPath = module.link_path || (module.path_kind?.startsWith("lien") ? module.path : "");
+                              const displaySourcePath = compactWorkspacePath(sourcePath, overview?.workspace);
+                              const displayLinkPath = compactWorkspacePath(linkPath, overview?.workspace);
+                              const samePaths = Boolean(linkPath && sourcePath && linkPath === sourcePath);
+                              const origin = normalizedModuleOrigin(module.origin, sourcePath);
+                              return (
+                                <div
+                                  key={module.name}
+                                  className={cn(
+                                    "grid min-w-0 gap-3 border-t p-3 transition-colors first:border-t-0 hover:bg-muted/35 xl:items-center",
+                                    moduleTableGridColumns,
+                                    selectedModules.has(module.name) && "bg-primary/[0.06] dark:bg-primary/[0.12]",
+                                  )}
+                                >
+                                  <label className="flex min-w-0 cursor-pointer items-start gap-3 rounded-sm focus-within:ring-2 focus-within:ring-ring">
+                                    <Checkbox
+                                      className="mt-1"
+                                      aria-label={`Sélectionner ${module.name}`}
+                                      checked={selectedModules.has(module.name)}
+                                      onCheckedChange={(checked) => toggleModuleSelection(module.name, checked === true)}
+                                    />
+                                    <span className="min-w-0">
+                                      <div className="break-words font-medium">{module.name}</div>
+                                      <div className="mt-0.5 break-words text-xs text-muted-foreground">{module.title || module.name}</div>
+                                    </span>
+                                  </label>
+                                  <div className="flex min-w-0 items-center justify-between gap-3 xl:block">
+                                    <span className="text-xs font-medium text-muted-foreground xl:hidden">État</span>
+                                    <Badge className="shrink-0" variant={module.state === "installed" ? "success" : "secondary"}>{module.state}</Badge>
+                                  </div>
+                                  <div className="flex min-w-0 items-start justify-between gap-3 text-sm xl:block">
+                                    <span className="text-xs font-medium text-muted-foreground xl:hidden">Version</span>
+                                    <span className="min-w-0 break-words">{module.installed_version || module.version || "-"}</span>
+                                  </div>
+                                  <div className="flex min-w-0 items-center justify-between gap-3 xl:block">
+                                    <span className="text-xs font-medium text-muted-foreground xl:hidden">Origine</span>
+                                    <Badge className="shrink-0" variant="outline">{moduleOriginLabel(origin)}</Badge>
+                                  </div>
+                                  {showModuleLocations && (
+                                    <div className="min-w-0">
+                                      <div className="mb-1 text-xs font-medium text-muted-foreground xl:hidden">Emplacements</div>
+                                      <div className="space-y-1">
+                                        {module.path_kind && (
+                                          <Badge className="w-fit max-w-full truncate" variant="outline" title={module.path_kind}>
+                                            {module.path_kind}
+                                          </Badge>
+                                        )}
                                         <div className="min-w-0 text-xs">
-                                          <span className="font-medium text-blue-700 dark:text-blue-300">Lien Odoo</span>
-                                          <div className="truncate font-mono text-blue-800 dark:text-blue-200" title={linkPath}>
-                                            {displayLinkPath}
+                                          <span className="font-medium text-teal-700 dark:text-teal-300">Source</span>
+                                          <div className="truncate font-mono text-teal-800 dark:text-teal-200" title={sourcePath}>
+                                            {displaySourcePath || "-"}
                                           </div>
                                         </div>
-                                      )}
+                                        {displayLinkPath && !samePaths && (
+                                          <div className="min-w-0 text-xs">
+                                            <span className="font-medium text-blue-700 dark:text-blue-300">Lien Odoo</span>
+                                            <div className="truncate font-mono text-blue-800 dark:text-blue-200" title={linkPath}>
+                                              {displayLinkPath}
+                                            </div>
+                                          </div>
+                                        )}
+                                      </div>
                                     </div>
-                                  </div>
-                                )}
-                                <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_40px] gap-2">
-                                  {module.state === "installed" ? (
-                                    <Button
-                                      className="w-full"
-                                      size="sm"
-                                      disabled={!canUseDb}
-                                      onClick={() => createJob("update_module", { project: selectedProject?.name, db: selectedDb, modules: module.name })}
-                                    >
-                                      <RefreshCcw className="h-4 w-4" />
-                                      Mettre à jour
-                                    </Button>
-                                  ) : (
-                                    <Button
-                                      className="w-full"
-                                      size="sm"
-                                      variant="secondary"
-                                      disabled={!canUseDb}
-                                      onClick={() => createJob("install_module", { project: selectedProject?.name, db: selectedDb, modules: module.name })}
-                                    >
-                                      <PlusCircle className="h-4 w-4" />
-                                      Installer
-                                    </Button>
                                   )}
-                                  <DropdownMenu.Root>
-                                    <DropdownMenu.Trigger>
-                                      <Button size="icon" variant="outline" title={`Autres actions pour ${module.name}`} aria-label={`Autres actions pour ${module.name}`}>
-                                        <MoreHorizontal className="h-4 w-4" />
+                                  <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_40px] gap-2">
+                                    {module.state === "installed" ? (
+                                      <Button
+                                        className="w-full"
+                                        size="sm"
+                                        disabled={!canUseDb}
+                                        onClick={() => createJob("update_module", { project: selectedProject?.name, db: selectedDb, modules: module.name })}
+                                      >
+                                        <RefreshCcw className="h-4 w-4" />
+                                        Mettre à jour
                                       </Button>
-                                    </DropdownMenu.Trigger>
-                                    <DropdownMenu.Content align="end" className="min-w-52">
-                                      <DropdownMenu.Label>Actions sur {module.name}</DropdownMenu.Label>
-                                      {module.state === "installed" && (
-                                        <DropdownMenu.Item color="red" disabled={!canUseDb} onSelect={() => requestUninstall([module.name])}>
-                                          <PackageX className="h-4 w-4" />
-                                          Désinstaller de la base
-                                        </DropdownMenu.Item>
-                                      )}
-                                      {module.removal_mode !== "link_only" && (
-                                        <DropdownMenu.Item color="red" disabled={!module.removable} onSelect={() => requestDeleteCode([module.name])}>
-                                          <Trash2 className="h-4 w-4" />
-                                          Supprimer du projet
-                                        </DropdownMenu.Item>
-                                      )}
-                                      {module.state !== "installed" && module.removal_mode === "link_only" && (
-                                        <DropdownMenu.Item disabled>Module protégé</DropdownMenu.Item>
-                                      )}
-                                    </DropdownMenu.Content>
-                                  </DropdownMenu.Root>
+                                    ) : (
+                                      <Button
+                                        className="w-full"
+                                        size="sm"
+                                        variant="secondary"
+                                        disabled={!canUseDb}
+                                        onClick={() => createJob("install_module", { project: selectedProject?.name, db: selectedDb, modules: module.name })}
+                                      >
+                                        <PlusCircle className="h-4 w-4" />
+                                        Installer
+                                      </Button>
+                                    )}
+                                    <DropdownMenu.Root>
+                                      <DropdownMenu.Trigger>
+                                        <Button size="icon" variant="outline" title={`Autres actions pour ${module.name}`} aria-label={`Autres actions pour ${module.name}`}>
+                                          <MoreHorizontal className="h-4 w-4" />
+                                        </Button>
+                                      </DropdownMenu.Trigger>
+                                      <DropdownMenu.Content align="end" className="min-w-52">
+                                        <DropdownMenu.Label>Actions sur {module.name}</DropdownMenu.Label>
+                                        {module.state === "installed" && (
+                                          <DropdownMenu.Item color="red" disabled={!canUseDb} onSelect={() => requestUninstall([module.name])}>
+                                            <PackageX className="h-4 w-4" />
+                                            Désinstaller de la base
+                                          </DropdownMenu.Item>
+                                        )}
+                                        {module.removal_mode !== "link_only" && (
+                                          <DropdownMenu.Item color="red" disabled={!module.removable} onSelect={() => requestDeleteCode([module.name])}>
+                                            <Trash2 className="h-4 w-4" />
+                                            Supprimer du projet
+                                          </DropdownMenu.Item>
+                                        )}
+                                        {module.state !== "installed" && module.removal_mode === "link_only" && (
+                                          <DropdownMenu.Item disabled>Module protégé</DropdownMenu.Item>
+                                        )}
+                                      </DropdownMenu.Content>
+                                    </DropdownMenu.Root>
+                                  </div>
                                 </div>
-                              </div>
-                            );
-                          })
-                        ) : (
-                          <div className="p-6 text-center text-sm text-muted-foreground">
-                            Aucun module ne correspond à la recherche.
+                              );
+                            })
+                          ) : (
+                            <div className="p-6 text-center text-sm text-muted-foreground">
+                              Aucun module ne correspond à la recherche.
+                            </div>
+                          )}
+                        </div>
+                        {filteredModules.length > 0 && (
+                          <div className="flex flex-col gap-3 border-t bg-muted/30 px-3 py-2 text-sm sm:flex-row sm:items-center sm:justify-between">
+                            <span className="text-muted-foreground">
+                              {Math.min((modulePage - 1) * MODULES_PER_PAGE + 1, filteredModules.length)}–{Math.min(modulePage * MODULES_PER_PAGE, filteredModules.length)} sur {filteredModules.length} module(s)
+                            </span>
+                            <div className="flex items-center gap-2">
+                              <Button size="icon" variant="outline" disabled={modulePage <= 1} onClick={() => setModulePage((page) => Math.max(1, page - 1))} aria-label="Page précédente" title="Page précédente">
+                                <ChevronLeft className="h-4 w-4" />
+                              </Button>
+                              <span className="min-w-20 text-center tabular-nums">Page {modulePage}/{modulePageCount}</span>
+                              <Button size="icon" variant="outline" disabled={modulePage >= modulePageCount} onClick={() => setModulePage((page) => Math.min(modulePageCount, page + 1))} aria-label="Page suivante" title="Page suivante">
+                                <ChevronRight className="h-4 w-4" />
+                              </Button>
+                            </div>
                           </div>
                         )}
                       </div>
-                      {filteredModules.length > 0 && (
-                        <div className="flex flex-col gap-3 border-t bg-muted/30 px-3 py-2 text-sm sm:flex-row sm:items-center sm:justify-between">
-                          <span className="text-muted-foreground">
-                            {Math.min((modulePage - 1) * MODULES_PER_PAGE + 1, filteredModules.length)}–{Math.min(modulePage * MODULES_PER_PAGE, filteredModules.length)} sur {filteredModules.length} module(s)
-                          </span>
-                          <div className="flex items-center gap-2">
-                            <Button size="icon" variant="outline" disabled={modulePage <= 1} onClick={() => setModulePage((page) => Math.max(1, page - 1))} aria-label="Page précédente" title="Page précédente">
-                              <ChevronLeft className="h-4 w-4" />
-                            </Button>
-                            <span className="min-w-20 text-center tabular-nums">Page {modulePage}/{modulePageCount}</span>
-                            <Button size="icon" variant="outline" disabled={modulePage >= modulePageCount} onClick={() => setModulePage((page) => Math.min(modulePageCount, page + 1))} aria-label="Page suivante" title="Page suivante">
-                              <ChevronRight className="h-4 w-4" />
-                            </Button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  </CardContent>
-                </Card>
-              </TabsContent>
+                    </CardContent>
+                  </Card>
+                </TabsContent>
+              )}
 
               <TabsContent value="logs">
                 <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(340px,400px)_minmax(0,1fr)]">
@@ -2600,7 +2647,7 @@ export default function Home() {
                     <CardHeader className="gap-3 sm:flex-row sm:items-center sm:justify-between">
                       <div className="min-w-0">
                         <CardTitle>Historique</CardTitle>
-                        <CardDescription>Actions lancées depuis le gestionnaire.</CardDescription>
+                        <CardDescription>Actions du projet sélectionné.</CardDescription>
                       </div>
                       <Button className="w-full shrink-0 sm:w-auto" variant="outline" size="sm" onClick={clearJobs}>
                         <Trash2 className="h-4 w-4" />
@@ -2608,18 +2655,18 @@ export default function Home() {
                       </Button>
                     </CardHeader>
                     <CardContent className="max-h-[min(62vh,680px)] min-w-0 space-y-3 overflow-y-auto">
-                      {jobs.length ? jobs.map((job) => (
+                      {projectJobs.length ? projectJobs.map((job) => (
                         <div
                           key={job.id}
                           className={cn(
                             "group grid h-[172px] min-w-0 grid-rows-[minmax(0,1fr)_36px] gap-2 rounded-md border bg-card p-3 shadow-sm transition-[background-color,border-color,box-shadow] hover:border-primary/40 hover:shadow-md",
-                            !externalLogView && selectedJob?.id === job.id && "border-primary bg-primary/[0.08] ring-1 ring-primary/25 dark:bg-primary/[0.14]",
+                            !scopedExternalLogView && selectedJob?.id === job.id && "border-primary bg-primary/[0.08] ring-1 ring-primary/25 dark:bg-primary/[0.14]",
                           )}
                         >
                           <button
                             type="button"
                             className="grid min-h-0 w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-3 rounded-md p-2 text-left transition-colors hover:bg-primary/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring dark:hover:bg-primary/[0.12]"
-                            aria-pressed={!externalLogView && selectedJob?.id === job.id}
+                            aria-pressed={!scopedExternalLogView && selectedJob?.id === job.id}
                             title={job.title}
                             onClick={() => selectJob(job.id)}
                           >
@@ -3702,12 +3749,12 @@ function CreateDatabaseDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="max-w-2xl space-y-5">
         <DialogHeader>
           <DialogTitle>Créer une base Odoo</DialogTitle>
           <DialogDescription>{project ? `Projet cible : ${project.name}` : "Sélectionne un projet."}</DialogDescription>
         </DialogHeader>
-        <div className="grid gap-3 md:grid-cols-2">
+        <div className="grid gap-x-4 gap-y-4 md:grid-cols-2">
           <label className="grid gap-1.5 text-sm font-medium">
             Nom de base
             <Input value={db} onChange={(event) => setDb(event.target.value)} placeholder="ma_base_locale" />

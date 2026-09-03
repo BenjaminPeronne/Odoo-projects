@@ -1736,9 +1736,10 @@ def bootstrap_snapshot():
 
 
 class Job:
-    def __init__(self, title, target, args=()):
+    def __init__(self, title, target, args=(), project=None):
         global NEXT_JOB_ID
         self.title = title
+        self.project = project
         self.status = "running"
         self.started_at = time.strftime("%Y-%m-%d %H:%M:%S")
         self.finished_at = None
@@ -2841,6 +2842,7 @@ def jobs_snapshot(detail_job_id=None, compact=False):
             {
                 "id": job.id,
                 "title": job.title,
+                "project": job.project,
                 "status": job.status,
                 "started_at": job.started_at,
                 "finished_at": job.finished_at,
@@ -3161,6 +3163,7 @@ class Handler(BaseHTTPRequestHandler):
                     f"Restaurer {db_name} dans {project}",
                     restore_database_job,
                     (project, destination, filename, db_name, master_pwd, copy_database, neutralize),
+                    project=project,
                 )
                 destination = None
                 return json_response(
@@ -3225,6 +3228,7 @@ class Handler(BaseHTTPRequestHandler):
                     f"Importer ZIP {filename}",
                     import_zip_modules_job,
                     (project, filename, upload["data"], replace_existing, selected_modules),
+                    project=project,
                 )
                 return json_response(
                     self,
@@ -3250,13 +3254,13 @@ class Handler(BaseHTTPRequestHandler):
 
             if action == "start_project":
                 project = validate_project(payload.get("project", ""))
-                job = Job(f"Démarrer {project}", start_project_job, (project,))
+                job = Job(f"Démarrer {project}", start_project_job, (project,), project=project)
             elif action == "stop_project":
                 project = validate_project(payload.get("project", ""))
-                job = Job(f"Arrêter {project}", stop_project_job, (project,))
+                job = Job(f"Arrêter {project}", stop_project_job, (project,), project=project)
             elif action == "update_project":
                 project = validate_project(payload.get("project", ""))
-                job = Job(f"MAJ projet {project}", update_project_job, (project,))
+                job = Job(f"MAJ projet {project}", update_project_job, (project,), project=project)
             elif action == "update_all":
                 job = Job("MAJ tous les projets", update_all_projects_job)
             elif action == "update_all_modules":
@@ -3286,12 +3290,14 @@ class Handler(BaseHTTPRequestHandler):
                         f"Mettre à jour les modules disponibles sur {db_name}{title_suffix}",
                         module_command_job,
                         ("--update-module", project, db_name, ",".join(modules)),
+                        project=project,
                     )
                 else:
                     job = Job(
                         f"Mettre à jour tous les modules sur {db_name}{title_suffix}",
                         module_command_job,
                         ("--update-module", project, db_name, "all"),
+                        project=project,
                     )
             elif action == "update_local_modules":
                 project = validate_project(payload.get("project", ""))
@@ -3303,6 +3309,7 @@ class Handler(BaseHTTPRequestHandler):
                     f"Mettre à jour les addons projet sur {db_name}",
                     module_command_job,
                     ("--update-module", project, db_name, ",".join(modules)),
+                    project=project,
                 )
             elif action == "ignore_missing_modules_locally":
                 project = validate_project(payload.get("project", ""))
@@ -3312,6 +3319,7 @@ class Handler(BaseHTTPRequestHandler):
                     f"Exclure localement {modules} sur {db_name}",
                     cancel_missing_module_operations_job,
                     (project, db_name, modules),
+                    project=project,
                 )
             elif action == "restore_module_update_exclusions":
                 project = validate_project(payload.get("project", ""))
@@ -3321,6 +3329,7 @@ class Handler(BaseHTTPRequestHandler):
                     f"Réactiver les mises à jour de {modules} sur {db_name}",
                     restore_module_update_exclusions_job,
                     (project, db_name, modules),
+                    project=project,
                 )
             elif action == "create_project":
                 name = validate_new_project_name(payload.get("name", ""))
@@ -3340,6 +3349,7 @@ class Handler(BaseHTTPRequestHandler):
                     f"Créer le projet {name or 'Odoo'}",
                     create_project_job,
                     (name, version, source_type, repository_url, repository_branch, start_after_creation),
+                    project=name,
                 )
             elif action == "install_traefik":
                 job = Job("Installer Traefik", install_traefik_job)
@@ -3354,10 +3364,10 @@ class Handler(BaseHTTPRequestHandler):
                 lang = payload.get("lang", "fr_FR")
                 country = payload.get("country", "")
                 demo = bool(payload.get("demo", False))
-                job = Job(f"Créer base {db_name}", create_database_job, (project, db_name, master_pwd, login, password, lang, country, demo))
+                job = Job(f"Créer base {db_name}", create_database_job, (project, db_name, master_pwd, login, password, lang, country, demo), project=project)
             elif action == "delete_project":
                 project = validate_project(payload.get("project", ""))
-                job = Job(f"Supprimer {project}", delete_project_job, (project,))
+                job = Job(f"Supprimer {project}", delete_project_job, (project,), project=project)
             elif action == "delete_module_code":
                 project = validate_project(payload.get("project", ""))
                 modules = validate_modules(payload.get("modules", ""))
@@ -3365,7 +3375,7 @@ class Handler(BaseHTTPRequestHandler):
                 uninstall_first = bool(payload.get("uninstall_first", False))
                 if uninstall_first:
                     db_name = validate_odoo_db(db_name)
-                job = Job(f"Supprimer modules {modules} du projet", delete_module_code_job, (project, modules, db_name, uninstall_first))
+                job = Job(f"Supprimer modules {modules} du projet", delete_module_code_job, (project, modules, db_name, uninstall_first), project=project)
             elif action in ("install_module", "update_module", "uninstall_module"):
                 project = validate_project(payload.get("project", ""))
                 db_name = validate_odoo_db(payload.get("db", ""))
@@ -3379,13 +3389,13 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     flag = "--update-module"
                     label = "Mettre à jour"
-                job = Job(f"{label} {modules} sur {db_name}", module_command_job, (flag, project, db_name, modules))
+                job = Job(f"{label} {modules} sur {db_name}", module_command_job, (flag, project, db_name, modules), project=project)
             elif action == "link_modules":
                 project = validate_project(payload.get("project", ""))
                 source = payload.get("source", "")
                 if not source:
                     raise ValueError("Dossier de modules manquant.")
-                job = Job(f"Lier modules dans {project}", link_modules_job, (project, source))
+                job = Job(f"Lier modules dans {project}", link_modules_job, (project, source), project=project)
             else:
                 return json_response(self, {"error": "Action inconnue."}, status=400)
 
@@ -3395,6 +3405,7 @@ class Handler(BaseHTTPRequestHandler):
                     "job": {
                         "id": job.id,
                         "title": job.title,
+                        "project": job.project,
                         "status": job.status,
                         "started_at": job.started_at,
                         "lines": job.lines,
