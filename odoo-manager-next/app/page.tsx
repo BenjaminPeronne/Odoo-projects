@@ -2440,7 +2440,7 @@ export default function Home() {
                       </div>
                     </CardHeader>
                     <CardContent>
-                      <div className="mb-4 grid min-w-0 gap-3 md:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_180px_180px_220px]">
+                      <div className="mb-4 grid min-w-0 gap-3 md:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_180px_210px_220px]">
                         <div className="relative">
                           <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
                           <Input className="pl-9" placeholder="Rechercher par nom de module" value={moduleSearch} onChange={(event) => setModuleSearch(event.target.value)} />

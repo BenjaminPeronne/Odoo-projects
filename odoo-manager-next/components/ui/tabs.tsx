@@ -24,7 +24,7 @@ export const TabsTrigger = React.forwardRef<
   <RadixTabs.Trigger
     ref={ref}
     className={cn(
-      "min-h-10 min-w-0 rounded-sm px-2 font-medium text-muted-foreground transition-[background-color,color,box-shadow] duration-150 hover:bg-card/70 hover:text-foreground data-[state=active]:bg-card data-[state=active]:text-foreground data-[state=active]:shadow-sm sm:px-3",
+      "min-h-10 min-w-0 rounded-sm px-1 text-xs font-medium sm:px-2 sm:text-sm [&_svg]:hidden sm:[&_svg]:block text-muted-foreground transition-[background-color,color,box-shadow] duration-150 hover:bg-card/70 hover:text-foreground data-[state=active]:bg-card data-[state=active]:text-foreground data-[state=active]:shadow-sm sm:px-3",
       className,
     )}
     {...props}

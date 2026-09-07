@@ -14,7 +14,7 @@ export const DialogContent = React.forwardRef<
   <RadixDialog.Content
     ref={ref}
     size="3"
-    className={cn("relative max-h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] max-w-lg overflow-y-auto", className)}
+    className={cn("relative max-h-[calc(100dvh-2rem-max(2rem,6dvh))] w-[calc(100vw-2rem)] max-w-lg overflow-y-auto", className)}
     {...props}
   >
     {children}

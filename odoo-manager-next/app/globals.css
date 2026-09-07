@@ -157,9 +157,15 @@ html {
   scrollbar-gutter: stable;
 }
 
-body[data-scroll-locked] {
-  margin-right: 0 !important;
-  padding-right: 0 !important;
+@supports (scrollbar-gutter: stable) {
+  /* The root already reserves the scrollbar gutter. Radix injects its body
+     compensation after this stylesheet, so use higher specificity to avoid
+     subtracting the gutter twice for Select, DropdownMenu and Dialog. Keep
+     Radix's default compensation in older WebViews without gutter support. */
+  html body[data-scroll-locked] {
+    margin-right: 0 !important;
+    padding-right: 0 !important;
+  }
 }
 
 button,
