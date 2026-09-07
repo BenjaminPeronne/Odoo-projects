@@ -175,6 +175,12 @@ GitHub Actions compiler macOS, Linux et Windows. Par exemple, apres
 GitHub CLI est installe et authentifie (`gh auth login`), le script attend la
 fin du workflow puis telecharge les artefacts dans `dist/all-platforms/<tag>/`.
 
+Les artefacts GitHub Actions contiennent uniquement les installateurs `.dmg`,
+`.deb`, `.AppImage` et `.exe`, conservés pendant 7 jours. Télécharge les paquets
+à archiver avant leur expiration. Les applications décompressées et les dossiers
+intermédiaires ne sont pas déposés. Cette règle s'applique aux prochains dépôts ;
+elle ne libère pas le stockage occupé par les anciens artefacts.
+
 Exemples utiles :
 
 ```sh

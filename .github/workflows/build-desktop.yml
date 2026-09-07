@@ -99,5 +99,11 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact }}
-          path: odoo-manager-next/src-tauri/target/release/bundle/**
+          # Keep distributable installers only, not unpacked apps or AppDir trees.
+          path: |
+            odoo-manager-next/src-tauri/target/release/bundle/dmg/*.dmg
+            odoo-manager-next/src-tauri/target/release/bundle/deb/*.deb
+            odoo-manager-next/src-tauri/target/release/bundle/appimage/*.AppImage
+            odoo-manager-next/src-tauri/target/release/bundle/nsis/*.exe
+          retention-days: 7
           if-no-files-found: error
