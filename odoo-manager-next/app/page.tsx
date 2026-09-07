@@ -667,6 +667,13 @@ export default function Home() {
   const logOutputRef = useRef<HTMLPreElement>(null);
   const logAutoFollow = useRef(true);
   const lastLogOutputSource = useRef("");
+  const logStreamRef = useRef<EventSource | null>(null);
+  const logStreamFirstLineRef = useRef(true);
+
+  const stopLiveLogStream = useCallback(() => {
+    logStreamRef.current?.close();
+    logStreamRef.current = null;
+  }, []);
 
   const scrollLogOutputToBottom = useCallback(() => {
     window.requestAnimationFrame(() => {
@@ -905,28 +912,32 @@ export default function Home() {
     }
   }, [applyBootstrapSnapshot, markApiSuccess]);
 
+  const applyOverview = useCallback((payload: Overview) => {
+    setOverview((currentOverview) =>
+      currentOverview && JSON.stringify(currentOverview) === JSON.stringify(payload) ? currentOverview : payload,
+    );
+    markApiSuccess();
+    setError("");
+    setSelectedProjectName((currentName) => {
+      const current = payload.projects.find((project) => project.name === currentName) || payload.projects[0];
+      if (current && current.name !== currentName) setSelectedDb(firstOdooDatabase(current));
+      return current?.name || "";
+    });
+  }, [markApiSuccess]);
+
   const refreshOverview = useCallback(async () => {
     if (overviewRefreshInFlight.current) return;
     overviewRefreshInFlight.current = true;
     try {
       const payload = await api<Overview>("/api/overview");
-      setOverview((currentOverview) =>
-        currentOverview && JSON.stringify(currentOverview) === JSON.stringify(payload) ? currentOverview : payload,
-      );
-      markApiSuccess();
-      setError("");
-      setSelectedProjectName((currentName) => {
-        const current = payload.projects.find((project) => project.name === currentName) || payload.projects[0];
-        if (current && current.name !== currentName) setSelectedDb(firstOdooDatabase(current));
-        return current?.name || "";
-      });
+      applyOverview(payload);
     } catch (err) {
       markApiFailure(err);
       setError(!initializingRef.current && !(err instanceof ApiUnavailableError) ? err instanceof Error ? err.message : "Impossible de charger l'overview." : "");
     } finally {
       overviewRefreshInFlight.current = false;
     }
-  }, [markApiFailure, markApiSuccess]);
+  }, [applyOverview, markApiFailure]);
 
   const refreshSystemStatus = useCallback(async () => {
     if (systemRefreshInFlight.current) return;
@@ -1095,16 +1106,18 @@ export default function Home() {
 
   useEffect(() => {
     if (initializing) return;
+    // Safety-net fallback only: /api/stream (below) pushes overview changes live.
     const refreshWhenVisible = () => {
       if (document.visibilityState === "visible") void refreshOverview();
     };
-    const timer = window.setInterval(refreshWhenVisible, hasRunningJobs ? 8000 : 20000);
+    const timer = window.setInterval(refreshWhenVisible, hasRunningJobs ? 15000 : 45000);
     return () => window.clearInterval(timer);
   }, [hasRunningJobs, initializing, refreshOverview]);
 
   useEffect(() => {
     if (initializing) return;
-    const interval = Math.max(3, settings?.docker_poll_interval || 10) * 1000;
+    // Safety-net fallback only: /api/stream (below) pushes system status changes live.
+    const interval = Math.max(3, settings?.docker_poll_interval || 10) * 1000 * 3;
     const refreshWhenVisible = () => {
       if (document.visibilityState === "visible") void refreshSystemStatus();
     };
@@ -1113,10 +1126,36 @@ export default function Home() {
   }, [initializing, refreshSystemStatus, settings?.docker_poll_interval]);
 
   useEffect(() => {
+    if (initializing || typeof EventSource === "undefined") return;
+    const source = new EventSource(`${API_BASE}/api/stream`);
+    source.addEventListener("overview", (event) => {
+      try {
+        applyOverview(JSON.parse((event as MessageEvent<string>).data) as Overview);
+      } catch {
+        // Malformed live update: the safety-net poll will resync state.
+      }
+    });
+    source.addEventListener("system_status", (event) => {
+      try {
+        commitSystemStatus(JSON.parse((event as MessageEvent<string>).data) as SystemStatus);
+      } catch {
+        // Malformed live update: the safety-net poll will resync state.
+      }
+    });
+    return () => source.close();
+  }, [applyOverview, commitSystemStatus, initializing]);
+
+  useEffect(() => {
     if (selectedProject) {
       setSelectedDb((current) => current !== "postgres" && selectedProject.databases?.includes(current) ? current : firstOdooDatabase(selectedProject));
     }
   }, [selectedProject]);
+
+  useEffect(() => stopLiveLogStream, [stopLiveLogStream]);
+
+  useEffect(() => {
+    stopLiveLogStream();
+  }, [selectedProject?.name, stopLiveLogStream]);
 
   useEffect(() => {
     refreshModules();
@@ -1448,23 +1487,48 @@ export default function Home() {
     }
   }
 
-  async function showLogs() {
+  function showLogs() {
     if (!selectedProject) return;
-    try {
-      const payload = await api<{ logs: string }>(`/api/projects/${encodeURIComponent(selectedProject.name)}/logs`);
-      setExternalLogView({
-        title: `Logs Odoo - ${selectedProject.name}`,
-        content: payload.logs || "Aucun log.",
-        project: selectedProject.name,
-      });
-      enableLogAutoFollow();
-    } catch (err) {
-      pushToast("error", err instanceof Error ? err.message : "Logs indisponibles.");
+    const projectName = selectedProject.name;
+    stopLiveLogStream();
+    logStreamFirstLineRef.current = true;
+    setExternalLogView({
+      title: `Logs Odoo (direct) - ${projectName}`,
+      content: "Connexion au flux de logs en direct…",
+      project: projectName,
+    });
+    enableLogAutoFollow();
+    if (typeof EventSource === "undefined") {
+      pushToast("error", "Le suivi en direct des logs n'est pas disponible dans cet environnement.");
+      return;
     }
+    const source = new EventSource(`${API_BASE}/api/projects/${encodeURIComponent(projectName)}/logs/stream`);
+    logStreamRef.current = source;
+    source.addEventListener("log", (event) => {
+      let line = "";
+      try {
+        line = (JSON.parse((event as MessageEvent<string>).data) as { line?: string }).line || "";
+      } catch {
+        return;
+      }
+      setExternalLogView((current) => {
+        if (!current || current.project !== projectName) return current;
+        const content = logStreamFirstLineRef.current ? line : `${current.content}\n${line}`;
+        logStreamFirstLineRef.current = false;
+        return { ...current, content };
+      });
+    });
+    source.addEventListener("log_end", () => {
+      if (logStreamRef.current === source) stopLiveLogStream();
+    });
+    source.onerror = () => {
+      if (logStreamRef.current === source) pushToast("error", "Flux de logs interrompu, nouvelle tentative en cours…");
+    };
   }
 
   async function showDiagnostics() {
     if (!selectedProject) return;
+    stopLiveLogStream();
     try {
       const payload = await api<ProjectDiagnostics>(`/api/projects/${encodeURIComponent(selectedProject.name)}/diagnostics`);
       setExternalLogView({
@@ -1480,6 +1544,7 @@ export default function Home() {
   }
 
   async function clearJobs() {
+    stopLiveLogStream();
     try {
       await api<{ ok: boolean }>("/api/jobs", { method: "DELETE" });
       setSelectedJobId(null);
@@ -1494,6 +1559,7 @@ export default function Home() {
     try {
       await api<{ ok: boolean }>(`/api/jobs/${jobId}`, { method: "DELETE" });
       if (selectedJobId === jobId) {
+        stopLiveLogStream();
         setSelectedJobId(null);
         setExternalLogView(null);
       }
@@ -1504,6 +1570,7 @@ export default function Home() {
   }
 
   function selectJob(jobId: number) {
+    stopLiveLogStream();
     setExternalLogView(null);
     setSelectedJobId(jobId);
     selectedJobIdRef.current = jobId;
@@ -2368,7 +2435,7 @@ export default function Home() {
                         </Button>
                         <Button className="w-full" variant="outline" onClick={() => setZipDialogOpen(true)} disabled={!selectedProjectReady}>
                           <FileArchive className="h-4 w-4" />
-                          Importer un ZIP
+                          Ajouter un pauvre zip
                         </Button>
                       </div>
                     </CardHeader>
@@ -3202,73 +3269,75 @@ export default function Home() {
               Analyse l’archive, choisis les modules à copier dans addons-store, puis confirme l’import.
             </DialogDescription>
           </DialogHeader>
-          <FilePicker
-            ref={zipInputRef}
-            accept=".zip"
-            file={zipFile}
-            buttonLabel="Choisir un ZIP"
-            disabled={loading || inspectingZip}
-            onChange={(event) => void inspectZipFile(event.target.files?.[0])}
-          />
-          {inspectingZip && (
-            <div className="flex items-center gap-2 rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              Analyse sécurisée de l’archive…
-            </div>
-          )}
-          {!inspectingZip && zipModuleCandidates.length > 0 && (
-            <div className="min-w-0 rounded-md border">
-              <label className="flex cursor-pointer items-start gap-3 border-b bg-muted/40 p-3 text-sm">
-                <Checkbox
-                  className="mt-0.5"
-                  checked={
-                    selectedZipModules.size > 0 && selectedZipModules.size < zipModuleCandidates.length
-                      ? "indeterminate"
-                      : selectedZipModules.size === zipModuleCandidates.length
-                  }
-                  onCheckedChange={(checked) => toggleAllZipModules(checked === true)}
-                />
-                <span className="min-w-0 flex-1">
-                  <span className="block font-medium">Sélectionner tous les modules détectés</span>
-                  <span className="block text-xs text-muted-foreground">
-                    {selectedZipModules.size}/{zipModuleCandidates.length} module(s) sélectionné(s)
-                  </span>
-                </span>
-              </label>
-              <div className="max-h-64 overflow-y-auto p-2">
-                {zipModuleCandidates.map((moduleName) => (
-                  <label
-                    key={moduleName}
-                    className="flex min-w-0 cursor-pointer items-start gap-3 rounded-md p-2 text-sm hover:bg-muted"
-                  >
-                    <Checkbox
-                      className="mt-0.5"
-                      checked={selectedZipModules.has(moduleName)}
-                      onCheckedChange={(checked) => toggleZipModule(moduleName, checked === true)}
-                    />
-                    <span className="min-w-0 break-all font-mono">{moduleName}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
-          )}
-          <label className="flex items-start gap-2 rounded-md border bg-muted/40 p-3 text-sm">
-            <Checkbox
-              className="mt-1"
-              checked={replaceZipModules}
-              onCheckedChange={(checked) => setReplaceZipModules(checked === true)}
+          <div className="grid gap-4">
+            <FilePicker
+              ref={zipInputRef}
+              accept=".zip"
+              file={zipFile}
+              buttonLabel="Choisir un ZIP"
+              disabled={loading || inspectingZip}
+              onChange={(event) => void inspectZipFile(event.target.files?.[0])}
             />
-            <span>
-              <span className="block font-medium">Remplacer les modules existants</span>
-              <span className="block text-xs text-muted-foreground">
-                L’ancien dossier ou lien est sauvegardé dans `.odoo_manager_backups` avant remplacement.
+            {inspectingZip && (
+              <div className="flex items-center gap-2 rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Analyse sécurisée de l’archive…
+              </div>
+            )}
+            {!inspectingZip && zipModuleCandidates.length > 0 && (
+              <div className="min-w-0 rounded-md border">
+                <label className="flex cursor-pointer items-start gap-3 border-b bg-muted/40 p-3 text-sm">
+                  <Checkbox
+                    className="mt-0.5"
+                    checked={
+                      selectedZipModules.size > 0 && selectedZipModules.size < zipModuleCandidates.length
+                        ? "indeterminate"
+                        : selectedZipModules.size === zipModuleCandidates.length
+                    }
+                    onCheckedChange={(checked) => toggleAllZipModules(checked === true)}
+                  />
+                  <span className="min-w-0 flex-1">
+                    <span className="block font-medium">Sélectionner tous les modules détectés</span>
+                    <span className="block text-xs text-muted-foreground">
+                      {selectedZipModules.size}/{zipModuleCandidates.length} module(s) sélectionné(s)
+                    </span>
+                  </span>
+                </label>
+                <div className="max-h-64 overflow-y-auto p-2">
+                  {zipModuleCandidates.map((moduleName) => (
+                    <label
+                      key={moduleName}
+                      className="flex min-w-0 cursor-pointer items-start gap-3 rounded-md p-2 text-sm hover:bg-muted"
+                    >
+                      <Checkbox
+                        className="mt-0.5"
+                        checked={selectedZipModules.has(moduleName)}
+                        onCheckedChange={(checked) => toggleZipModule(moduleName, checked === true)}
+                      />
+                      <span className="min-w-0 break-all font-mono">{moduleName}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+            <label className="flex items-start gap-2 rounded-md border bg-muted/40 p-3 text-sm">
+              <Checkbox
+                className="mt-1"
+                checked={replaceZipModules}
+                onCheckedChange={(checked) => setReplaceZipModules(checked === true)}
+              />
+              <span>
+                <span className="block font-medium">Remplacer les modules existants</span>
+                <span className="block text-xs text-muted-foreground">
+                  L’ancien dossier ou lien est sauvegardé dans `.odoo_manager_backups` avant remplacement.
+                </span>
               </span>
-            </span>
-          </label>
-          <Button onClick={importZip} disabled={loading || inspectingZip || !selectedZipModules.size}>
-            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileArchive className="h-4 w-4" />}
-            Importer {selectedZipModules.size || ""} module(s)
-          </Button>
+            </label>
+            <Button onClick={importZip} disabled={loading || inspectingZip || !selectedZipModules.size}>
+              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileArchive className="h-4 w-4" />}
+              Importer {selectedZipModules.size || ""} module(s)
+            </Button>
+          </div>
         </DialogContent>
       </Dialog>
 

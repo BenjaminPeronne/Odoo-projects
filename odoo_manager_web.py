@@ -98,6 +98,12 @@ JOBS_LOCK = threading.Lock()
 NEXT_JOB_ID = 1
 ACTIVE_PROCESSES = set()
 ACTIVE_PROCESSES_LOCK = threading.Lock()
+
+EVENT_SUBSCRIBERS = set()
+EVENT_SUBSCRIBERS_LOCK = threading.Lock()
+EVENT_WATCH_INTERVAL_SECONDS = 2
+_EVENT_WATCH_THREAD_STARTED = False
+_EVENT_WATCH_THREAD_LOCK = threading.Lock()
 LOCAL_MODULE_OVERRIDES_LOCK = threading.Lock()
 
 
@@ -2895,13 +2901,103 @@ def compose_service_for(project, pattern="odoo"):
     return ""
 
 
+def publish_event(event_type, payload):
+    """Push a live update to every connected /api/stream subscriber."""
+    message = f"event: {event_type}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+    with EVENT_SUBSCRIBERS_LOCK:
+        subscribers = list(EVENT_SUBSCRIBERS)
+    for subscriber_queue in subscribers:
+        try:
+            subscriber_queue.put_nowait(message)
+        except queue.Full:
+            pass
+
+
+def event_watch_loop():
+    last_overview_json = None
+    last_system_json = None
+    while True:
+        try:
+            with EVENT_SUBSCRIBERS_LOCK:
+                has_subscribers = bool(EVENT_SUBSCRIBERS)
+            if has_subscribers:
+                docker = docker_status(SETTINGS)
+                overview_payload = overview(docker)
+                overview_json = json.dumps(overview_payload, sort_keys=True, ensure_ascii=False)
+                if overview_json != last_overview_json:
+                    last_overview_json = overview_json
+                    publish_event("overview", overview_payload)
+
+                system_payload = system_status_snapshot(docker)
+                system_json = json.dumps(system_payload, sort_keys=True, ensure_ascii=False)
+                if system_json != last_system_json:
+                    last_system_json = system_json
+                    publish_event("system_status", system_payload)
+            else:
+                last_overview_json = None
+                last_system_json = None
+        except Exception:
+            traceback.print_exc()
+        time.sleep(EVENT_WATCH_INTERVAL_SECONDS)
+
+
+def ensure_event_watch_thread_started():
+    global _EVENT_WATCH_THREAD_STARTED
+    with _EVENT_WATCH_THREAD_LOCK:
+        if _EVENT_WATCH_THREAD_STARTED:
+            return
+        _EVENT_WATCH_THREAD_STARTED = True
+        threading.Thread(target=event_watch_loop, daemon=True).start()
+
+
+CONTAINER_LOG_FILE_CANDIDATES = (
+    "/home/odoo/srv/data/odoo.log",
+    "/var/log/odoo/odoo.log",
+    "/tmp/odoo.log",
+)
+
+
+def discover_container_log_file(container):
+    """Return the path of the first non-empty known Odoo log file inside the container, if any."""
+    shell = "for f in " + " ".join(CONTAINER_LOG_FILE_CANDIDATES) + "; do if [ -s \"$f\" ]; then echo \"$f\"; exit 0; fi; done; exit 1"
+    code, output = run_capture(docker_command(SETTINGS, "exec", container, "sh", "-lc", shell), timeout=10)
+    if code == 0 and output.strip():
+        return output.strip().splitlines()[0].strip()
+    return None
+
+
+def start_log_follow_process(project):
+    """Start a subprocess following the Odoo container logs live, or None if unavailable."""
+    container = f"odoo-{project}"
+    status = container_status(container)
+    if status in {"running", "restarting", "paused"}:
+        log_file = discover_container_log_file(container)
+        if log_file:
+            # Odoo writes request/module traffic to its log file, not to the container's stdout.
+            command = docker_command(SETTINGS, "exec", container, "sh", "-lc", f"tail -n 200 -f '{log_file}'")
+        else:
+            command = docker_command(SETTINGS, "logs", "-f", "--tail", "200", container)
+        cwd = WORKSPACE
+    else:
+        service = compose_service_for(project)
+        if not service:
+            return None
+        command = docker_command(SETTINGS, "compose", "logs", "-f", "--tail", "200", service)
+        cwd = WORKSPACE / project
+    return subprocess.Popen(
+        command,
+        cwd=str(cwd),
+        env=command_env(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        **hidden_process_kwargs(),
+    )
+
+
 def read_container_log_file(container):
-    paths = [
-        "/home/odoo/srv/data/odoo.log",
-        "/var/log/odoo/odoo.log",
-        "/tmp/odoo.log",
-    ]
-    shell = "for f in " + " ".join(paths) + "; do if [ -s \"$f\" ]; then echo \"===== $f =====\"; tail -n 260 \"$f\"; exit 0; fi; done; exit 1"
+    shell = "for f in " + " ".join(CONTAINER_LOG_FILE_CANDIDATES) + "; do if [ -s \"$f\" ]; then echo \"===== $f =====\"; tail -n 260 \"$f\"; exit 0; fi; done; exit 1"
     code, output = run_capture(docker_command(SETTINGS, "exec", container, "sh", "-lc", shell), timeout=10)
     if code == 0 and output.strip():
         return output.strip()
@@ -3047,6 +3143,13 @@ class Handler(BaseHTTPRequestHandler):
                 detail_value = params.get("detail", [""])[0]
                 detail_job_id = int(detail_value) if detail_value.isdigit() else None
                 return json_response(self, {"jobs": jobs_snapshot(detail_job_id=detail_job_id, compact=True)})
+            if path == "/api/stream":
+                return self.stream_events()
+
+            match = re.match(r"^/api/projects/([^/]+)/logs/stream$", path)
+            if match:
+                project = validate_project(urllib.parse.unquote(match.group(1)))
+                return self.stream_project_logs(project)
 
             match = re.match(r"^/api/projects/([^/]+)/modules$", path)
             if match:
@@ -3086,6 +3189,102 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             traceback.print_exc()
             return json_response(self, {"error": str(exc)}, status=500)
+
+    def write_sse(self, event_type, payload):
+        message = f"event: {event_type}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        self.wfile.write(message.encode("utf-8"))
+        self.wfile.flush()
+
+    def stream_events(self):
+        """Long-lived SSE connection pushing live overview/system_status updates."""
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            add_cors_headers(self)
+            self.end_headers()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return None
+
+        subscriber_queue = queue.Queue(maxsize=20)
+        with EVENT_SUBSCRIBERS_LOCK:
+            EVENT_SUBSCRIBERS.add(subscriber_queue)
+        try:
+            self.wfile.write(b"retry: 2000\n\n")
+            docker = docker_status(SETTINGS)
+            self.write_sse("overview", overview(docker))
+            self.write_sse("system_status", system_status_snapshot(docker))
+            while True:
+                try:
+                    message = subscriber_queue.get(timeout=15)
+                except queue.Empty:
+                    self.wfile.write(b": ping\n\n")
+                    self.wfile.flush()
+                    continue
+                self.wfile.write(message.encode("utf-8"))
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return None
+        except Exception:
+            traceback.print_exc()
+            return None
+        finally:
+            with EVENT_SUBSCRIBERS_LOCK:
+                EVENT_SUBSCRIBERS.discard(subscriber_queue)
+
+    def stream_project_logs(self, project):
+        """Long-lived SSE connection tailing the Odoo container logs live."""
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            add_cors_headers(self)
+            self.end_headers()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return None
+
+        process = None
+        try:
+            try:
+                process = start_log_follow_process(project)
+            except OSError as exc:
+                self.write_sse("log", {"line": f"Impossible de suivre les logs: {exc}"})
+                self.write_sse("log_end", {})
+                return None
+            if process is None:
+                self.write_sse(
+                    "log",
+                    {"line": "Aucun conteneur Odoo actif pour ce projet. Démarre le projet puis réessaie."},
+                )
+                self.write_sse("log_end", {})
+                return None
+            with ACTIVE_PROCESSES_LOCK:
+                ACTIVE_PROCESSES.add(process)
+            self.write_sse("log", {"line": f"--- Suivi en direct des logs de {project} ---"})
+            assert process.stdout is not None
+            for line in process.stdout:
+                self.write_sse("log", {"line": line.rstrip("\n")})
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return None
+        except Exception:
+            traceback.print_exc()
+            return None
+        finally:
+            if process is not None:
+                with ACTIVE_PROCESSES_LOCK:
+                    ACTIVE_PROCESSES.discard(process)
+                if process.poll() is None:
+                    try:
+                        process.terminate()
+                    except OSError:
+                        pass
+                try:
+                    process.wait(timeout=3)
+                except Exception:
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -3471,6 +3670,7 @@ def main():
         raise
     print(f"Interface Odoo locale: {url}")
     print(f"Workspace: {WORKSPACE}")
+    ensure_event_watch_thread_started()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
