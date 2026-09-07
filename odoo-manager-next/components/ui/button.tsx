@@ -29,7 +29,7 @@ const Button = React.forwardRef<React.ElementRef<typeof RadixButton>, ButtonProp
   ({ className, variant = "default", size = "default", ...props }, ref) => {
     const radixVariant =
       variant === "secondary" ? "soft" : variant === "outline" ? "outline" : variant === "ghost" ? "ghost" : "solid";
-    const color = variant === "destructive" ? "red" : variant === "secondary" || variant === "outline" || variant === "ghost" ? "gray" : "blue";
+    const color = variant === "destructive" ? "red" : variant === "secondary" || variant === "outline" || variant === "ghost" ? "gray" : "orange";
     const radixSize = size === "sm" || size === "icon" ? "2" : "3";
 
     return (

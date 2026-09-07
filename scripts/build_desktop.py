@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Construit Odoo Manager pour la plateforme sur laquelle le script s'exécute."""
+"""Construit SDK Local Manager pour la plateforme sur laquelle le script s'exécute."""
 
 import argparse
 import os
@@ -64,7 +64,7 @@ def run(command: list[str], *, cwd: Path = ROOT, env=None) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Construit le sidecar et l'installateur natifs d'Odoo Manager."
+        description="Construit le sidecar et l'installateur natifs d'SDK Local Manager."
     )
     parser.add_argument(
         "--bundles",

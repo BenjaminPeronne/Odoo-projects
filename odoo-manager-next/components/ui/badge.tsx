@@ -10,7 +10,7 @@ export interface BadgeProps extends Omit<React.ComponentPropsWithoutRef<typeof R
 
 export function Badge({ className, variant = "secondary", size = "2", ...props }: BadgeProps) {
   const color =
-    variant === "success" ? "green" : variant === "warning" ? "amber" : variant === "destructive" ? "red" : variant === "default" ? "blue" : "gray";
+    variant === "success" ? "green" : variant === "warning" ? "amber" : variant === "destructive" ? "red" : variant === "default" ? "orange" : "gray";
   const radixVariant = variant === "outline" ? "outline" : variant === "default" || variant === "destructive" ? "solid" : "soft";
 
   return (

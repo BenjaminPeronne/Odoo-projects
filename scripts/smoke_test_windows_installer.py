@@ -18,7 +18,7 @@ from pathlib import Path
 
 TAURI_WINDOWS_ORIGIN = "http://tauri.localhost"
 PACKAGED_PROCESS_NAMES = (
-    "Odoo Manager.exe",
+    "SDK Local Manager.exe",
     "odoo-manager.exe",
     "odoo-manager-backend.exe",
 )
@@ -187,7 +187,7 @@ def main() -> None:
     if os.name != "nt":
         raise SystemExit("Ce test doit être exécuté sur Windows.")
 
-    parser = argparse.ArgumentParser(description="Teste l'installateur NSIS Odoo Manager.")
+    parser = argparse.ArgumentParser(description="Teste l'installateur NSIS SDK Local Manager.")
     parser.add_argument("--installer", required=True, type=Path)
     parser.add_argument("--timeout", type=float, default=45.0)
     args = parser.parse_args()

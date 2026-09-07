@@ -479,6 +479,22 @@ class ProjectServiceTests(unittest.TestCase):
         compose_cwds = [cwd.name for command, cwd in self.runner.streams if command[-2:] == ["compose", "pull"]]
         self.assertEqual(compose_cwds, ["DEMO", "OTHER"])
 
+    def test_list_projects_ignores_inaccessible_compose_files(self):
+        inaccessible = self.root / "restricted"
+        inaccessible.mkdir()
+        protected_compose = inaccessible / "docker-compose.yml"
+        original_exists = Path.exists
+
+        def exists(path):
+            if path == protected_compose:
+                raise PermissionError(5, "Access is denied", str(path))
+            return original_exists(path)
+
+        with patch.object(Path, "exists", autospec=True, side_effect=exists):
+            projects = self.service.list_projects()
+
+        self.assertEqual(projects, ["DEMO"])
+
     def test_install_traefik_updates_repository_and_starts_compose_without_shell(self):
         tools = self.root / "docker-local-tools"
         traefik = tools / "traefik"

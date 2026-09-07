@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-APP_PATH=${1:-"/Applications/Odoo Manager.app"}
+APP_PATH=${1:-"/Applications/SDK Local Manager.app"}
 
 if [ "$(uname -s)" != "Darwin" ]; then
   echo "Ce script est uniquement utile sur macOS." >&2
@@ -10,7 +10,7 @@ fi
 
 if [ ! -d "$APP_PATH" ]; then
   echo "Application introuvable: $APP_PATH" >&2
-  echo "Glisse d'abord Odoo Manager.app dans Applications, ou passe le chemin en argument." >&2
+  echo "Glisse d'abord SDK Local Manager.app dans Applications, ou passe le chemin en argument." >&2
   exit 1
 fi
 
@@ -25,5 +25,5 @@ fi
 
 codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 
-echo "Odoo Manager peut maintenant être ouvert depuis Applications."
+echo "SDK Local Manager peut maintenant être ouvert depuis Applications."
 echo "Note: ce contournement est réservé aux builds privés non notarizés."

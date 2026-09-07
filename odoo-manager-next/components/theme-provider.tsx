@@ -13,8 +13,8 @@ function RadixTheme({ children }: { children: ReactNode }) {
   return (
     <Theme
       appearance={mounted && resolvedTheme === "dark" ? "dark" : "light"}
-      accentColor="blue"
-      grayColor="slate"
+      accentColor="orange"
+      grayColor="sand"
       radius="medium"
       scaling="100%"
       hasBackground={false}
@@ -29,7 +29,7 @@ export function AppThemeProvider({ children }: { children: ReactNode }) {
   return (
     <NextThemeProvider
       attribute="class"
-      defaultTheme="system"
+      defaultTheme="dark"
       enableSystem
       enableColorScheme
       storageKey="odoo-manager-theme"

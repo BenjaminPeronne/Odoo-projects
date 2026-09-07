@@ -166,18 +166,38 @@ class ProjectService:
         path = self.project_path(project)
         for name in COMPOSE_FILENAMES:
             candidate = path / name
-            if candidate.exists():
+            try:
+                exists = candidate.exists()
+            except OSError:
+                return None
+            if exists:
                 return candidate
         return None
 
     def list_projects(self):
-        if not self.workspace.exists():
+        try:
+            workspace_available = self.workspace.is_dir()
+        except OSError:
+            return []
+        if not workspace_available:
             return []
         projects = []
-        for item in self.workspace.iterdir():
-            if not item.is_dir():
+        try:
+            items = tuple(self.workspace.iterdir())
+        except OSError:
+            return []
+        for item in items:
+            try:
+                is_directory = item.is_dir()
+            except OSError:
                 continue
-            if any((item / name).exists() for name in COMPOSE_FILENAMES):
+            if not is_directory:
+                continue
+            try:
+                has_compose = any((item / name).exists() for name in COMPOSE_FILENAMES)
+            except OSError:
+                continue
+            if has_compose:
                 projects.append(item.name)
         return sorted(projects)
 

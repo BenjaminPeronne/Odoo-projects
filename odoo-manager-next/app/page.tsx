@@ -257,7 +257,7 @@ const UPLOAD_TIMEOUT_MS = 120_000;
 const MODULES_PER_PAGE = 50;
 
 class ApiUnavailableError extends Error {
-  constructor(message = "Service local Odoo Manager indisponible. L'application n'arrive pas à joindre l'API locale sur 127.0.0.1:8765.") {
+  constructor(message = "Service local SDK Local Manager indisponible. L'application n'arrive pas à joindre l'API locale sur 127.0.0.1:8765.") {
     super(message);
     this.name = "ApiUnavailableError";
   }
@@ -1825,11 +1825,11 @@ export default function Home() {
 
   if (initializing) {
     return (
-      <main className="grid min-h-screen place-items-center bg-background px-6">
+      <main className="sdk-shell grid min-h-screen place-items-center bg-background px-6">
         <div className="w-full max-w-md rounded-lg border bg-card p-6 text-center shadow-sm">
           <img
             src={selectedAppIcon.src}
-            alt="Odoo Manager"
+            alt="SDK Local Manager"
             className={cn(
               "mx-auto h-16 w-16 object-cover",
               settings?.interface_icon === "local" ? "rounded-full" : "rounded-[15px]",
@@ -1872,11 +1872,11 @@ export default function Home() {
   }
 
   return (
-    <main className="min-h-screen overflow-x-hidden">
+    <main className="sdk-shell min-h-screen overflow-x-hidden">
       <div className="flex min-h-screen min-w-0 flex-col lg:flex-row">
         <aside className="min-w-0 border-b bg-card lg:sticky lg:top-0 lg:h-screen lg:w-80 lg:flex-none lg:border-b-0 lg:border-r">
           <div className="flex h-full flex-col">
-            <div className="border-b p-4">
+            <div className="sdk-brand border-b p-4">
               <div className="flex items-center justify-between gap-3">
                 <div className="flex min-w-0 items-center gap-2.5">
                   <img
@@ -1884,11 +1884,11 @@ export default function Home() {
                     alt=""
                     aria-hidden="true"
                     className={cn(
-                      "h-9 w-9 shrink-0 object-cover",
+                      "sdk-logo h-10 w-10 shrink-0 object-contain",
                       settings?.interface_icon === "local" ? "rounded-full" : "rounded-[9px]",
                     )}
                   />
-                  <h1 className="min-w-0 truncate text-lg font-semibold">Gestionnaire Odoo</h1>
+                  <div className="min-w-0"><p className="sdk-eyebrow">Sudokeys</p><h1 className="sdk-brand-name text-sm font-extrabold leading-tight">SDK Local Manager</h1></div>
                 </div>
                 <ThemeToggle />
               </div>
@@ -2003,7 +2003,7 @@ export default function Home() {
         </aside>
 
         <section className="min-w-0 flex-1">
-          <header className="border-b bg-card">
+          <header className="sdk-project-header border-b bg-card">
             <div className="mx-auto flex max-w-[1500px] flex-col gap-4 px-4 py-4 xl:flex-row xl:items-start xl:justify-between">
               <div className="min-w-0 flex-1">
                 <div className="flex min-w-0 flex-wrap items-start gap-2">
@@ -3040,8 +3040,8 @@ export default function Home() {
                   >
                     <img src={appIcon.src} alt="" aria-hidden="true" className="h-14 w-14 shrink-0 rounded-[13px] object-cover" />
                     <span className="min-w-0 flex-1">
-                      <span className="block text-sm font-semibold">Odoo Manager</span>
-                      <span className="mt-1 block text-xs text-muted-foreground">Icône actuelle</span>
+                      <span className="block text-sm font-semibold">SDK Local Manager</span>
+                      <span className="mt-1 block text-xs text-muted-foreground">Logo Sudokeys</span>
                     </span>
                     {settingsDraft.interface_icon === "manager" && <CheckCircle2 className="h-5 w-5 shrink-0 text-primary" aria-hidden="true" />}
                   </InteractiveCard>
@@ -3153,7 +3153,7 @@ export default function Home() {
       <Dialog open={aboutOpen} onOpenChange={setAboutOpen}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>À propos d’Odoo Manager</DialogTitle>
+            <DialogTitle>À propos d’SDK Local Manager</DialogTitle>
             <DialogDescription>
               Gestionnaire local pour créer, administrer et maintenir des environnements Odoo.
             </DialogDescription>
@@ -3171,7 +3171,7 @@ export default function Home() {
                   )}
                 />
                 <div className="min-w-0">
-                  <div className="font-semibold">Odoo Manager</div>
+                  <div className="font-semibold">SDK Local Manager</div>
                   <div className="mt-1 text-sm text-muted-foreground">Application desktop multi-plateforme</div>
                 </div>
               </div>

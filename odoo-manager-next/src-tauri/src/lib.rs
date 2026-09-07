@@ -39,7 +39,7 @@ fn prepare_backend_log(log_path: &Path) -> std::io::Result<()> {
         fs::rename(log_path, previous)?;
     }
     let mut file = OpenOptions::new().create(true).append(true).open(log_path)?;
-    writeln!(file, "\n=== Démarrage de l'application Odoo Manager ===")
+    writeln!(file, "\n=== Démarrage de l'application SDK Local Manager ===")
 }
 
 fn append_backend_log(log_path: &Path, message: &str) {
@@ -316,7 +316,7 @@ pub fn run() {
             }
         })
         .build(tauri::generate_context!())
-        .expect("impossible de lancer Odoo Manager");
+        .expect("impossible de lancer SDK Local Manager");
     app.run(|app_handle, event| {
         if matches!(event, tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }) {
             stop_backend(app_handle);

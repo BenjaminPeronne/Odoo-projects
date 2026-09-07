@@ -736,16 +736,28 @@ def container_statuses(names):
 
 def project_dirs():
     projects = []
-    if not WORKSPACE.is_dir():
+    try:
+        workspace_available = WORKSPACE.is_dir()
+    except OSError:
+        return projects
+    if not workspace_available:
         return projects
     try:
         items = tuple(WORKSPACE.iterdir())
     except OSError:
         return projects
     for item in items:
-        if not item.is_dir():
+        try:
+            is_directory = item.is_dir()
+        except OSError:
             continue
-        if any((item / name).exists() for name in ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml")):
+        if not is_directory:
+            continue
+        try:
+            has_compose = any((item / name).exists() for name in ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"))
+        except OSError:
+            continue
+        if has_compose:
             projects.append(item.name)
     return sorted(projects)
 

@@ -285,6 +285,34 @@ class ContainerStatusBatchTests(unittest.TestCase):
         self.assertEqual(run_capture.call_count, 1)
 
 
+class ProjectDiscoveryTests(unittest.TestCase):
+    def test_project_dirs_ignores_inaccessible_compose_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            project = workspace / "DEMO"
+            project.mkdir()
+            (project / "compose.yml").write_text("services: {}\n", encoding="utf-8")
+            inaccessible = workspace / "restricted"
+            inaccessible.mkdir()
+            protected_compose = inaccessible / "docker-compose.yml"
+            original_exists = Path.exists
+
+            def exists(path):
+                if path == protected_compose:
+                    raise PermissionError(5, "Access is denied", str(path))
+                return original_exists(path)
+
+            previous_workspace = web.WORKSPACE
+            try:
+                web.WORKSPACE = workspace
+                with patch.object(Path, "exists", autospec=True, side_effect=exists):
+                    projects = web.project_dirs()
+            finally:
+                web.WORKSPACE = previous_workspace
+
+        self.assertEqual(projects, ["DEMO"])
+
+
 class CommandWorkingDirectoryTests(unittest.TestCase):
     @patch("odoo_manager_web.subprocess.run")
     def test_missing_default_workspace_uses_existing_parent(self, run):

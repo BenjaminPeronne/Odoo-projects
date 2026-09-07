@@ -2,7 +2,7 @@
 
 Cette interface est l'UI active du gestionnaire Odoo local.
 
-- Application de bureau : installer le DMG puis ouvrir `Odoo Manager.app`
+- Application de bureau : installer le DMG puis ouvrir `SDK Local Manager.app`
 - Interface Next.js en developpement : `./odoo_next_gui.sh`, puis http://127.0.0.1:3000/
 
 La nouvelle interface consomme l'API Python existante servie par `odoo_manager_web.py`.
@@ -194,7 +194,7 @@ Pour publier une vraie evolution fonctionnelle, synchronise d'abord sa version :
 ```sh
 python3 scripts/set_app_version.py 0.1.2
 git add -A
-git commit -m "Release Odoo Manager 0.1.2"
+git commit -m "Release SDK Local Manager 0.1.2"
 git push origin main
 sh scripts/build_all_platforms.sh
 ```
@@ -230,3 +230,9 @@ Une distribution publique sans alerte macOS necessitera un certificat Apple
 Developer ID, la signature Developer ID du sidecar et de l'app, puis la
 notarisation Apple du DMG. Les certificats ne doivent pas etre commités dans le
 depot ; ils devront etre injectes via les secrets GitHub Actions.
+
+## Identité Sudokeys Glow
+
+Le produit se nomme **SDK Local Manager**. L’interface utilise la charte Glow : noir, orange `#F4791F`, surfaces chaudes et halos discrets. Le thème sombre est proposé par défaut ; les préférences existantes sont conservées. Manrope et JetBrains Mono sont embarquées dans `odoo-manager-next/public/fonts`, avec leurs licences OFL, pour fonctionner hors ligne.
+
+Le logo final fourni est conservé dans `app/icon.png` et décliné par Tauri pour les icônes natives. Les identifiants techniques, clés de préférences et noms du sidecar restent stables pour préserver la compatibilité. Les nouveaux installateurs porteront le nom SDK Local Manager lors de leur prochaine compilation.
