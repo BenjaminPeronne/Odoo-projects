@@ -701,6 +701,7 @@ export default function Home() {
   const selectedJobIdRef = useRef<number | null>(null);
   const jobStatuses = useRef<Map<number, string>>(new Map());
   const jobNotificationsInitialized = useRef(false);
+  const lastSynchronizedJobCompletion = useRef("");
   const modulesRequestGeneration = useRef(0);
   const zipInspectionGeneration = useRef(0);
   const scheduledTimeouts = useRef<Set<number>>(new Set());
@@ -1108,6 +1109,16 @@ export default function Home() {
     }
   }, [pushToast, selectedDb, selectedProject?.name]);
 
+  useEffect(() => {
+    const completionKey = jobs
+      .filter((job) => job.project === selectedProject?.name && job.status !== "running")
+      .map((job) => `${job.id}:${job.status}:${job.finished_at || ""}`)
+      .join("|");
+    if (!completionKey || completionKey === lastSynchronizedJobCompletion.current) return;
+    lastSynchronizedJobCompletion.current = completionKey;
+    void Promise.all([refreshOverview(), refreshModules()]);
+  }, [jobs, refreshModules, refreshOverview, selectedProject?.name]);
+
   useEffect(() => () => {
     for (const timeout of scheduledTimeouts.current) window.clearTimeout(timeout);
     scheduledTimeouts.current.clear();
@@ -1196,8 +1207,11 @@ export default function Home() {
         // Malformed live update: the safety-net poll will resync state.
       }
     });
+    source.addEventListener("job_completed", () => {
+      void Promise.all([refreshJobs(), refreshOverview(), refreshModules()]);
+    });
     return () => source.close();
-  }, [applyOverview, commitSystemStatus, initializing]);
+  }, [applyOverview, commitSystemStatus, initializing, refreshJobs, refreshModules, refreshOverview]);
 
   useEffect(() => {
     if (selectedProject) {
@@ -3660,7 +3674,7 @@ export default function Home() {
           }
         }}
       >
-        <DialogContent className="max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-h-[90vh] max-w-2xl space-y-5 overflow-y-auto">
           <DialogHeader>
             <DialogTitle>MAJ complète Odoo</DialogTitle>
             <DialogDescription>

@@ -1854,6 +1854,10 @@ class Job:
                 self.args = ()
                 self.target = None
                 self.thread = None
+            publish_event(
+                "job_completed",
+                {"id": self.id, "status": self.status, "project": self.project, "finished_at": self.finished_at},
+            )
 
 
 def terminate_active_subprocesses(wait_seconds=0.5):
@@ -2016,7 +2020,9 @@ def cancel_missing_module_operations_job(job, project, db_name, modules):
         "update ir_module_module "
         "set state = case when state = 'to install' then 'uninstalled' else 'installed' end "
         f"where name in ({quoted}) and state in ('to install','to upgrade','to remove') "
-        "returning name || '|' || state; "
+        "returning name; "
+        "select name || '|' || state from ir_module_module "
+        f"where name in ({quoted}) and state in ('installed','uninstalled') order by name; "
         "commit;"
     )
     changed_lines = db_query_lines(project, db_name, query)

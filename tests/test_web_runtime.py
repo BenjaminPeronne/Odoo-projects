@@ -908,6 +908,7 @@ class DiagnosticModuleTests(unittest.TestCase):
 
         update_query = db_query_lines.call_args_list[1].args[2]
         self.assertIn("state in ('to install','to upgrade','to remove')", update_query)
+        self.assertIn("state in ('installed','uninstalled')", update_query)
         self.assertNotIn("delete", update_query.lower())
         remember_ignored.assert_called_once_with("DEMO", "demo", ["auto_backup", "auto_backup_sh"])
         self.assertIn("Aucune donnée métier", "\n".join(job.lines))
