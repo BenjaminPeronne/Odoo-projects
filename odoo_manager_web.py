@@ -1170,6 +1170,8 @@ def wsl_module_dirs(project):
     ]
     linux_candidates = [workspace_execution_path(path, SETTINGS, WORKSPACE) for path in candidates]
     script = (
+        'found_parent=0; for parent do [ -d "$parent" ] && found_parent=1; done; '
+        '[ "$found_parent" -eq 1 ] || { echo "Aucun dossier addons lisible depuis WSL." >&2; exit 3; }; '
         'for parent do [ -d "$parent" ] || continue; '
         'find "$parent" -mindepth 1 -maxdepth 1 \\( -type d -o -type l \\) -print 2>/dev/null | '
         'while IFS= read -r child; do '
@@ -1185,7 +1187,8 @@ def wsl_module_dirs(project):
         timeout=30,
     )
     if code != 0:
-        return []
+        detail = output.strip() or "La commande de détection des addons a échoué dans WSL."
+        raise RuntimeError(f"Impossible de lire les modules du projet depuis WSL : {detail}")
 
     seen = set()
     paths = []
@@ -1224,25 +1227,50 @@ def module_dirs(project):
         base / "addons-store" / "odoo_enterprise",
     ]
     seen = set()
+    readable_parent = False
+    access_errors = []
     for parent in candidates:
-        if not parent.exists():
+        try:
+            exists = parent.exists()
+        except OSError as exc:
+            access_errors.append(f"{parent}: {exc}")
+            continue
+        if not exists:
             continue
         try:
             children = sorted(parent.iterdir(), key=lambda p: p.name.lower())
-        except OSError:
+            readable_parent = True
+        except OSError as exc:
+            access_errors.append(f"{parent}: {exc}")
             continue
         for child in children:
-            if not child.is_dir() and not child.is_symlink():
+            try:
+                is_directory = child.is_dir()
+                is_link = child.is_symlink()
+            except OSError as exc:
+                access_errors.append(f"{child}: {exc}")
+                continue
+            if not is_directory and not is_link:
                 continue
             manifest = child / "__manifest__.py"
             openerp = child / "__openerp__.py"
-            if not manifest.exists() and not openerp.exists():
+            try:
+                has_manifest = manifest.exists() or openerp.exists()
+            except OSError as exc:
+                access_errors.append(f"{child}: {exc}")
+                continue
+            if not has_manifest:
                 continue
             key = child.name
             if key in seen:
                 continue
             seen.add(key)
             yield child
+    if not readable_parent and access_errors:
+        raise RuntimeError(
+            "Impossible de lire les dossiers addons du projet sous Windows : "
+            + " ; ".join(access_errors[:3])
+        )
 
 
 MODULE_CACHE = {}
@@ -1591,8 +1619,9 @@ def modules_for(project, db_name=None):
 
     if base_modules is None:
         base_modules = [basic_module(project, path) for path in module_dirs(project)]
-        with MODULE_CACHE_LOCK:
-            MODULE_CACHE[cache_key] = {"created_at": now, "modules": [dict(item) for item in base_modules]}
+        if base_modules:
+            with MODULE_CACHE_LOCK:
+                MODULE_CACHE[cache_key] = {"created_at": now, "modules": [dict(item) for item in base_modules]}
 
     states = installed_modules(project, db_name) if db_name else {}
     modules = []

@@ -663,6 +663,7 @@ export default function Home() {
   const [selectedProjectName, setSelectedProjectName] = useState("");
   const [selectedDb, setSelectedDb] = useState("");
   const [modules, setModules] = useState<ModuleInfo[]>([]);
+  const [loadingModules, setLoadingModules] = useState(false);
   const [moduleSearch, setModuleSearch] = useState("");
   const [moduleFilter, setModuleFilter] = useState("all");
   const [moduleOriginFilter, setModuleOriginFilter] = useState("all");
@@ -821,7 +822,11 @@ export default function Home() {
     const query = deferredModuleSearch.trim().toLowerCase();
     return modules
       .filter((module) => !query || module.name.toLowerCase().includes(query))
-      .filter((module) => moduleFilter === "all" || module.state === moduleFilter)
+      .filter((module) => (
+        moduleFilter === "all" ||
+        module.state === moduleFilter ||
+        (moduleFilter === "uninstalled" && module.state === "disponible")
+      ))
       .filter((module) => moduleOriginFilter === "all" || normalizedModuleOrigin(module.origin, module.source_path || module.path) === moduleOriginFilter);
   }, [deferredModuleSearch, modules, moduleFilter, moduleOriginFilter]);
   const modulePageCount = Math.max(1, Math.ceil(filteredModules.length / MODULES_PER_PAGE));
@@ -1155,8 +1160,10 @@ export default function Home() {
     const generation = ++modulesRequestGeneration.current;
     if (!projectName || !selectedDb || selectedDb === "postgres") {
       setModules([]);
+      setLoadingModules(false);
       return;
     }
+    setLoadingModules(true);
     try {
       const payload = await api<{ modules: ModuleInfo[] }>(
         `/api/projects/${encodeURIComponent(projectName)}/modules?db=${encodeURIComponent(selectedDb)}`,
@@ -1170,6 +1177,8 @@ export default function Home() {
     } catch (err) {
       if (generation !== modulesRequestGeneration.current) return;
       pushToast("error", err instanceof Error ? err.message : "Impossible de charger les modules.");
+    } finally {
+      if (generation === modulesRequestGeneration.current) setLoadingModules(false);
     }
   }, [pushToast, selectedDb, selectedProject?.name]);
 
@@ -2706,7 +2715,20 @@ export default function Home() {
                   <Card>
                     <CardHeader className="gap-3 sm:flex-row sm:items-start sm:justify-between">
                       <div className="min-w-0">
-                        <CardTitle>Modules</CardTitle>
+                        <div className="flex items-center gap-2">
+                          <CardTitle>Modules</CardTitle>
+                          <Button
+                            type="button"
+                            size="icon"
+                            variant="ghost"
+                            onClick={() => void refreshModules()}
+                            disabled={loadingModules}
+                            aria-label="Actualiser la liste des modules"
+                            title="Actualiser la liste des modules"
+                          >
+                            <RefreshCcw className={cn("h-4 w-4", loadingModules && "animate-spin")} />
+                          </Button>
+                        </div>
                         <CardDescription>Recherche, sélection et mise à jour des modules de la base Odoo choisie.</CardDescription>
                       </div>
                       <div className="grid w-full gap-2 sm:w-auto sm:grid-cols-2">
@@ -2980,8 +3002,28 @@ export default function Home() {
                               );
                             })
                           ) : (
-                            <div className="p-6 text-center text-sm text-muted-foreground">
-                              Aucun module ne correspond à la recherche.
+                            <div className="grid justify-items-center gap-3 p-6 text-center text-sm text-muted-foreground">
+                              <span>
+                                {loadingModules
+                                  ? "Lecture des modules du projet…"
+                                  : modules.length
+                                    ? "Aucun module ne correspond aux filtres actuels."
+                                    : "Aucun module Odoo n’a été détecté dans les dossiers addons du projet."}
+                              </span>
+                              {!loadingModules && (moduleSearch || moduleFilter !== "all" || moduleOriginFilter !== "all") && (
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => {
+                                    setModuleSearch("");
+                                    setModuleFilter("all");
+                                    setModuleOriginFilter("all");
+                                  }}
+                                >
+                                  Réinitialiser les filtres
+                                </Button>
+                              )}
                             </div>
                           )}
                         </div>

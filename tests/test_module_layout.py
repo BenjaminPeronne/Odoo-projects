@@ -104,6 +104,31 @@ class ModuleLayoutTests(unittest.TestCase):
         command = run_capture.call_args.args[0]
         self.assertEqual(command[:5], ["wsl.exe", "-d", "Ubuntu", "--exec", "sh"])
 
+    @mock.patch("odoo_manager_web.platform_id", return_value="windows")
+    @mock.patch("odoo_manager_web.run_capture", return_value=(3, "Aucun dossier addons lisible depuis WSL."))
+    def test_wsl_module_scan_failure_is_reported_instead_of_returning_empty(self, _run_capture, _platform):
+        workspace = r"\\wsl.localhost\Ubuntu\home\demo\Odoo-projects"
+        previous_settings = web.SETTINGS
+        try:
+            web.SETTINGS = web.ManagerSettings.from_dict({}, workspace)
+            web.WORKSPACE = Path(workspace)
+            web.clear_project_module_cache(self.project)
+
+            with self.assertRaisesRegex(RuntimeError, "Impossible de lire les modules.*WSL"):
+                web.modules_for(self.project)
+        finally:
+            web.SETTINGS = previous_settings
+            web.WORKSPACE = self.root
+            web.clear_project_module_cache(self.project)
+
+    @mock.patch("odoo_manager_web.module_dirs", return_value=iter(()))
+    def test_empty_module_scan_is_not_cached(self, module_dirs):
+        self.assertEqual(web.modules_for(self.project), [])
+        module_dirs.return_value = iter(())
+        self.assertEqual(web.modules_for(self.project), [])
+
+        self.assertEqual(module_dirs.call_count, 2)
+
     def test_delete_module_removes_link_and_storage_copy(self):
         job = DummyJob()
         web.link_module_candidates(job, self.project, [self.external])
