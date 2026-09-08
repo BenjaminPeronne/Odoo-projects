@@ -125,6 +125,8 @@ type ManagerSettings = {
   docker_executable: string;
   traefik_directory: string;
   docker_poll_interval: number;
+  api_port: number;
+  api_port_actual?: number;
   start_project_before_open: boolean;
   show_technical_details: boolean;
   interface_icon: InterfaceIcon;
@@ -276,7 +278,7 @@ type ProjectDiagnostics = {
   }>;
 };
 
-const API_BASE = process.env.NEXT_PUBLIC_ODOO_MANAGER_API?.replace(/\/$/, "") || "";
+let API_BASE = process.env.NEXT_PUBLIC_ODOO_MANAGER_API?.replace(/\/$/, "") || "";
 const FALLBACK_APP_VERSION = packageMetadata.version;
 const TAURI_API_RETRY_DELAYS_MS = [0, 250, 750, 1500, 2500];
 const BOOTSTRAP_RETRY_DELAYS_MS = [0, 500, 1000, 2000];
@@ -286,7 +288,7 @@ const UPLOAD_TIMEOUT_MS = 120_000;
 const MODULES_PER_PAGE = 50;
 
 class ApiUnavailableError extends Error {
-  constructor(message = "Service local SDK Local Manager indisponible. L'application n'arrive pas à joindre l'API locale sur 127.0.0.1:8765.") {
+  constructor(message = `Service local SDK Local Manager indisponible. L'application n'arrive pas à joindre l'API locale ${API_BASE || "http://127.0.0.1:18765"}.`) {
     super(message);
     this.name = "ApiUnavailableError";
   }
@@ -401,6 +403,11 @@ async function applicationVersion() {
   } catch {
     return FALLBACK_APP_VERSION;
   }
+}
+
+async function configureRuntimeApiBase() {
+  if (!isTauriRuntime()) return;
+  API_BASE = (await invokeDesktop<string>("backend_endpoint")).replace(/\/$/, "");
 }
 
 async function openExternalUrl(url?: string) {
@@ -608,6 +615,8 @@ function fallbackManagerSettings(
     docker_executable: current?.docker_executable || "docker",
     traefik_directory: current?.traefik_directory || systemStatus?.traefik?.path || "",
     docker_poll_interval: current?.docker_poll_interval || 10,
+    api_port: current?.api_port || 18765,
+    api_port_actual: current?.api_port_actual,
     start_project_before_open: current?.start_project_before_open ?? false,
     show_technical_details: current?.show_technical_details ?? false,
     interface_icon: current?.interface_icon === "local" ? "local" : "manager",
@@ -1145,7 +1154,12 @@ export default function Home() {
   useEffect(() => {
     setDesktopRuntime(isTauriRuntime());
     void applicationVersion().then(setAppVersion);
-    void initializeApplication();
+    void configureRuntimeApiBase()
+      .then(initializeApplication)
+      .catch((err) => {
+        setInitializationError(err instanceof Error ? err.message : "Impossible de déterminer le port du gestionnaire.");
+        setInitializationMessage("Le gestionnaire n’est pas encore prêt.");
+      });
     return () => {
       bootstrapGeneration.current += 1;
     };
@@ -1487,6 +1501,7 @@ export default function Home() {
 
   async function saveSettings() {
     if (!settingsDraft) return;
+    const apiPortChanged = settings?.api_port !== settingsDraft.api_port;
     setSavingSettings(true);
     try {
       const payload = await api<{ settings: ManagerSettings }>("/api/settings", {
@@ -1499,7 +1514,7 @@ export default function Home() {
       setSelectedProjectName("");
       setSelectedDb("");
       setModules([]);
-      pushToast("success", "Paramètres enregistrés.");
+      pushToast("success", apiPortChanged ? "Paramètres enregistrés. Redémarre le gestionnaire pour appliquer le nouveau port." : "Paramètres enregistrés.");
       await Promise.all([refreshOverview(), refreshSystemStatus()]);
     } catch (err) {
       pushToast("error", err instanceof Error ? err.message : "Enregistrement impossible.");
@@ -3388,6 +3403,40 @@ export default function Home() {
                 />
               </label>
 
+              <label className="grid gap-1.5 text-sm font-medium">
+                Port local du gestionnaire
+                <Input
+                  type="number"
+                  min={1024}
+                  max={65535}
+                  value={settingsDraft.api_port}
+                  onChange={(event) => setSettingsDraft({ ...settingsDraft, api_port: Number(event.target.value) })}
+                />
+                <span className="text-xs font-normal leading-relaxed text-muted-foreground">
+                  Port préféré de l’API locale. Un redémarrage est nécessaire après modification. S’il est occupé, notamment par Docker, le gestionnaire choisit automatiquement un port libre.
+                </span>
+              </label>
+
+              <div className="grid gap-3 rounded-md border bg-muted/40 p-3 text-sm">
+                <div>
+                  <div className="font-medium">Ports utilisés ou contactés</div>
+                  <p className="mt-1 text-xs text-muted-foreground">Les ports internes Docker ne sont pas réservés sur Windows sauf publication explicite du projet.</p>
+                </div>
+                <div className="grid gap-x-4 gap-y-2 text-xs sm:grid-cols-[100px_minmax(0,1fr)]">
+                  <code>{settingsDraft.api_port_actual || settingsDraft.api_port}</code><span>API locale du gestionnaire, sur <code>127.0.0.1</code> uniquement</span>
+                  <code>80 / 443</code><span>Traefik, accès HTTP/HTTPS aux projets</span>
+                  <code>8069</code><span>Odoo à l’intérieur de chaque conteneur</span>
+                  <code>5432</code><span>PostgreSQL à l’intérieur de chaque conteneur</span>
+                  <code>10022</code><span>Connexion SSH sortante vers GitLab Sudokeys</span>
+                  <code>3000</code><span>Interface Next.js, uniquement en mode développement</span>
+                </div>
+                {settingsDraft.api_port_actual && settingsDraft.api_port_actual !== settingsDraft.api_port && (
+                  <p className="text-xs text-amber-700 dark:text-amber-300">
+                    Le port {settingsDraft.api_port} était occupé au démarrage. Cette session utilise automatiquement le port {settingsDraft.api_port_actual}.
+                  </p>
+                )}
+              </div>
+
               <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
                 <div>Plateforme : {settingsDraft.platform || systemStatus?.docker.platform || "-"}</div>
                 <div className="mt-1 break-all">Configuration : {settingsDraft.config_file || "-"}</div>
@@ -3395,7 +3444,10 @@ export default function Home() {
 
               <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
                 <Button variant="outline" onClick={() => setSettingsOpen(false)}>Annuler</Button>
-                <Button disabled={savingSettings || !settingsDraft.workspace.trim()} onClick={saveSettings}>
+                <Button
+                  disabled={savingSettings || !settingsDraft.workspace.trim() || settingsDraft.api_port < 1024 || settingsDraft.api_port > 65535}
+                  onClick={saveSettings}
+                >
                   {savingSettings && <Loader2 className="h-4 w-4 animate-spin" />}
                   Enregistrer
                 </Button>

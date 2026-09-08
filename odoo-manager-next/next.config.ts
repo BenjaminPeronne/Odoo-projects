@@ -2,7 +2,7 @@ import type { NextConfig } from "next";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const backend = process.env.ODOO_MANAGER_API || "http://127.0.0.1:8765";
+const backend = process.env.ODOO_MANAGER_API || "http://127.0.0.1:18765";
 const configDir = dirname(fileURLToPath(import.meta.url));
 const desktopBuild = process.env.TAURI_BUILD === "1";
 

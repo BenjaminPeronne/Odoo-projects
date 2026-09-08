@@ -1,11 +1,11 @@
 {
   "name": "odoo-manager-next",
-  "version": "0.1.16",
+  "version": "0.1.17",
   "private": true,
   "scripts": {
     "dev": "next dev",
     "build": "next build --webpack",
-    "build:desktop": "cross-env TAURI_BUILD=1 NEXT_PUBLIC_ODOO_MANAGER_API=http://127.0.0.1:8765 next build --webpack",
+    "build:desktop": "cross-env TAURI_BUILD=1 NEXT_PUBLIC_ODOO_MANAGER_API=http://127.0.0.1:18765 next build --webpack",
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri"

@@ -78,7 +78,7 @@ LOCAL_MODULE_OVERRIDES = SETTINGS_STORE.path.with_name("local_module_overrides.j
 DELETED_PROJECTS = WORKSPACE / ".odoo_manager_deleted"
 DELETED_MODULES = WORKSPACE / ".odoo_manager_deleted_modules"
 HOST = os.environ.get("ODOO_GUI_HOST", "127.0.0.1")
-PORT = int(os.environ.get("ODOO_GUI_PORT", "8765"))
+PORT = int(os.environ.get("ODOO_GUI_PORT", str(SETTINGS.api_port)))
 TRAEFIK_REPO = "ssh://git@gitlab.sudokeys.com:10022/devops/docker-local-tools.git"
 
 SAFE_PROJECT_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -238,6 +238,7 @@ def settings_snapshot():
             "config_file": str(SETTINGS_STORE.path),
             "workspace_exists": WORKSPACE.exists() and WORKSPACE.is_dir(),
             "platform": platform_id(),
+            "api_port_actual": PORT,
         }
     )
     return payload
@@ -3456,6 +3457,7 @@ class Handler(BaseHTTPRequestHandler):
                     {
                         "ok": True,
                         "pid": os.getpid(),
+                        "port": PORT,
                         "log_file": str(RUNTIME_LOG_PATH),
                     },
                 )
@@ -3638,7 +3640,7 @@ class Handler(BaseHTTPRequestHandler):
                 with JOBS_LOCK:
                     running = [job.title for job in JOBS.values() if job.status == "running"]
                 if running:
-                    raise ValueError("Un traitement est en cours. Attends sa fin avant de changer le workspace.")
+                    raise ValueError("Un traitement est en cours. Attends sa fin avant de modifier les paramètres.")
                 create_workspace = bool(payload.pop("create_workspace", False))
                 settings = SETTINGS_STORE.update(payload, create_workspace=create_workspace)
                 apply_settings(settings)

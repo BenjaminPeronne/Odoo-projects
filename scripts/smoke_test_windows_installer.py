@@ -89,11 +89,15 @@ def stop_packaged_processes() -> None:
         )
 
 
+BACKEND_PORT = 18765
+BACKEND_URL = f"http://127.0.0.1:{BACKEND_PORT}"
+
+
 def wait_for_backend_shutdown(timeout: float = 10.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            request("http://127.0.0.1:8765/api/health", timeout=0.5)
+            request(f"{BACKEND_URL}/api/health", timeout=0.5)
         except (OSError, urllib.error.URLError):
             return
         time.sleep(0.2)
@@ -137,16 +141,16 @@ def wait_for_health(process: subprocess.Popen[bytes], timeout: float) -> None:
             failure = f"L'application installée s'est arrêtée (code {exit_code})."
             break
         try:
-            body, _headers = request("http://127.0.0.1:8765/api/health")
+            body, _headers = request(f"{BACKEND_URL}/api/health")
             payload = json.loads(body)
             if payload.get("ok") is True:
                 _preflight_body, preflight_headers = request(
-                    "http://127.0.0.1:8765/api/bootstrap",
+                    f"{BACKEND_URL}/api/bootstrap",
                     method="OPTIONS",
                     origin=TAURI_WINDOWS_ORIGIN,
                 )
                 bootstrap_body, bootstrap_headers = request(
-                    "http://127.0.0.1:8765/api/bootstrap",
+                    f"{BACKEND_URL}/api/bootstrap",
                     timeout=12.0,
                     origin=TAURI_WINDOWS_ORIGIN,
                 )
@@ -175,7 +179,7 @@ def wait_for_health(process: subprocess.Popen[bytes], timeout: float) -> None:
 
 def shutdown_application(process: subprocess.Popen[bytes]) -> None:
     try:
-        request("http://127.0.0.1:8765/api/system/shutdown", method="POST")
+        request(f"{BACKEND_URL}/api/system/shutdown", method="POST")
     except (OSError, urllib.error.URLError):
         pass
     stop_process_tree(process)
@@ -251,7 +255,7 @@ def main() -> None:
         process = subprocess.Popen([str(application)], env=env)
         try:
             wait_for_health(process, args.timeout)
-            print("Mise à niveau Windows opérationnelle: http://127.0.0.1:8765/api/health")
+            print(f"Mise à niveau Windows opérationnelle: {BACKEND_URL}/api/health")
         except RuntimeError as error:
             raise SystemExit(f"{error}\n--- backend.log ---\n{log_tail(backend_log())}") from error
         finally:

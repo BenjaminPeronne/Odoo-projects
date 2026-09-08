@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from odoo_manager_core.config import ManagerSettings, SettingsStore, default_config_dir, expand_home_reference
+from odoo_manager_core.config import DEFAULT_API_PORT, ManagerSettings, SettingsStore, default_config_dir, expand_home_reference
 
 
 class SettingsTests(unittest.TestCase):
@@ -41,6 +41,7 @@ class SettingsTests(unittest.TestCase):
                     "execution_mode": "wsl",
                     "wsl_distribution": "Ubuntu",
                     "docker_poll_interval": 1,
+                    "api_port": 19876,
                     "show_technical_details": True,
                     "interface_icon": "local",
                     "onboarding_completed": True,
@@ -51,6 +52,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(settings, loaded)
             self.assertEqual(loaded.execution_mode, "wsl")
             self.assertEqual(loaded.docker_poll_interval, 3)
+            self.assertEqual(loaded.api_port, 19876)
             self.assertFalse(loaded.start_project_before_open)
             self.assertTrue(loaded.show_technical_details)
             self.assertEqual(loaded.interface_icon, "local")
@@ -83,6 +85,17 @@ class SettingsTests(unittest.TestCase):
     def test_invalid_mode_uses_native(self):
         settings = ManagerSettings.from_dict({"execution_mode": "dos"}, "/tmp/workspace")
         self.assertEqual(settings.execution_mode, "native")
+
+    def test_api_port_defaults_and_rejects_invalid_values(self):
+        self.assertEqual(ManagerSettings.from_dict({}, "/tmp/workspace").api_port, DEFAULT_API_PORT)
+        self.assertEqual(
+            ManagerSettings.from_dict({"api_port": 80}, "/tmp/workspace").api_port,
+            DEFAULT_API_PORT,
+        )
+        self.assertEqual(
+            ManagerSettings.from_dict({"api_port": "invalid"}, "/tmp/workspace").api_port,
+            DEFAULT_API_PORT,
+        )
 
     def test_wsl_unc_workspace_is_preserved_in_canonical_form(self):
         settings = ManagerSettings.from_dict(

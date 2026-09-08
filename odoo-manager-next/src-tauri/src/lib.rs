@@ -1,6 +1,6 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
@@ -10,6 +10,60 @@ use tauri::Manager;
 struct BackendProcess {
     child: Mutex<Option<Child>>,
     log_path: PathBuf,
+    port: u16,
+}
+
+const DEFAULT_BACKEND_PORT: u16 = 18765;
+
+fn manager_config_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("ODOO_MANAGER_CONFIG") {
+        return Some(PathBuf::from(path));
+    }
+    if let Some(directory) = std::env::var_os("ODOO_MANAGER_CONFIG_DIR") {
+        return Some(PathBuf::from(directory).join("config.json"));
+    }
+    if cfg!(windows) {
+        return std::env::var_os("APPDATA")
+            .map(|root| PathBuf::from(root).join("Odoo Manager").join("config.json"));
+    }
+    if cfg!(target_os = "macos") {
+        return std::env::var_os("HOME").map(|root| PathBuf::from(root).join("Library/Application Support/Odoo Manager/config.json"));
+    }
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|root| PathBuf::from(root).join(".config")))
+        .map(|root| root.join("odoo-manager/config.json"))
+}
+
+fn configured_backend_port() -> u16 {
+    let Some(path) = manager_config_path() else {
+        return DEFAULT_BACKEND_PORT;
+    };
+    let Ok(content) = fs::read_to_string(path) else {
+        return DEFAULT_BACKEND_PORT;
+    };
+    serde_json::from_str::<serde_json::Value>(&content)
+        .ok()
+        .and_then(|value| value.get("api_port")?.as_u64())
+        .and_then(|port| (1024..=65535).contains(&port).then_some(port as u16))
+        .unwrap_or(DEFAULT_BACKEND_PORT)
+}
+
+fn port_is_available(port: u16) -> bool {
+    TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
+fn select_backend_port(preferred: u16) -> std::io::Result<u16> {
+    if port_is_available(preferred) {
+        return Ok(preferred);
+    }
+    for port in DEFAULT_BACKEND_PORT..DEFAULT_BACKEND_PORT.saturating_add(100) {
+        if port_is_available(port) {
+            return Ok(port);
+        }
+    }
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    Ok(listener.local_addr()?.port())
 }
 
 impl Drop for BackendProcess {
@@ -62,7 +116,7 @@ fn backend_executable_path() -> Result<PathBuf, String> {
     Ok(directory.join(executable))
 }
 
-fn launch_backend(log_dir: &Path, log_path: &Path) -> Option<Child> {
+fn launch_backend(log_dir: &Path, log_path: &Path, port: u16) -> Option<Child> {
     let executable = match backend_executable_path() {
         Ok(executable) => executable,
         Err(error) => {
@@ -97,6 +151,7 @@ fn launch_backend(log_dir: &Path, log_path: &Path) -> Option<Child> {
     let mut command = Command::new(&executable);
     command
         .env("ODOO_MANAGER_LOG_DIR", log_dir)
+        .env("ODOO_GUI_PORT", port.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
@@ -137,8 +192,8 @@ fn read_backend_log(log_path: &Path) -> String {
     content[start..].to_string()
 }
 
-fn request_backend_shutdown() {
-    let address: SocketAddr = match "127.0.0.1:8765".parse() {
+fn request_backend_shutdown(port: u16) {
+    let address: SocketAddr = match format!("127.0.0.1:{port}").parse() {
         Ok(address) => address,
         Err(_) => return,
     };
@@ -147,16 +202,16 @@ fn request_backend_shutdown() {
     };
     let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
     let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
-    let request = b"POST /api/system/shutdown HTTP/1.1\r\nHost: 127.0.0.1:8765\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-    if stream.write_all(request).is_ok() {
+    let request = format!("POST /api/system/shutdown HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    if stream.write_all(request.as_bytes()).is_ok() {
         let mut response = [0_u8; 64];
         let _ = stream.read(&mut response);
         std::thread::sleep(Duration::from_millis(1200));
     }
 }
 
-fn backend_health_is_ready() -> bool {
-    let Ok(address) = "127.0.0.1:8765".parse::<SocketAddr>() else {
+fn backend_health_is_ready(port: u16) -> bool {
+    let Ok(address) = format!("127.0.0.1:{port}").parse::<SocketAddr>() else {
         return false;
     };
     let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(500)) else {
@@ -164,8 +219,8 @@ fn backend_health_is_ready() -> bool {
     };
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-    let request = b"GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:8765\r\nConnection: close\r\n\r\n";
-    if stream.write_all(request).is_err() {
+    let request = format!("GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+    if stream.write_all(request.as_bytes()).is_err() {
         return false;
     }
     let mut response = String::new();
@@ -189,13 +244,19 @@ fn terminate_child(child: &mut Child) {
 }
 
 fn stop_backend(app: &tauri::AppHandle) {
-    request_backend_shutdown();
     let state = app.state::<BackendProcess>();
+    request_backend_shutdown(state.port);
     if let Ok(mut process) = state.child.lock() {
         if let Some(mut child) = process.take() {
             terminate_child(&mut child);
         }
     };
+}
+
+#[tauri::command]
+fn backend_endpoint(app: tauri::AppHandle) -> String {
+    let state = app.state::<BackendProcess>();
+    format!("http://127.0.0.1:{}", state.port)
 }
 
 #[tauri::command]
@@ -285,18 +346,26 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
-        .invoke_handler(tauri::generate_handler![backend_diagnostics, open_external_url, open_docker_desktop])
+        .invoke_handler(tauri::generate_handler![backend_diagnostics, backend_endpoint, open_external_url, open_docker_desktop])
         .setup(|app| {
             let log_dir = app.path().app_log_dir()?;
             fs::create_dir_all(&log_dir)?;
             let log_path = log_dir.join("backend.log");
             let _ = prepare_backend_log(&log_path);
 
-            let child = launch_backend(&log_dir, &log_path);
+            let preferred_port = configured_backend_port();
+            let port = select_backend_port(preferred_port)?;
+            if port != preferred_port {
+                append_backend_log(
+                    &log_path,
+                    &format!("Port {preferred_port} déjà occupé; port local de repli sélectionné: {port}."),
+                );
+            }
+            let child = launch_backend(&log_dir, &log_path, port);
             let probe_log_path = log_path.clone();
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_secs(8));
-                let status = if backend_health_is_ready() {
+                let status = if backend_health_is_ready(port) {
                     "API /api/health opérationnelle après le lancement."
                 } else {
                     "API /api/health toujours indisponible 8 secondes après le lancement du sidecar."
@@ -306,6 +375,7 @@ pub fn run() {
             app.manage(BackendProcess {
                 child: Mutex::new(child),
                 log_path,
+                port,
             });
             Ok(())
         })
@@ -322,4 +392,20 @@ pub fn run() {
             stop_backend(app_handle);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn occupied_preferred_port_uses_an_available_fallback() {
+        let occupied = TcpListener::bind(("127.0.0.1", 0)).expect("reserve test port");
+        let preferred = occupied.local_addr().expect("read test port").port();
+
+        let selected = select_backend_port(preferred).expect("select fallback port");
+
+        assert_ne!(selected, preferred);
+        assert!(port_is_available(selected));
+    }
 }

@@ -20,7 +20,7 @@ projets peut etre change depuis `Parametres` sans deplacer le gestionnaire.
 ```
 
 Cette commande est le lanceur de previsualisation du design. Elle demarre
-l'API Python sur `127.0.0.1:8765`, lance Next.js, attend que les deux services
+l'API Python sur `127.0.0.1:18765`, lance Next.js, attend que les deux services
 soient disponibles puis ouvre automatiquement `http://127.0.0.1:3000/` dans
 le navigateur. `Ctrl+C` arrete les processus demarres par cette commande.
 
@@ -40,8 +40,21 @@ Pour lancer Next directement :
 
 ```sh
 cd odoo-manager-next
-ODOO_MANAGER_API=http://127.0.0.1:8765 npm run dev -- --hostname 127.0.0.1 --port 3000
+ODOO_MANAGER_API=http://127.0.0.1:18765 npm run dev -- --hostname 127.0.0.1 --port 3000
 ```
+
+Le port local de l'API peut etre modifie dans `Parametres`. L'application de
+bureau verifie sa disponibilite au demarrage et choisit automatiquement un
+port libre si le port prefere est deja utilise, notamment par Docker.
+
+Ports utilises ou contactes par le gestionnaire :
+
+- `18765` par defaut : API locale du gestionnaire, liee uniquement a `127.0.0.1` ;
+- `80` et `443` : acces aux projets via Traefik ;
+- `8069` : port interne des conteneurs Odoo ;
+- `5432` : port interne des conteneurs PostgreSQL ;
+- `10022` : connexion SSH sortante vers GitLab Sudokeys ;
+- `3000` : interface Next.js en mode developpement uniquement.
 
 ## Etat actuel
 

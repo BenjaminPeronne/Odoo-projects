@@ -9,6 +9,7 @@ from .platform import wsl_path_context
 
 CONFIG_VERSION = 1
 INTERFACE_ICONS = {"manager", "local"}
+DEFAULT_API_PORT = 18765
 
 
 def normalize_workspace_path(value):
@@ -59,6 +60,7 @@ class ManagerSettings:
     traefik_directory: str = ""
     terminal: str = "auto"
     docker_poll_interval: int = 10
+    api_port: int = DEFAULT_API_PORT
     start_project_before_open: bool = False
     show_technical_details: bool = False
     interface_icon: str = "manager"
@@ -76,6 +78,12 @@ class ManagerSettings:
         except (TypeError, ValueError):
             poll_interval = 10
         poll_interval = min(60, max(3, poll_interval))
+        try:
+            api_port = int(payload.get("api_port", DEFAULT_API_PORT))
+        except (TypeError, ValueError):
+            api_port = DEFAULT_API_PORT
+        if not 1024 <= api_port <= 65535:
+            api_port = DEFAULT_API_PORT
         interface_icon = str(payload.get("interface_icon", "manager")).strip().lower()
         if interface_icon not in INTERFACE_ICONS:
             interface_icon = "manager"
@@ -91,6 +99,7 @@ class ManagerSettings:
             traefik_directory=expand_home_reference(payload.get("traefik_directory", "")),
             terminal=str(payload.get("terminal", "auto")).strip() or "auto",
             docker_poll_interval=poll_interval,
+            api_port=api_port,
             start_project_before_open=bool(payload.get("start_project_before_open", False)),
             show_technical_details=bool(payload.get("show_technical_details", False)),
             interface_icon=interface_icon,
