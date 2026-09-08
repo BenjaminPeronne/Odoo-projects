@@ -193,6 +193,28 @@ type ModuleInfo = {
   removal_note?: string;
 };
 
+const SOCLE_PRESETS = [
+  { id: "sales", label: "Ventes", modules: ["sale_management"] },
+  { id: "crm", label: "CRM", modules: ["crm"] },
+  { id: "purchase", label: "Achats", modules: ["purchase"] },
+  { id: "inventory", label: "Inventaire", modules: ["stock"] },
+  { id: "accounting_fr", label: "Comptabilité française", modules: ["account_accountant", "l10n_fr"] },
+  { id: "manufacturing", label: "Fabrication", modules: ["mrp"] },
+  { id: "project", label: "Projet", modules: ["project"] },
+  { id: "timesheets", label: "Feuilles de temps", modules: ["hr_timesheet"] },
+  { id: "employees", label: "Employés", modules: ["hr"] },
+  { id: "time_off", label: "Congés", modules: ["hr_holidays"] },
+  { id: "expenses", label: "Notes de frais", modules: ["hr_expense"] },
+  { id: "helpdesk", label: "Assistance", modules: ["helpdesk"] },
+  { id: "field_service", label: "Services sur site", modules: ["industry_fsm"] },
+  { id: "planning", label: "Planification", modules: ["planning"] },
+  { id: "documents", label: "Documents", modules: ["documents"] },
+  { id: "sign", label: "Signature", modules: ["sign"] },
+  { id: "subscriptions", label: "Abonnements", modules: ["sale_subscription"] },
+  { id: "point_of_sale", label: "Point de Vente", modules: ["point_of_sale"] },
+  { id: "ecommerce", label: "eCommerce", modules: ["website_sale"] },
+] as const;
+
 type Toast = {
   id: number;
   kind: "success" | "error" | "info";
@@ -618,6 +640,8 @@ export default function Home() {
   const [moduleOriginFilter, setModuleOriginFilter] = useState("all");
   const [modulePage, setModulePage] = useState(1);
   const [selectedModules, setSelectedModules] = useState<Set<string>>(new Set());
+  const [socleDialogOpen, setSocleDialogOpen] = useState(false);
+  const [selectedSoclePresets, setSelectedSoclePresets] = useState<Set<string>>(new Set());
   const [jobs, setJobs] = useState<Job[]>([]);
   const [selectedJobId, setSelectedJobId] = useState<number | null>(null);
   const [externalLogView, setExternalLogView] = useState<{ title: string; content: string; project: string } | null>(null);
@@ -1200,6 +1224,39 @@ export default function Home() {
       return null;
     } finally {
       setLoading(false);
+    }
+  }
+
+  function toggleSoclePreset(presetId: string, checked: boolean) {
+    setSelectedSoclePresets((current) => {
+      const next = new Set(current);
+      if (checked) next.add(presetId);
+      else next.delete(presetId);
+      return next;
+    });
+  }
+
+  async function installSelectedSocle() {
+    if (!selectedProject || !selectedDb || !selectedSoclePresets.size) return;
+    const job = await createJob("install_socle", {
+      project: selectedProject.name,
+      db: selectedDb,
+      presets: Array.from(selectedSoclePresets).join(","),
+    });
+    if (job) {
+      setSocleDialogOpen(false);
+      setActiveTab("logs");
+      schedule(refreshModules, 2500);
+    }
+  }
+
+  async function repairEnterpriseLinks() {
+    if (!selectedProject) return;
+    const job = await createJob("repair_enterprise_links", { project: selectedProject.name });
+    if (job) {
+      setSocleDialogOpen(false);
+      setActiveTab("logs");
+      schedule(refreshModules, 1500);
     }
   }
 
@@ -2470,6 +2527,15 @@ export default function Home() {
                       <div className="grid w-full gap-2 sm:w-auto sm:grid-cols-2">
                         <Button
                           className="w-full"
+                          variant="outline"
+                          onClick={() => setSocleDialogOpen(true)}
+                          disabled={!selectedProjectReady || loading}
+                        >
+                          <Boxes className="h-4 w-4" />
+                          Installer un socle
+                        </Button>
+                        <Button
+                          className="w-full"
                           disabled={!selectedProjectReady || loading || checkingUpdatePrerequisites}
                           onClick={requestUpdateAllOdooModules}
                         >
@@ -3298,6 +3364,60 @@ export default function Home() {
                 <p>Fait avec amour par Aymerick Benjamin LAURETTA-PERONNE</p>
               </div>
             </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={socleDialogOpen} onOpenChange={setSocleDialogOpen}>
+        <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Installer un socle Odoo</DialogTitle>
+            <DialogDescription>
+              Sélectionne les applications à installer dans {selectedDb || "la base choisie"}. Le manager vérifie et crée d’abord les liens symboliques Enterprise manquants.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3 sm:grid-cols-2">
+            {SOCLE_PRESETS.map((preset) => {
+              const missing = preset.modules.filter((moduleName) => !moduleByName.has(moduleName));
+              const unavailable = missing.length > 0;
+              return (
+                <label
+                  key={preset.id}
+                  className={cn(
+                    "flex items-start gap-3 rounded-md border p-3 text-sm",
+                    unavailable ? "cursor-not-allowed opacity-55" : "cursor-pointer hover:bg-muted/45",
+                  )}
+                >
+                  <Checkbox
+                    className="mt-0.5"
+                    checked={selectedSoclePresets.has(preset.id)}
+                    disabled={unavailable || loading}
+                    onCheckedChange={(checked) => toggleSoclePreset(preset.id, checked === true)}
+                  />
+                  <span className="min-w-0">
+                    <span className="block font-medium">{preset.label}</span>
+                    <span className="mt-1 block break-all text-xs text-muted-foreground">{preset.modules.join(" + ")}</span>
+                    {unavailable && <span className="mt-1 block text-xs text-destructive">Absent : {missing.join(", ")}</span>}
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+          <div className="rounded-md border bg-muted/35 p-3 text-sm">
+            <div className="font-medium">Comptabilité</div>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Le socle comptable installe uniquement Comptabilité et la localisation française (`account_accountant` + `l10n_fr`).
+            </p>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <Button variant="outline" disabled={!selectedProject || loading} onClick={repairEnterpriseLinks}>
+              <RefreshCcw className="h-4 w-4" />
+              Vérifier / créer les liens uniquement
+            </Button>
+            <Button disabled={!selectedDb || !selectedSoclePresets.size || loading} onClick={installSelectedSocle}>
+              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Boxes className="h-4 w-4" />}
+              Installer la sélection
+            </Button>
           </div>
         </DialogContent>
       </Dialog>

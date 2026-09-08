@@ -94,6 +94,28 @@ MAX_ZIP_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
 MAX_DATABASE_BACKUP_BYTES = int(os.environ.get("ODOO_MANAGER_MAX_BACKUP_BYTES", 100 * 1024 * 1024 * 1024))
 MAX_DATABASE_BACKUP_ENTRIES = 2_000_000
 
+SOCLE_PRESETS = {
+    "sales": ("Ventes", ("sale_management",)),
+    "crm": ("CRM", ("crm",)),
+    "purchase": ("Achats", ("purchase",)),
+    "inventory": ("Inventaire", ("stock",)),
+    "accounting_fr": ("Comptabilité française", ("account_accountant", "l10n_fr")),
+    "manufacturing": ("Fabrication", ("mrp",)),
+    "project": ("Projet", ("project",)),
+    "timesheets": ("Feuilles de temps", ("hr_timesheet",)),
+    "employees": ("Employés", ("hr",)),
+    "time_off": ("Congés", ("hr_holidays",)),
+    "expenses": ("Notes de frais", ("hr_expense",)),
+    "helpdesk": ("Assistance", ("helpdesk",)),
+    "field_service": ("Services sur site", ("industry_fsm",)),
+    "planning": ("Planification", ("planning",)),
+    "documents": ("Documents", ("documents",)),
+    "sign": ("Signature", ("sign",)),
+    "subscriptions": ("Abonnements", ("sale_subscription",)),
+    "point_of_sale": ("Point de Vente", ("point_of_sale",)),
+    "ecommerce": ("eCommerce", ("website_sale",)),
+}
+
 JOBS = {}
 JOBS_LOCK = threading.Lock()
 NEXT_JOB_ID = 1
@@ -805,6 +827,16 @@ def validate_modules(modules):
     if not modules or not SAFE_MODULE_RE.match(modules):
         raise ValueError("Nom de module invalide.")
     return modules
+
+
+def validate_socle_presets(value):
+    requested = list(dict.fromkeys(item.strip() for item in str(value or "").split(",") if item.strip()))
+    if not requested:
+        raise ValueError("Sélectionne au moins une application du socle.")
+    unknown = sorted(set(requested) - set(SOCLE_PRESETS))
+    if unknown:
+        raise ValueError("Applications de socle inconnues : " + ", ".join(unknown))
+    return requested
 
 
 def module_name_list(modules):
@@ -2620,6 +2652,99 @@ def normalize_module_layout_for_action(job, project, module_names):
             ensure_relative_module_link(job, project, module_name, storage_path, replace_existing=True)
 
 
+def enterprise_addons_roots(project):
+    storage = project_addons_storage_parent(project)
+    return tuple(path for path in (storage / "odoo_entreprise", storage / "odoo_enterprise") if path.is_dir())
+
+
+def ensure_enterprise_module_links(job, project):
+    project = validate_project(project)
+    roots = enterprise_addons_roots(project)
+    if not roots:
+        raise RuntimeError(
+            "Aucun dossier Odoo Enterprise trouvé dans addons-store/odoo_entreprise ou addons-store/odoo_enterprise."
+        )
+
+    creator = ProjectCreator(SETTINGS, WORKSPACE, project_service())
+    candidates = {}
+    for root in roots:
+        for module_path in creator.module_directories(root):
+            previous = candidates.get(module_path.name)
+            if previous is not None and previous.resolve() != module_path.resolve():
+                raise RuntimeError(
+                    f"Module Enterprise dupliqué dans plusieurs dossiers : {module_path.name} ({previous} et {module_path})."
+                )
+            candidates[module_path.name] = module_path
+    if not candidates:
+        raise RuntimeError("Le dossier Odoo Enterprise ne contient aucun module reconnaissable.")
+
+    link_parent = project_addons_link_parent(project)
+    conflicts = []
+    missing_before = 0
+    for name, source in candidates.items():
+        link = link_parent / name
+        if not creator.path_entry_exists(link):
+            missing_before += 1
+            continue
+        try:
+            correct = link.is_symlink() and link.resolve(strict=False) == source.resolve(strict=False)
+        except OSError:
+            correct = False
+        if not correct:
+            conflicts.append(name)
+    if conflicts:
+        raise RuntimeError(
+            "Liens Enterprise non modifiés car des modules existent déjà avec une autre source dans odoo/addons : "
+            + ", ".join(sorted(conflicts))
+        )
+
+    for root in roots:
+        creator.link_modules(root, link_parent, log=job.add, replace=False)
+
+    missing_after = [name for name in candidates if not creator.path_entry_exists(link_parent / name)]
+    if missing_after:
+        raise RuntimeError("Création des liens Enterprise incomplète : " + ", ".join(sorted(missing_after)))
+    clear_project_module_cache(project)
+    job.add(
+        f"Liens Enterprise vérifiés : {len(candidates)} module(s), {missing_before} lien(s) créé(s), aucun conflit."
+    )
+    return set(candidates)
+
+
+def repair_enterprise_links_job(job, project):
+    ensure_enterprise_module_links(job, project)
+    job.add("Vérification des liens symboliques Enterprise terminée.")
+
+
+def install_socle_job(job, project, db_name, presets):
+    project = validate_project(project)
+    db_name = validate_odoo_db(db_name)
+    preset_ids = validate_socle_presets(presets)
+    requested_modules = list(dict.fromkeys(
+        module_name
+        for preset_id in preset_ids
+        for module_name in SOCLE_PRESETS[preset_id][1]
+    ))
+
+    job.add("Vérification et création des liens symboliques Odoo Enterprise...")
+    ensure_enterprise_module_links(job, project)
+    available = {path.name for path in module_dirs(project)}
+    missing = [name for name in requested_modules if name not in available]
+    if missing:
+        raise RuntimeError("Modules requis absents du projet : " + ", ".join(missing))
+
+    states = installed_modules(project, db_name)
+    pending = [name for name in requested_modules if states.get(name, {}).get("state") != "installed"]
+    already_installed = [name for name in requested_modules if name not in pending]
+    if already_installed:
+        job.add("Modules déjà installés : " + ", ".join(already_installed))
+    if not pending:
+        job.add("Le socle sélectionné est déjà entièrement installé.")
+        return
+    job.add("Installation du socle: " + ", ".join(pending))
+    module_command_job(job, "--install-module", project, db_name, ",".join(pending))
+
+
 def module_command_job(job, flag, project, db_name, modules):
     project = validate_project(project)
     db_name = validate_odoo_db(db_name)
@@ -3765,6 +3890,19 @@ class Handler(BaseHTTPRequestHandler):
                     flag = "--update-module"
                     label = "Mettre à jour"
                 job = Job(f"{label} {modules} sur {db_name}", module_command_job, (flag, project, db_name, modules), project=project)
+            elif action == "install_socle":
+                project = validate_project(payload.get("project", ""))
+                db_name = validate_odoo_db(payload.get("db", ""))
+                presets = ",".join(validate_socle_presets(payload.get("presets", "")))
+                job = Job(f"Installer le socle sur {db_name}", install_socle_job, (project, db_name, presets), project=project)
+            elif action == "repair_enterprise_links":
+                project = validate_project(payload.get("project", ""))
+                job = Job(
+                    f"Vérifier les liens Enterprise de {project}",
+                    repair_enterprise_links_job,
+                    (project,),
+                    project=project,
+                )
             elif action == "link_modules":
                 project = validate_project(payload.get("project", ""))
                 source = payload.get("source", "")
