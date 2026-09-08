@@ -48,6 +48,10 @@ class RepositoryModulesTests(ModuleLayoutTests):
 
     def test_repository_credentials_are_temporary_and_absent_from_command(self):
         def authenticated_clone(command, **kwargs):
+            # On Windows, ProjectCreator probes WSL before building the clone command.
+            # Keep that probe separate from the Git command asserted below.
+            if not any(str(argument).startswith('credential.helper=store --file=') for argument in command):
+                return subprocess.CompletedProcess(command, 1)
             rendered_command = ' '.join(command)
             self.assertNotIn('secret-token', rendered_command)
             helper = next(argument for argument in command if argument.startswith('credential.helper=store --file='))
