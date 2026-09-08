@@ -129,6 +129,7 @@ class DatabaseRestoreTests(unittest.TestCase):
         self.assertIn(b'name="neutralize_database"\r\n\r\non', transmitted)
         self.assertIn(b'name="backup_file"; filename="backup.zip"', transmitted)
 
+    @patch("odoo_manager_web.project_odoo_version", return_value="15.0")
     @patch("odoo_manager_web.project_url", return_value="http://dev.demo.localhost/")
     @patch("odoo_manager_web.post_odoo_database_restore", return_value=(303, ""))
     @patch("odoo_manager_web.list_databases_for", side_effect=[[], ["demo_restore"]])
@@ -141,6 +142,7 @@ class DatabaseRestoreTests(unittest.TestCase):
         _list_databases,
         _post_restore,
         _project_url,
+        _project_version,
     ):
         job = Mock()
         with tempfile.TemporaryDirectory() as temporary:
@@ -158,6 +160,37 @@ class DatabaseRestoreTests(unittest.TestCase):
             self.assertFalse(path.exists())
 
         project_service.return_value.start_project.assert_called_once()
+        project_service.return_value.stop_odoo_server.assert_called_once_with("DEMO", log=job.add)
+        project_service.return_value.start_odoo_server.assert_called_once_with(
+            "DEMO",
+            log=job.add,
+            disable_cron=True,
+        )
+        self.assertFalse(_post_restore.call_args.args[-1])
+        project_service.return_value.run_odoo_neutralize_command.assert_called_once_with(
+            "DEMO",
+            "demo_restore",
+            log=job.add,
+        )
+
+    @patch("odoo_manager_web.list_databases_for", return_value=["postgres", "demo_restore"])
+    @patch("odoo_manager_web.project_service")
+    @patch("odoo_manager_web.validate_project", return_value="DEMO")
+    def test_existing_database_can_be_neutralized(
+        self,
+        _validate_project,
+        project_service,
+        _list_databases,
+    ):
+        job = Mock()
+
+        web.neutralize_database_job(job, "DEMO", "demo_restore")
+
+        project_service.return_value.run_odoo_neutralize_command.assert_called_once_with(
+            "DEMO",
+            "demo_restore",
+            log=job.add,
+        )
 
 
 class PostgreSqlConsoleTests(unittest.TestCase):
@@ -860,6 +893,42 @@ class DiagnosticModuleTests(unittest.TestCase):
         self.assertNotIn("delete", update_query.lower())
         remember_ignored.assert_called_once_with("DEMO", "demo", ["auto_backup", "auto_backup_sh"])
         self.assertIn("Aucune donnée métier", "\n".join(job.lines))
+
+
+class DatabaseNeutralizationTests(unittest.TestCase):
+    class LogJob:
+        def __init__(self):
+            self.lines = []
+
+        def add(self, line):
+            self.lines.append(line)
+
+    @patch("odoo_manager_web.list_databases_for", return_value=["postgres", "demo"])
+    @patch("odoo_manager_web.project_service")
+    @patch("odoo_manager_web.validate_project", return_value="DEMO")
+    def test_neutralize_delegates_to_the_odoo_engine(
+        self,
+        _validate_project,
+        project_service,
+        _list_databases,
+    ):
+        job = self.LogJob()
+
+        web.neutralize_database_job(job, "DEMO", "demo")
+
+        project_service.return_value.run_odoo_neutralize_command.assert_called_once_with(
+            "DEMO",
+            "demo",
+            log=job.add,
+        )
+
+    @patch("odoo_manager_web.list_databases_for", return_value=["postgres"])
+    @patch("odoo_manager_web.validate_project", return_value="DEMO")
+    def test_neutralize_rejects_an_unknown_database(self, _validate_project, _list_databases):
+        job = self.LogJob()
+
+        with self.assertRaisesRegex(ValueError, "n'existe plus"):
+            web.neutralize_database_job(job, "DEMO", "demo")
 
 
 if __name__ == "__main__":

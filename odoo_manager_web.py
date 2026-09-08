@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import threading
+import tempfile
 import time
 import traceback
 import urllib.parse
@@ -1767,6 +1768,11 @@ class Job:
         self.args = args
         self.thread = None
         with JOBS_LOCK:
+            for active in JOBS.values():
+                if active.status == "running" and project and active.project == project:
+                    if (getattr(target, "__name__", "") == "repository_modules_job"
+                            or getattr(active.target, "__name__", "") == "repository_modules_job"):
+                        raise ValueError("Une action est déjà en cours sur ce projet. Attends sa fin avant l’import ou la mise à jour.")
             running_count = sum(job.status == "running" for job in JOBS.values())
             if running_count >= MAX_RUNNING_JOBS:
                 raise ValueError(
@@ -2072,6 +2078,14 @@ def update_all_projects_job(job):
         clear_project_module_cache(project)
 
 
+def neutralize_database_job(job, project, db_name):
+    project = validate_project(project)
+    db_name = validate_odoo_db(db_name)
+    if db_name not in list_databases_for(project):
+        raise ValueError("La base Odoo sélectionnée n'existe plus dans PostgreSQL.")
+    project_service().run_odoo_neutralize_command(project, db_name, log=job.add)
+
+
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -2221,6 +2235,8 @@ def restore_database_job(job, project, backup_path, filename, db_name, master_pw
     db_name = validate_new_db(db_name)
     master_pwd = validate_required_text(master_pwd, "Master password")
     backup_path = Path(backup_path)
+    service = project_service()
+    cron_safe_server_started = False
     try:
         details = validate_odoo_backup_archive(backup_path)
         size_mb = backup_path.stat().st_size / (1024 * 1024)
@@ -2230,12 +2246,23 @@ def restore_database_job(job, project, backup_path, filename, db_name, master_pw
         job.add("Base déclarée comme copie: " + ("oui" if copy else "non"))
         job.add("Neutralisation: " + ("activée" if neutralize else "désactivée"))
         job.add("Démarrage du projet avant restauration...")
-        project_service().start_project(project, log=job.add)
+        service.start_project(project, log=job.add)
 
         if db_name in set(list_databases_for(project)):
             raise RuntimeError(f"La base existe déjà: {db_name}")
 
+        if neutralize:
+            job.add("Passage temporaire d'Odoo en mode sans cron pendant la restauration...")
+            service.stop_odoo_server(project, log=job.add)
+            cron_safe_server_started = True
+            service.start_odoo_server(project, log=job.add, disable_cron=True)
+            service.wait_project_http(project, log=job.add)
+
         url = urllib.parse.urljoin(project_url(project), "web/database/restore")
+        version = project_odoo_version(project)
+        native_restore_neutralization = bool(neutralize and version != "15.0")
+        if neutralize and not native_restore_neutralization:
+            job.add("Odoo 15: neutralisation appliquée par la seconde passe après restauration.")
         job.add(f"Restauration via Odoo: {url}")
         status, content = post_odoo_database_restore(
             job,
@@ -2245,7 +2272,7 @@ def restore_database_job(job, project, backup_path, filename, db_name, master_pw
             db_name,
             master_pwd,
             bool(copy),
-            bool(neutralize),
+            native_restore_neutralization,
         )
         job.add(f"Réponse Odoo: HTTP {status}")
         restore_error = odoo_restore_error(content)
@@ -2257,6 +2284,12 @@ def restore_database_job(job, project, backup_path, filename, db_name, master_pw
         for waited in range(0, 122, 2):
             if db_name in set(list_databases_for(project)):
                 job.add(f"Base restaurée: {db_name}")
+                if neutralize:
+                    job.add("Seconde passe de neutralisation et contrôles de sécurité...")
+                    # Cette méthode arrête le serveur sans cron et redémarre le serveur normal,
+                    # y compris si la neutralisation échoue.
+                    cron_safe_server_started = False
+                    service.run_odoo_neutralize_command(project, db_name, log=job.add)
                 clear_project_module_cache(project)
                 return
             job.add(f"Attente apparition base... {waited}s/120s")
@@ -2264,6 +2297,14 @@ def restore_database_job(job, project, backup_path, filename, db_name, master_pw
         raise RuntimeError("Odoo a accepté la sauvegarde, mais la base n'apparaît pas dans PostgreSQL.")
     finally:
         try:
+            if cron_safe_server_started:
+                job.add("Rétablissement du serveur Odoo normal après interruption de la restauration...")
+                try:
+                    service.stop_odoo_server(project, log=job.add)
+                    service.start_odoo_server(project, log=job.add)
+                    service.wait_project_http(project, log=job.add)
+                except Exception as exc:
+                    job.add(f"Erreur pendant le rétablissement du serveur Odoo: {exc}")
             backup_path.unlink(missing_ok=True)
             job.add("Fichier temporaire de restauration supprimé.")
         finally:
@@ -2706,6 +2747,97 @@ def link_modules_job(job, project, source):
     if not source_path.exists() or not source_path.is_dir():
         raise RuntimeError(f"Dossier introuvable: {source_path}")
     link_module_candidates(job, project, find_module_candidates(source_path))
+
+
+def validate_module_repository(url, branch, mode, modules):
+    url = str(url or "").strip()
+    parsed = urllib.parse.urlsplit(url)
+    if (parsed.scheme != "https" or not parsed.hostname or not parsed.path.strip("/")
+            or parsed.username is not None or parsed.password is not None
+            or parsed.query or parsed.fragment or any(c.isspace() or ord(c) < 32 for c in url)):
+        raise ValueError("Utilise l’URL HTTPS du dépôt, sans identifiants, paramètres ni fragment.")
+    branch = validate_git_ref(branch)
+    if mode not in {"add", "update"}:
+        raise ValueError("Mode d’import invalide.")
+    names = module_name_list(modules) if modules else []
+    if mode == "update" and not names:
+        raise ValueError("Indique les noms techniques des modules à remplacer.")
+    return url, branch, mode, names
+
+
+def repository_modules_job(job, project, url, branch, mode, names):
+    """Import an isolated HTTPS snapshot; roll back every changed module on failure."""
+    project = validate_project(project)
+    creator = ProjectCreator(SETTINGS, WORKSPACE, project_service())
+    staging = project_staging_imports_root(project)
+    staging.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="repository-", dir=staging) as temporary:
+        checkout = Path(temporary) / urllib.parse.urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+        job.add(f"Récupération du dépôt {url}, branche {branch}…")
+        command = creator.git(
+            "-c", "credential.interactive=false", "-c", "core.askPass=",
+            "-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
+            "-c", "http.followRedirects=false", "clone", "--depth", "1",
+            "--single-branch", "--branch", branch, "--", url, creator.command_path(checkout),
+        )
+        result = subprocess.run(command, cwd=creator.command_cwd, capture_output=True, text=True,
+                                timeout=300, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+                                **hidden_process_kwargs())
+        if result.returncode:
+            raise RuntimeError("Récupération Git impossible. Vérifie l’URL, la branche et les accès HTTPS configurés dans Git.")
+        # Reject symlinks before discovery/copy, including links outside the checkout.
+        if any(path.is_symlink() for path in checkout.rglob("*") if ".git" not in path.relative_to(checkout).parts):
+            raise ValueError("Ce dépôt contient des liens symboliques : import refusé.")
+        candidates = find_module_candidates(checkout)
+        by_name = {}
+        for candidate in candidates:
+            validate_modules(candidate.name)
+            if candidate.name in by_name:
+                raise ValueError(f"Nom de module ambigu dans le dépôt : {candidate.name}")
+            by_name[candidate.name] = candidate
+        if names:
+            missing = sorted(set(names) - by_name.keys())
+            if missing:
+                raise ValueError("Modules absents du dépôt : " + ", ".join(missing))
+            candidates = [by_name[name] for name in dict.fromkeys(names)]
+        if not candidates:
+            raise ValueError("Aucun module Odoo trouvé dans le dépôt.")
+        storage = project_addons_storage_parent(project)
+        links = project_addons_link_parent(project)
+        for candidate in candidates:
+            target, link = storage / candidate.name, links / candidate.name
+            exists = target.exists() or target.is_symlink() or link.exists() or link.is_symlink()
+            if mode == "add" and exists:
+                raise ValueError(f"Module déjà présent : {candidate.name}. Utilise la mise à jour.")
+            if mode == "update" and not (managed_module_copy_ready(project, candidate.name, target)
+                                          and managed_storage_link(project, candidate.name, target)):
+                raise ValueError(f"Mise à jour refusée : {candidate.name} doit être une copie gérée dans addons-store.")
+        job.add("Modules sélectionnés : " + ", ".join(c.name for c in candidates))
+        backups, created = [], []
+        try:
+            for candidate in candidates:
+                target, link = storage / candidate.name, links / candidate.name
+                if mode == "update":
+                    backups.append((target, backup_existing_module(job, project, target)))
+                created.append(target)
+                copy_module_to_storage(job, project, candidate)
+                if mode == "add":
+                    created.append(link)
+                ensure_relative_module_link(job, project, candidate.name, target)
+        except Exception:
+            for path in reversed(created):
+                if path.is_symlink():
+                    path.unlink()
+                elif path.exists():
+                    shutil.rmtree(path)
+            for target, backup in reversed(backups):
+                shutil.move(str(backup), str(target))
+            job.add("Import annulé ; les versions précédentes ont été restaurées.")
+            raise
+        finally:
+            clear_project_module_cache(project)
+        job.add(f"Code préparé : {len(candidates)} module(s), source {url}, branche {branch}.")
+        job.add("Installe ou mets à jour ces modules dans la base Odoo depuis l’interface.")
 
 
 def safe_import_name(filename):
@@ -3463,7 +3595,13 @@ class Handler(BaseHTTPRequestHandler):
             payload = self.read_json()
             action = payload.get("action")
 
-            if action == "start_project":
+            if action == "repository_modules":
+                project = validate_project(payload.get("project", ""))
+                url, branch, mode, names = validate_module_repository(
+                    payload.get("url"), payload.get("branch"), payload.get("mode"), payload.get("modules"))
+                job = Job(f"{'Ajouter' if mode == 'add' else 'Actualiser'} des modules depuis Git · {project}",
+                          repository_modules_job, (project, url, branch, mode, names), project=project)
+            elif action == "start_project":
                 project = validate_project(payload.get("project", ""))
                 job = Job(f"Démarrer {project}", start_project_job, (project,), project=project)
             elif action == "stop_project":
@@ -3576,6 +3714,15 @@ class Handler(BaseHTTPRequestHandler):
                 country = payload.get("country", "")
                 demo = bool(payload.get("demo", False))
                 job = Job(f"Créer base {db_name}", create_database_job, (project, db_name, master_pwd, login, password, lang, country, demo), project=project)
+            elif action == "neutralize_database":
+                project = validate_project(payload.get("project", ""))
+                db_name = validate_odoo_db(payload.get("db", ""))
+                job = Job(
+                    f"Neutraliser {db_name}",
+                    neutralize_database_job,
+                    (project, db_name),
+                    project=project,
+                )
             elif action == "delete_project":
                 project = validate_project(payload.get("project", ""))
                 job = Job(f"Supprimer {project}", delete_project_job, (project,), project=project)

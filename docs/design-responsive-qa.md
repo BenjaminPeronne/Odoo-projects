@@ -31,3 +31,12 @@ La règle `html body[data-scroll-locked]` prend désormais priorité. Elle est l
 Les listes longues, textes tronqués volontairement et zones de logs conservent leur défilement propre. Les écrans ont été inspectés visuellement sur mobile et bureau. La validation porte sur le navigateur intégré ; les WebViews des installateurs macOS, Windows et Linux n’ont pas été exécutées pour ce contrôle.
 
 Pour reproduire : lancer `./odoo_next_gui.sh --background`, choisir un projet déjà démarré, puis comparer la largeur et le bord droit de `main` à l’ouverture et à la fermeture des listes et fenêtres. Ne déclencher aucune opération métier pendant ce contrôle.
+
+## Complément du 8 septembre 2026 — actions du projet, application macOS
+
+- Grille stable de trois colonnes à partir de 640 px, largeur de 480 px sur grand écran ; « Ouvrir Odoo » occupe la seconde ligne sous 640 px.
+- Textes et icônes blancs sur les boutons pleins ; orange `#c2540d` (contraste blanc calculé : 4,60:1), rouge conservé pour les actions destructives.
+- Relief et effets de survol communs. La variante orange utilise une classe explicite ; les boutons Démarrer/Arrêter ont des clés distinctes pour renouveler leur rendu lors du changement d’état.
+- Contrôle visuel dans `/Applications/SDK Local Manager.app` : AKAAZ arrêté → DOMEAU allumé → AKAAZ arrêté. Largeurs et alignements stables, texte blanc et couleurs orange/rouge confirmés. Aucune action de démarrage ou d’arrêt des projets n’a été déclenchée.
+- Disposition également contrôlée dans une demi-fenêtre native. Le format inférieur à 640 px n’a pas été validé visuellement lors de ce complément.
+- Build Next.js/TypeScript, compilation Tauri et vérification de signature locale réussis. Application installée ; version d’origine conservée dans `dist/backup-design-20260907-231914/SDK Local Manager.app`.

@@ -107,6 +107,17 @@ affiche la progression du televersement et conserve les logs dans l'historique.
 La base est consideree comme une copie et peut etre neutralisee pour eviter les
 envois d'e-mails et autres actions externes pendant les tests locaux.
 
+Si la neutralisation est activee, le gestionnaire relance ensuite le moteur de
+neutralisation Odoo et verifie le resultat dans PostgreSQL. Pendant la
+restauration, Odoo est temporairement demarre avec ses workers cron coupes. Le bouton
+`Neutraliser et contrôler` permet aussi de repasser cette operation sur une base
+existante. Tous les crons metier (dont le controle d'abonnement) sont coupes,
+ainsi que les serveurs entrants et les serveurs sortants exploitables. Seul le
+cron technique d'autovacuum peut rester actif.
+
+Apres une installation ou une mise a jour de module, une base deja neutralisee
+est neutralisee de nouveau avant le redemarrage normal d'Odoo.
+
 L'onglet `Bases` separe les bases Odoo de leur serveur PostgreSQL. La base
 technique `postgres` n'est jamais proposee pour les actions Odoo. Le bouton
 `Ouvrir psql` lance, uniquement a la demande, une console connectee a la base

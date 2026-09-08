@@ -97,6 +97,21 @@ declaree comme une copie et la neutralisation est activee par defaut pour les
 tests locaux. Le fichier temporaire est supprime a la fin du job, y compris en
 cas d'erreur.
 
+Quand la neutralisation est demandee, le gestionnaire effectue ensuite une
+seconde passe avec le moteur de neutralisation des modules installes. Il arrete
+brievement le serveur Odoo et restaure avec les workers cron coupes pour eviter
+la fenetre d'execution qui existe sur certaines revisions Odoo, puis
+controle que la base est marquee comme neutralisee, que tous les crons metier
+sont inactifs et qu'aucun serveur de messagerie entrant ou sortant exploitable
+ne reste actif. Cette passe est aussi disponible sur une base existante avec le
+bouton `Neutraliser et contrôler`. Odoo 16 a 19 utilisent le moteur natif ; Odoo
+15 applique un repli limite aux crons et aux serveurs de messagerie.
+
+Une base deja marquee comme neutralisee est automatiquement neutralisee de
+nouveau, avant le redemarrage du serveur, apres chaque installation ou mise a
+jour de module. Cela evite qu'un addon nouvellement charge reactive un cron ou
+une integration externe.
+
 ### Modules absents sur une copie locale
 
 Avant une mise a jour complete, le gestionnaire detecte tous les modules en
@@ -242,3 +257,14 @@ depot ; ils devront etre injectes via les secrets GitHub Actions.
 Le produit se nomme **SDK Local Manager**. L’interface utilise la charte Glow : noir, orange `#F4791F`, surfaces chaudes et halos discrets. Le thème sombre est proposé par défaut ; les préférences existantes sont conservées. Manrope et JetBrains Mono sont embarquées dans `odoo-manager-next/public/fonts`, avec leurs licences OFL, pour fonctionner hors ligne.
 
 Le logo final fourni est conservé dans `app/icon.png` et décliné par Tauri pour les icônes natives. Les identifiants techniques, clés de préférences et noms du sidecar restent stables pour préserver la compatibilité. Les nouveaux installateurs porteront le nom SDK Local Manager lors de leur prochaine compilation.
+
+
+### Addons depuis un dépôt HTTPS
+
+Dans **Modules → Dépôt HTTPS · Ajout / MAJ**, renseigner l’URL Git HTTPS et une branche ou un tag compatible avec la version Odoo.
+
+- **Ajouter** : noms techniques séparés par des virgules, ou champ vide pour tous les modules. Un doublon bloque toute l’opération avant modification.
+- **Mettre à jour le code existant** : noms obligatoires ; remplace uniquement les copies gérées dans `odoo/addons-store` avec leur lien relatif dans `odoo/addons`. Les autres dépôts et dossiers sont protégés.
+- Le dépôt est récupéré dans un dossier temporaire (délai maximal : cinq minutes). Les liens symboliques et noms de modules ambigus sont refusés. Les dépôts privés utilisent les accès Git HTTPS déjà configurés, sans jeton dans l’URL ni demande interactive.
+- Les versions remplacées sont conservées dans `.odoo_manager_backups/modules/<projet>`. Si la copie échoue, les changements de cet import sont annulés. Une autre action sur le même projet bloque le lancement de l’import.
+- Cette opération prépare le **code uniquement** : lancer ensuite l’installation ou la mise à jour des modules dans la base depuis l’interface. La source externe n’est jamais modifiée. Pour actualiser à nouveau, réutiliser l’URL, la branche et les noms souhaités.

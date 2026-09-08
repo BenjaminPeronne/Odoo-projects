@@ -713,12 +713,14 @@ class ProjectService:
             "Le navigateur n'a pas été ouvert afin d'éviter une page Bad Gateway."
         )
 
-    def start_odoo_server(self, project, log=None):
+    def start_odoo_server(self, project, log=None, disable_cron=False):
         container = f"odoo-{project}"
         if self.odoo_server_running(container):
             self.log(log, f"Serveur Odoo déjà démarré dans {container}")
         else:
-            self.log(log, f"Démarrage du serveur Odoo dans {container}...")
+            mode = " sans workers cron" if disable_cron else ""
+            self.log(log, f"Démarrage du serveur Odoo{mode} dans {container}...")
+            cron_option = " --max-cron-threads=0" if disable_cron else ""
             launch_command = (
                 f"rm -f {ODOO_STARTUP_STATUS}; "
                 f": > {ODOO_STARTUP_LOG}; "
@@ -726,10 +728,10 @@ class ProjectService:
                 "[ -f /home/odoo/srv/server/odoo/odoo-bin ]; then "
                 "/home/_venv/bin/python /home/odoo/srv/server/odoo/odoo-bin "
                 "-c /home/odoo/srv/conf/odoo.conf "
-                "--logfile=/home/odoo/srv/data/odoo.log; "
+                f"--logfile=/home/odoo/srv/data/odoo.log{cron_option}; "
                 "else "
                 "odoo -c /home/odoo/srv/conf/odoo.conf "
-                "--logfile=/home/odoo/srv/data/odoo.log; "
+                f"--logfile=/home/odoo/srv/data/odoo.log{cron_option}; "
                 "fi "
                 f">> {ODOO_STARTUP_LOG} 2>&1; "
                 "code=$?; "
@@ -827,6 +829,7 @@ class ProjectService:
         self.log(log, f"Base: {db_name}")
         self.log(log, f"Module(s): {modules}")
         self.log(log, f"Équivalent: odoo -d {db_name} {option} {modules} --stop-after-init")
+        was_neutralized = self.database_is_neutralized(project, db_name)
 
         self.stop_odoo_server(project, log=log)
         command = self.docker(
@@ -849,6 +852,9 @@ class ProjectService:
             if code != 0:
                 self.odoo_startup_diagnostics(container, log=log)
                 raise RuntimeError(f"La commande Odoo a échoué avec le code {code}.")
+            if was_neutralized:
+                self.log(log, "La base était neutralisée: nouvelle passe après l'opération module...")
+                self._execute_database_neutralization(project, db_name, log=log)
         finally:
             self.log(log, "Redémarrage du serveur Odoo...")
             self.start_odoo_server(project, log=log)
@@ -925,6 +931,184 @@ print("Désinstallation terminée.")
             self.start_odoo_server(project, log=log)
         self.wait_project_http(project, log=log)
         self.log(log, "Désinstallation terminée.")
+        self.log(log, f"URL Odoo: {self.project_url(project)}")
+
+    def _database_scalar(self, project, db_name, query, timeout=20):
+        code, output = self.capture(
+            self.docker(
+                "exec",
+                f"postgresql-{project}",
+                "psql",
+                "-X",
+                "-v",
+                "ON_ERROR_STOP=1",
+                "-U",
+                "postgres",
+                "-d",
+                db_name,
+                "-Atc",
+                query,
+            ),
+            timeout=timeout,
+        )
+        if code != 0:
+            raise RuntimeError(output or "Le contrôle PostgreSQL de la neutralisation a échoué.")
+        return output.strip()
+
+    def database_is_neutralized(self, project, db_name):
+        value = self._database_scalar(
+            project,
+            db_name,
+            "SELECT COALESCE((SELECT value FROM ir_config_parameter WHERE key = 'database.is_neutralized' LIMIT 1), '');",
+        )
+        return value.lower() in {"1", "true", "t", "yes"}
+
+    def verify_database_neutralization(self, project, db_name, log=None):
+        core_status = self._database_scalar(
+            project,
+            db_name,
+            """
+SELECT COALESCE((SELECT value FROM ir_config_parameter WHERE key = 'database.is_neutralized' LIMIT 1), ''),
+       (SELECT count(*) FROM ir_cron
+         WHERE active
+           AND id NOT IN (
+               SELECT res_id FROM ir_model_data
+                WHERE model = 'ir.cron' AND module = 'base' AND name = 'autovacuum_job'
+           )),
+       (SELECT count(*) FROM ir_mail_server
+         WHERE active AND COALESCE(smtp_host, '') <> 'invalid');
+""".strip(),
+        )
+        parts = core_status.split("|")
+        if len(parts) != 3:
+            raise RuntimeError("Réponse PostgreSQL illisible pendant le contrôle de neutralisation.")
+        flag, active_crons, usable_outgoing_servers = parts
+        if flag.lower() not in {"1", "true", "t", "yes"}:
+            raise RuntimeError("Odoo n'a pas marqué la base comme neutralisée.")
+        if active_crons != "0":
+            raise RuntimeError(f"{active_crons} cron(s) métier sont encore actifs.")
+        if usable_outgoing_servers != "0":
+            raise RuntimeError(f"{usable_outgoing_servers} serveur(s) sortant(s) exploitable(s) sont encore actifs.")
+
+        fetchmail_table = self._database_scalar(
+            project,
+            db_name,
+            "SELECT CASE WHEN to_regclass('public.fetchmail_server') IS NULL THEN 'absent' ELSE 'present' END;",
+        )
+        active_incoming_servers = "0"
+        if fetchmail_table == "present":
+            active_incoming_servers = self._database_scalar(
+                project,
+                db_name,
+                "SELECT count(*) FROM fetchmail_server WHERE active;",
+            )
+            if active_incoming_servers != "0":
+                raise RuntimeError(f"{active_incoming_servers} serveur(s) entrant(s) sont encore actifs.")
+
+        self.log(log, "Contrôles de neutralisation validés:")
+        self.log(log, "- base marquée comme neutralisée")
+        self.log(log, "- 0 cron métier actif (seul l'autovacuum Odoo peut rester actif)")
+        self.log(log, "- 0 serveur de messagerie sortant exploitable")
+        self.log(log, f"- {active_incoming_servers} serveur de messagerie entrant actif")
+
+    @staticmethod
+    def _neutralization_shell_command():
+        neutralize_script = '''try:
+    from odoo.modules.neutralize import neutralize_database
+except ImportError:
+    # Odoo 15 ne fournit pas encore le moteur modulaire de neutralisation.
+    autovacuum = env.ref("base.autovacuum_job", raise_if_not_found=False)
+    crons = env["ir.cron"].search([])
+    if autovacuum:
+        crons -= autovacuum
+    crons.write({"active": False})
+
+    outgoing = env["ir.mail_server"].search([])
+    outgoing.write({"active": False})
+    dummy = env["ir.mail_server"].search([
+        ("name", "=", "neutralization - disable emails"),
+    ], limit=1)
+    values = {
+        "name": "neutralization - disable emails",
+        "smtp_host": "invalid",
+        "smtp_port": 1025,
+        "smtp_encryption": "none",
+        "smtp_authentication": "login",
+        "active": True,
+    }
+    if dummy:
+        dummy.write(values)
+    else:
+        env["ir.mail_server"].create(values)
+
+    if "fetchmail.server" in env.registry:
+        env["fetchmail.server"].search([]).write({"active": False})
+    env["ir.config_parameter"].sudo().set_param("database.is_neutralized", "true")
+else:
+    neutralize_database(env.cr)
+
+# Le SQL natif insère un SMTP factice à chaque passe. N'en conserver qu'un
+# rend l'action réellement idempotente sans supprimer de serveur métier.
+dummies = env["ir.mail_server"].search([
+    ("name", "=", "neutralization - disable emails"),
+    ("smtp_host", "=", "invalid"),
+], order="id desc")
+if len(dummies) > 1:
+    dummies[1:].unlink()
+
+env.cr.commit()
+print("ODOO_MANAGER_NEUTRALIZATION_DONE")
+'''
+        return (
+            "odoo shell -c /home/odoo/srv/conf/odoo.conf "
+            "-d \"$ODOO_DB_NAME\" --no-http <<'ODOO_MANAGER_PY'\n"
+            f"{neutralize_script}ODOO_MANAGER_PY"
+        )
+
+    def _execute_database_neutralization(self, project, db_name, log=None):
+        container = f"odoo-{project}"
+        command = self.docker(
+            "exec",
+            "-e",
+            "LOG_ATTACHMENTS=False",
+            "-e",
+            f"ODOO_DB_NAME={db_name}",
+            container,
+            "sh",
+            "-lc",
+            self._neutralization_shell_command(),
+        )
+        code = self.stream(command, log=log)
+        if code != 0:
+            self.odoo_startup_diagnostics(container, log=log)
+            raise RuntimeError(
+                "La neutralisation Odoo a échoué. La base ne doit pas être considérée comme neutralisée."
+            )
+        self.verify_database_neutralization(project, db_name, log=log)
+
+    def run_odoo_neutralize_command(self, project, db_name, log=None):
+        container = f"odoo-{project}"
+        postgres = f"postgresql-{project}"
+        if not self.is_running(container) or not self.is_running(postgres):
+            raise RuntimeError(
+                "Les conteneurs Odoo et PostgreSQL doivent être démarrés pour neutraliser la base."
+            )
+        self.wait_for_odoo_container_initialization(container, log=log)
+
+        self.log(log, "")
+        self.log(log, "Neutralisation de la base Odoo")
+        self.log(log, f"Projet: {project}")
+        self.log(log, f"Base: {db_name}")
+        self.log(log, "Arrêt préalable du serveur pour empêcher l'exécution concurrente d'un cron.")
+
+        self.stop_odoo_server(project, log=log)
+        try:
+            self._execute_database_neutralization(project, db_name, log=log)
+        finally:
+            self.log(log, "Redémarrage du serveur Odoo...")
+            self.start_odoo_server(project, log=log)
+        self.wait_project_http(project, log=log)
+        self.log(log, "Neutralisation terminée et contrôlée.")
         self.log(log, f"URL Odoo: {self.project_url(project)}")
 
     def start_project(self, project, log=None):

@@ -28,6 +28,7 @@ class FakeRunner:
         self.missing_networks = set()
         self.missing_network_outputs = {}
         self.networks_missing_after_stream = set()
+        self.database_query_outputs = {}
 
     def stream(self, command, cwd=None, log=None):
         self.streams.append((list(command), Path(cwd) if cwd else None))
@@ -41,6 +42,11 @@ class FakeRunner:
     def capture(self, command, cwd=None, timeout=10):
         self.captures.append((list(command), Path(cwd) if cwd else None, timeout))
         command = list(command)
+        if "psql" in command and "-Atc" in command:
+            query = command[command.index("-Atc") + 1]
+            for fragment, result in self.database_query_outputs.items():
+                if fragment in query:
+                    return 0, result
         if command[-3:] == ["compose", "ps", "-aq"]:
             output = "\n".join(self.compose_container_ids)
             return (0, output) if output else (0, "")
@@ -259,6 +265,19 @@ class ProjectServiceTests(unittest.TestCase):
         self.assertIn("/home/_venv/bin/python /home/odoo/srv/server/odoo/odoo-bin", launch[-1])
         self.assertIn("--logfile=/home/odoo/srv/data/odoo.log", launch[-1])
 
+    def test_odoo_launch_can_disable_cron_workers_during_safe_restore(self):
+        self.runner.odoo_server_running = False
+        self.runner.odoo_port_ready = True
+
+        self.service.start_odoo_server("DEMO", log=lambda _line: None, disable_cron=True)
+
+        launch = next(
+            command
+            for command, _cwd in self.runner.streams
+            if command[1:3] == ["exec", "-e"] and "LOG_ATTACHMENTS=False" in command
+        )
+        self.assertEqual(launch[-1].count("--max-cron-threads=0"), 2)
+
     def test_module_update_runs_explicit_odoo_command_and_restarts_server(self):
         self.runner.statuses = {
             "odoo-DEMO": "running",
@@ -295,6 +314,40 @@ class ProjectServiceTests(unittest.TestCase):
         self.assertTrue(any("Équivalent: odoo -d PROTEX_20812 -u sale_custom --stop-after-init" in line for line in logs))
         self.assertTrue(any("Redémarrage du serveur Odoo" in line for line in logs))
 
+    def test_module_update_reneutralizes_an_already_neutralized_database_before_restart(self):
+        self.runner.statuses = {
+            "odoo-DEMO": "running",
+            "postgresql-DEMO": "running",
+        }
+        self.runner.odoo_server_running = False
+        self.runner.odoo_port_ready = True
+        self.runner.database_query_outputs = {
+            "(SELECT count(*) FROM ir_cron": "true|0|0",
+            "database.is_neutralized": "true",
+            "to_regclass('public.fetchmail_server')": "absent",
+        }
+        logs = []
+
+        self.service.run_odoo_module_command(
+            "DEMO",
+            "PROTEX_20812",
+            "sale_custom",
+            option="-u",
+            log=logs.append,
+        )
+
+        commands = [command for command, _cwd in self.runner.streams]
+        update_index = next(index for index, command in enumerate(commands) if "--stop-after-init" in command)
+        neutralize_index = next(
+            index for index, command in enumerate(commands) if "ODOO_MANAGER_NEUTRALIZATION_DONE" in command[-1]
+        )
+        restart_index = next(
+            index for index, command in enumerate(commands) if ODOO_STARTUP_LOG in command[-1]
+        )
+        self.assertLess(update_index, neutralize_index)
+        self.assertLess(neutralize_index, restart_index)
+        self.assertTrue(any("nouvelle passe après l'opération module" in line for line in logs))
+
     def test_module_uninstall_runs_odoo_shell_and_restarts_server(self):
         self.runner.statuses = {
             "odoo-DEMO": "running",
@@ -318,6 +371,60 @@ class ProjectServiceTests(unittest.TestCase):
         self.assertIn('odoo shell -c /home/odoo/srv/conf/odoo.conf -d "$ODOO_DB_NAME" --no-http', uninstall[-1])
         self.assertIn("installed.button_immediate_uninstall()", uninstall[-1])
         self.assertTrue(any("Redémarrage du serveur Odoo" in line for line in logs))
+
+    def test_neutralization_uses_odoo_engine_verifies_guards_and_restarts_server(self):
+        self.runner.statuses = {
+            "odoo-DEMO": "running",
+            "postgresql-DEMO": "running",
+        }
+        self.runner.odoo_server_running = False
+        self.runner.odoo_port_ready = True
+        self.runner.database_query_outputs = {
+            "database.is_neutralized": "true|0|0",
+            "to_regclass('public.fetchmail_server')": "present",
+            "FROM fetchmail_server": "0",
+        }
+        logs = []
+
+        self.service.run_odoo_neutralize_command(
+            "DEMO",
+            "PROTEX_20812",
+            log=logs.append,
+        )
+
+        commands = [command for command, _cwd in self.runner.streams]
+        neutralize = next(command for command in commands if "ODOO_MANAGER_NEUTRALIZATION_DONE" in command[-1])
+        self.assertIn("ODOO_DB_NAME=PROTEX_20812", neutralize)
+        self.assertIn("from odoo.modules.neutralize import neutralize_database", neutralize[-1])
+        self.assertIn('env["ir.cron"].search([])', neutralize[-1])
+        self.assertIn("dummies[1:].unlink()", neutralize[-1])
+        self.assertTrue(any("0 cron métier actif" in line for line in logs))
+        self.assertTrue(any("Neutralisation terminée et contrôlée." in line for line in logs))
+        self.assertTrue(any("Redémarrage du serveur Odoo" in line for line in logs))
+
+    def test_failed_neutralization_check_still_restarts_odoo(self):
+        self.runner.statuses = {
+            "odoo-DEMO": "running",
+            "postgresql-DEMO": "running",
+        }
+        self.runner.odoo_server_running = False
+        self.runner.odoo_port_ready = True
+        self.runner.database_query_outputs = {
+            "database.is_neutralized": "true|1|0",
+        }
+        logs = []
+
+        with self.assertRaisesRegex(RuntimeError, "cron"):
+            self.service.run_odoo_neutralize_command(
+                "DEMO",
+                "PROTEX_20812",
+                log=logs.append,
+            )
+
+        self.assertTrue(any("Redémarrage du serveur Odoo" in line for line in logs))
+        self.assertTrue(
+            any(ODOO_STARTUP_LOG in command[-1] for command, _cwd in self.runner.streams)
+        )
 
     @patch("odoo_manager_core.platform.wsl_execution_path", return_value="/home/demo/Odoo-projects")
     @patch("odoo_manager_core.project_service.platform.system", return_value="Windows")

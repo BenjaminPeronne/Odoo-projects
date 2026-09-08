@@ -1,0 +1,77 @@
+import subprocess
+from pathlib import Path
+from unittest import mock
+
+from test_module_layout import ModuleLayoutTests, DummyJob
+import odoo_manager_web as web
+
+
+class RepositoryModulesTests(ModuleLayoutTests):
+    def clone(self, command, **kwargs):
+        root = Path(command[-1])
+        root.mkdir(parents=True)
+        for name in ('alpha', 'beta'):
+            (root / name).mkdir()
+            (root / name / '__manifest__.py').write_text("{'name': 'Test'}")
+            (root / name / 'code.py').write_text('new')
+        return subprocess.CompletedProcess(command, 0)
+
+    def run_import(self, mode='add', names=None):
+        with mock.patch.object(web.subprocess, 'run', side_effect=self.clone):
+            web.repository_modules_job(DummyJob(), self.project, 'https://example.com/addons.git', '18.0', mode, names or [])
+
+    def test_repository_validation(self):
+        for url in ('http://example.com/a', 'https://token@example.com/a', 'https://example.com/a?token=x', 'file:///tmp/a'):
+            with self.assertRaises(ValueError):
+                web.validate_module_repository(url, '18.0', 'add', '')
+        with self.assertRaises(ValueError):
+            web.validate_module_repository('https://example.com/a', '18.0', 'update', '')
+
+    def test_repository_add_select_and_conflict(self):
+        self.run_import(names=['alpha'])
+        self.assertTrue((self.project_root / 'odoo/addons/alpha').is_symlink())
+        self.assertFalse((self.project_root / 'odoo/addons/beta').exists())
+        with self.assertRaises(ValueError):
+            self.run_import(names=['beta', 'alpha'])
+        self.assertFalse((self.project_root / 'odoo/addons/beta').exists())
+
+    def test_repository_update_rollback(self):
+        self.run_import()
+        storage = self.project_root / 'odoo/addons-store'
+        (storage / 'alpha/code.py').write_text('old')
+        original = web.copy_module_to_storage
+        def fail_second(job, project, candidate, **kwargs):
+            if candidate.name == 'beta':
+                raise OSError('disk full')
+            return original(job, project, candidate, **kwargs)
+        with mock.patch.object(web, 'copy_module_to_storage', side_effect=fail_second):
+            with self.assertRaises(OSError):
+                self.run_import('update', ['alpha', 'beta'])
+        self.assertEqual((storage / 'alpha/code.py').read_text(), 'old')
+        self.assertTrue((storage / 'beta/__manifest__.py').is_file())
+
+    def test_repository_update_and_missing_selection(self):
+        self.run_import(names=['alpha'])
+        storage = self.project_root / 'odoo/addons-store'
+        (storage / 'alpha/code.py').write_text('old')
+        self.run_import('update', ['alpha'])
+        self.assertEqual((storage / 'alpha/code.py').read_text(), 'new')
+        self.assertTrue(list((self.root / '.odoo_manager_backups/modules' / self.project).glob('*/code.py')))
+        with self.assertRaises(ValueError):
+            self.run_import(names=['missing'])
+
+    def test_repository_clone_failure_leaves_project_unchanged(self):
+        with mock.patch.object(web.subprocess, 'run', return_value=subprocess.CompletedProcess([], 128)):
+            with self.assertRaises(RuntimeError):
+                web.repository_modules_job(DummyJob(), self.project, 'https://example.com/addons.git', '18.0', 'add', [])
+        self.assertEqual(list((self.project_root / 'odoo/addons-store').iterdir()), [])
+
+    def test_repository_symlink_rejected(self):
+        def clone_link(command, **kwargs):
+            result = self.clone(command, **kwargs)
+            (Path(command[-1]) / 'alpha/external').symlink_to(self.external)
+            return result
+        with mock.patch.object(web.subprocess, 'run', side_effect=clone_link):
+            with self.assertRaises(ValueError):
+                web.repository_modules_job(DummyJob(), self.project, 'https://example.com/addons.git', '18.0', 'add', [])
+        self.assertEqual(list((self.project_root / 'odoo/addons-store').iterdir()), [])

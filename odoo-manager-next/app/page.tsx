@@ -28,6 +28,7 @@ import {
   RefreshCcw,
   Search,
   Settings,
+  ShieldCheck,
   Square,
   Terminal,
   Trash2,
@@ -622,9 +623,15 @@ export default function Home() {
   const [apiUnavailable, setApiUnavailable] = useState(false);
   const [desktopRuntime, setDesktopRuntime] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [repositoryOpen, setRepositoryOpen] = useState(false);
+  const [repositoryUrl, setRepositoryUrl] = useState("");
+  const [repositoryBranch, setRepositoryBranch] = useState("");
+  const [repositoryMode, setRepositoryMode] = useState("add");
+  const [repositoryModules, setRepositoryModules] = useState("");
   const [zipDialogOpen, setZipDialogOpen] = useState(false);
   const [createDbOpen, setCreateDbOpen] = useState(false);
   const [restoreDbOpen, setRestoreDbOpen] = useState(false);
+  const [neutralizeDbOpen, setNeutralizeDbOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [updateAllDialogOpen, setUpdateAllDialogOpen] = useState(false);
   const [updateFilestoreStatus, setUpdateFilestoreStatus] = useState<FilestoreStatus | null>(null);
@@ -2087,14 +2094,15 @@ export default function Home() {
                   {selectedProject?.url || "Sélectionne un projet."}
                 </p>
               </div>
-              <div className="grid w-full shrink-0 grid-cols-2 gap-2 sm:grid-cols-4 xl:flex xl:w-auto xl:max-w-[660px] xl:flex-wrap xl:justify-end">
-                <Button className="w-full xl:w-auto" variant="outline" onClick={refreshAllViews}>
+              <div className="grid w-full shrink-0 grid-cols-2 items-stretch gap-2 sm:grid-cols-3 xl:w-[480px]">
+                <Button className="w-full" variant="outline" onClick={refreshAllViews}>
                   <RefreshCcw className="h-4 w-4" />
                   Actualiser
                 </Button>
                 {selectedProjectOnline ? (
                   <Button
-                    className="w-full xl:w-auto"
+                    key="stop-project"
+                    className="w-full"
                     variant="destructive"
                     disabled={!selectedProjectReady || !selectedProjectHasContainers || loading || Boolean(selectedProjectLifecycleJob)}
                     onClick={requestStopProject}
@@ -2104,7 +2112,8 @@ export default function Home() {
                   </Button>
                 ) : (
                   <Button
-                    className="w-full xl:w-auto"
+                    key="start-project"
+                    className="w-full"
                     disabled={!selectedProjectReady || loading || Boolean(selectedProjectLifecycleJob)}
                     onClick={requestStartProject}
                   >
@@ -2114,7 +2123,7 @@ export default function Home() {
                 )}
                 {selectedProject && (
                   <Button
-                    className="w-full xl:w-auto"
+                    className="col-span-2 w-full sm:col-span-1"
                     variant="outline"
                     disabled={
                       !selectedProjectReady ||
@@ -2380,6 +2389,30 @@ export default function Home() {
 
                       <Card>
                         <CardHeader>
+                          <CardTitle>Neutraliser la base</CardTitle>
+                          <CardDescription>
+                            Coupe les crons métier et les serveurs de messagerie, puis vérifie le résultat.
+                          </CardDescription>
+                        </CardHeader>
+                        <CardContent className="space-y-3">
+                          <div className="min-w-0 rounded-md bg-muted/55 p-3 text-sm">
+                            <div className="text-muted-foreground">Base ciblée</div>
+                            <div className="mt-1 break-words font-medium">{selectedDb || "Aucune base sélectionnée"}</div>
+                          </div>
+                          <Button
+                            className="w-full"
+                            variant="outline"
+                            disabled={!canUseDb || loading}
+                            onClick={() => setNeutralizeDbOpen(true)}
+                          >
+                            <ShieldCheck className="h-4 w-4" />
+                            Neutraliser et contrôler
+                          </Button>
+                        </CardContent>
+                      </Card>
+
+                      <Card>
+                        <CardHeader>
                           <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0">
                               <CardTitle>Serveur PostgreSQL</CardTitle>
@@ -2433,9 +2466,13 @@ export default function Home() {
                           {checkingUpdatePrerequisites ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
                           MAJ complète Odoo
                         </Button>
+                        <Button className="w-full" variant="outline" onClick={() => setRepositoryOpen(true)} disabled={!selectedProjectReady || loading}>
+                          <CloudDownload className="h-4 w-4" />
+                          Dépôt HTTPS · Ajout / MAJ
+                        </Button>
                         <Button className="w-full" variant="outline" onClick={() => setZipDialogOpen(true)} disabled={!selectedProjectReady}>
                           <FileArchive className="h-4 w-4" />
-                          Ajouter un pauvre zip
+                          Ajouter un ZIP
                         </Button>
                       </div>
                     </CardHeader>
@@ -3255,6 +3292,31 @@ export default function Home() {
         </DialogContent>
       </Dialog>
 
+      <Dialog open={repositoryOpen} onOpenChange={setRepositoryOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Modules depuis un dépôt HTTPS</DialogTitle>
+            <DialogDescription>Copie le code dans le projet {selectedProject?.name}. Choisis une branche compatible avec sa version Odoo.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <label className="block space-y-2"><span>URL HTTPS du dépôt</span><Input value={repositoryUrl} onChange={(e) => setRepositoryUrl(e.target.value)} placeholder="https://github.com/OCA/sale-workflow.git" /></label>
+            <label className="block space-y-2"><span>Branche ou tag</span><Input value={repositoryBranch} onChange={(e) => setRepositoryBranch(e.target.value)} placeholder="18.0" /></label>
+            <Select value={repositoryMode} onValueChange={setRepositoryMode}>
+              <SelectTrigger aria-label="Opération"><SelectValue /></SelectTrigger>
+              <SelectContent><SelectItem value="add">Ajouter des modules</SelectItem><SelectItem value="update">Mettre à jour le code existant</SelectItem></SelectContent>
+            </Select>
+            <label className="block space-y-2"><span>Noms techniques, séparés par des virgules</span><Input value={repositoryModules} onChange={(e) => setRepositoryModules(e.target.value)} placeholder="sale_exception, sale_order_type" /></label>
+            <p className="text-sm text-muted-foreground">{repositoryMode === "add" ? "Laisse les noms vides pour ajouter tous les modules du dépôt. Tout doublon bloque l’import." : "Les noms sont obligatoires. Seules les copies gérées dans addons-store sont remplacées, avec sauvegarde et restauration en cas d’échec."}</p>
+            <p className="text-sm text-muted-foreground">Après l’import, lance l’installation ou la mise à jour dans la base Odoo. Pour un dépôt privé, configure les accès HTTPS dans Git ; ne saisis aucun jeton dans l’URL.</p>
+            <Button disabled={loading || !selectedProjectReady || !repositoryUrl.trim() || !repositoryBranch.trim() || (repositoryMode === "update" && !repositoryModules.trim())} onClick={async () => {
+              if (!selectedProject) return;
+              const job = await createJob("repository_modules", { project: selectedProject.name, url: repositoryUrl.trim(), branch: repositoryBranch.trim(), mode: repositoryMode, modules: repositoryModules.trim() });
+              if (job) setRepositoryOpen(false);
+            }}>{repositoryMode === "add" ? "Ajouter depuis le dépôt" : "Sauvegarder et remplacer le code"}</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <Dialog
         open={zipDialogOpen}
         onOpenChange={(open) => {
@@ -3357,6 +3419,39 @@ export default function Home() {
         project={selectedProject}
         onSubmit={restoreDatabaseBackup}
       />
+
+      <Dialog open={neutralizeDbOpen} onOpenChange={setNeutralizeDbOpen}>
+        <DialogContent className="space-y-5">
+          <DialogHeader>
+            <DialogTitle>Neutraliser {selectedDb || "la base"}</DialogTitle>
+            <DialogDescription>
+              Odoo sera arrêté brièvement. Tous les crons métier, dont le contrôle d’abonnement,
+              ainsi que les serveurs de messagerie entrants et sortants seront désactivés.
+              Sur les versions récentes, Odoo efface aussi les identifiants SMTP. Cette opération
+              n’est pas réversible automatiquement.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/45 dark:text-amber-100">
+            À utiliser uniquement sur une copie locale ou une base de test, jamais sur la production.
+          </div>
+          <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+            <Button variant="outline" onClick={() => setNeutralizeDbOpen(false)}>Annuler</Button>
+            <Button
+              disabled={!selectedProject || !canUseDb || loading}
+              onClick={async () => {
+                const job = await createJob("neutralize_database", {
+                  project: selectedProject?.name,
+                  db: selectedDb,
+                });
+                if (job) setNeutralizeDbOpen(false);
+              }}
+            >
+              <ShieldCheck className="h-4 w-4" />
+              Confirmer la neutralisation
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
         <DialogContent>
