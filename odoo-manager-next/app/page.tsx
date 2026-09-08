@@ -3394,7 +3394,7 @@ export default function Home() {
       </Dialog>
 
       <Dialog open={socleDialogOpen} onOpenChange={setSocleDialogOpen}>
-        <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto">
+        <DialogContent className="max-h-[90vh] max-w-3xl space-y-5 overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Installer un socle Odoo</DialogTitle>
             <DialogDescription>
