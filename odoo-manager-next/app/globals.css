@@ -134,6 +134,12 @@ body {
   color: hsl(var(--foreground));
 }
 
+.log-terminal::selection,
+.log-terminal *::selection {
+  background: #2563eb;
+  color: #ffffff;
+}
+
 .app-tabs-list {
   box-shadow: none !important;
 }

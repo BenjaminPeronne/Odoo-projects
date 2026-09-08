@@ -2117,7 +2117,7 @@ export default function Home() {
                 <details className="rounded-md border bg-muted/40 p-3 text-left text-xs">
                   <summary className="cursor-pointer font-medium">Détails techniques</summary>
                   <div className="mt-2 break-all text-muted-foreground">Journal : {backendDiagnostics.log_path}</div>
-                  <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-slate-950 p-2 text-[11px] text-slate-100">
+                  <pre className="log-terminal mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-slate-950 p-2 text-[11px] text-slate-100">
                     {backendDiagnostics.details}
                   </pre>
                 </details>
@@ -3039,7 +3039,7 @@ export default function Home() {
                     <CardContent className="min-w-0">
                       <pre
                         ref={logOutputRef}
-                        className="min-h-[260px] max-h-[min(58vh,620px)] max-w-full overflow-auto whitespace-pre-wrap break-words rounded-md bg-slate-950 p-3 text-xs leading-relaxed text-emerald-100 sm:p-4"
+                        className="log-terminal min-h-[260px] max-h-[min(58vh,620px)] max-w-full overflow-auto whitespace-pre-wrap break-words rounded-md bg-slate-950 p-3 text-xs leading-relaxed text-emerald-100 sm:p-4"
                         onScroll={handleLogOutputScroll}
                       >
                         {outputContent}
