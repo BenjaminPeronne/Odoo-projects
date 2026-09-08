@@ -1,3 +1,4 @@
+import os
 import subprocess
 import shlex
 from pathlib import Path
@@ -57,7 +58,8 @@ class RepositoryModulesTests(ModuleLayoutTests):
             helper = next(argument for argument in command if argument.startswith('credential.helper=store --file='))
             helper_command = helper.removeprefix('credential.helper=')
             credentials_path = Path(shlex.split(helper_command)[1].removeprefix('--file='))
-            self.assertEqual(credentials_path.stat().st_mode & 0o777, 0o600)
+            if os.name != 'nt':
+                self.assertEqual(credentials_path.stat().st_mode & 0o777, 0o600)
             self.assertIn('benjamin:secret-token@', credentials_path.read_text())
             return self.clone(command, **kwargs)
 
