@@ -164,6 +164,12 @@ type Job = {
   finished_at?: string | null;
   lines: string[];
   output?: string;
+  result?: {
+    kind?: string;
+    scope?: string;
+    mode?: string;
+    modules?: string[];
+  };
 };
 
 type RestoreDatabasePayload = {
@@ -668,6 +674,7 @@ export default function Home() {
   const [neutralizeDbOpen, setNeutralizeDbOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [updateAllDialogOpen, setUpdateAllDialogOpen] = useState(false);
+  const [updateScope, setUpdateScope] = useState<"imported" | "all">("all");
   const [updateFilestoreStatus, setUpdateFilestoreStatus] = useState<FilestoreStatus | null>(null);
   const [updatePendingModules, setUpdatePendingModules] = useState<PendingModuleOperation[]>([]);
   const [updateLocalExcludedModules, setUpdateLocalExcludedModules] = useState<string[]>([]);
@@ -808,6 +815,16 @@ export default function Home() {
     () => updatePendingModules.filter((module) => module.code_available),
     [updatePendingModules],
   );
+  const detectedImportedModules = useMemo(() => {
+    const relevantJobs = jobs
+      .filter((job) => job.project === selectedProject?.name && job.status === "done")
+      .sort((left, right) => right.id - left.id);
+    for (const job of relevantJobs) {
+      if (job.result?.kind === "module_update") return [];
+      if (job.result?.kind === "repository_modules") return job.result.modules || [];
+    }
+    return [];
+  }, [jobs, selectedProject?.name]);
   const allMissingPendingModulesSelected =
     pendingModulesWithMissingCode.length > 0 &&
     pendingModulesWithMissingCode.every((module) => missingModulesToIgnore.has(module.name));
@@ -1505,6 +1522,7 @@ export default function Home() {
     setUpdatePendingModules([]);
     setUpdateLocalExcludedModules([]);
     setMissingModulesToIgnore(new Set());
+    setUpdateScope(detectedImportedModules.length ? "imported" : "all");
     setCheckingUpdatePrerequisites(true);
     try {
       const diagnostics = await api<ProjectDiagnostics>(`/api/projects/${encodeURIComponent(selectedProject.name)}/diagnostics`);
@@ -1576,11 +1594,13 @@ export default function Home() {
   async function confirmUpdateAllOdooModules() {
     const db = selectedDatabaseOrNotify("la MAJ complète Odoo");
     if (!db || !selectedProject) return;
-    const job = await createJob("update_all_modules", {
-      project: selectedProject.name,
-      db,
-      allow_missing_filestore: allowMissingFilestore,
-    });
+    const targeted = updateScope === "imported" && detectedImportedModules.length > 0;
+    const job = await createJob(
+      targeted ? "update_imported_modules" : "update_all_modules",
+      targeted
+        ? { project: selectedProject.name, db, modules: detectedImportedModules.join(",") }
+        : { project: selectedProject.name, db, allow_missing_filestore: allowMissingFilestore },
+    );
     if (job) {
       setUpdateAllDialogOpen(false);
       schedule(refreshModules, 2500);
@@ -3678,9 +3698,44 @@ export default function Home() {
           <DialogHeader>
             <DialogTitle>MAJ complète Odoo</DialogTitle>
             <DialogDescription>
-              Cette action lance une mise à jour de tous les modules installés sur la base sélectionnée.
+              Choisis la portée de l’opération. Les modules détectés après le dernier import SSH sont proposés en priorité.
             </DialogDescription>
           </DialogHeader>
+          {detectedImportedModules.length ? (
+            <div className="grid gap-3 rounded-md border bg-muted/35 p-3 sm:grid-cols-2">
+              <button
+                type="button"
+                className={cn(
+                  "rounded-md border p-3 text-left text-sm transition-colors",
+                  updateScope === "imported" ? "border-primary bg-primary/[0.08] ring-1 ring-primary/25" : "bg-background hover:bg-muted/55",
+                )}
+                onClick={() => setUpdateScope("imported")}
+              >
+                <span className="block font-medium">Modules importés détectés</span>
+                <span className="mt-1 block text-xs text-muted-foreground">
+                  Installer ou mettre à jour uniquement {detectedImportedModules.length} module(s).
+                </span>
+              </button>
+              <button
+                type="button"
+                className={cn(
+                  "rounded-md border p-3 text-left text-sm transition-colors",
+                  updateScope === "all" ? "border-primary bg-primary/[0.08] ring-1 ring-primary/25" : "bg-background hover:bg-muted/55",
+                )}
+                onClick={() => setUpdateScope("all")}
+              >
+                <span className="block font-medium">Forcer la MAJ complète</span>
+                <span className="mt-1 block text-xs text-muted-foreground">Exécuter la mise à jour de l’ensemble des modules installés.</span>
+              </button>
+              {updateScope === "imported" && (
+                <div className="flex max-h-28 flex-wrap gap-1.5 overflow-y-auto sm:col-span-2">
+                  {detectedImportedModules.map((moduleName) => (
+                    <Badge key={moduleName} variant="outline" className="bg-background font-mono">{moduleName}</Badge>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : null}
           <div className="grid gap-3 rounded-md border bg-muted/40 p-3 text-sm">
             <div className="grid gap-1">
               <span className="text-xs font-medium uppercase text-muted-foreground">Projet</span>
@@ -3693,11 +3748,13 @@ export default function Home() {
             <div className="grid gap-1">
               <span className="text-xs font-medium uppercase text-muted-foreground">Commande</span>
               <code className="break-all rounded bg-slate-950 px-2 py-1 text-xs text-emerald-100">
-                odoo -d {selectedDb || "BASE"} -u {updateLocalExcludedModules.length ? "<modules disponibles non exclus>" : "all"} --stop-after-init
+                {updateScope === "imported" && detectedImportedModules.length
+                  ? `odoo -d ${selectedDb || "BASE"} -i/-u ${detectedImportedModules.join(",")} --stop-after-init`
+                  : `odoo -d ${selectedDb || "BASE"} -u ${updateLocalExcludedModules.length ? "<modules disponibles non exclus>" : "all"} --stop-after-init`}
               </code>
             </div>
           </div>
-          {updateLocalExcludedModules.length ? (
+          {updateScope === "all" && updateLocalExcludedModules.length ? (
             <div className="grid gap-2 rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-950 dark:border-blue-800 dark:bg-blue-950/45 dark:text-blue-100">
               <div className="font-medium">Mode avec exceptions locales</div>
               <p>
@@ -3717,7 +3774,7 @@ export default function Home() {
               </Button>
             </div>
           ) : null}
-          {pendingModulesWithAvailableCode.length ? (
+          {updateScope === "all" && pendingModulesWithAvailableCode.length ? (
             <div className="grid gap-2 rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-950 dark:border-blue-800 dark:bg-blue-950/45 dark:text-blue-100">
               <div className="flex items-start gap-2">
                 <Info className="mt-0.5 h-4 w-4 shrink-0" />
@@ -3737,7 +3794,7 @@ export default function Home() {
               </div>
             </div>
           ) : null}
-          {pendingModulesWithMissingCode.length ? (
+          {updateScope === "all" && pendingModulesWithMissingCode.length ? (
             <div className="grid gap-3 rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-950 dark:border-red-800 dark:bg-red-950/45 dark:text-red-100">
               <div className="flex items-start gap-2">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-600" />
@@ -3786,7 +3843,7 @@ export default function Home() {
               </p>
             </div>
           ) : null}
-          {updateFilestoreStatus && updateFilestoreStatus.missing > 0 ? (
+          {updateScope === "all" && updateFilestoreStatus && updateFilestoreStatus.missing > 0 ? (
             <div className="grid gap-3 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/45 dark:text-amber-100">
               <div className="flex items-start gap-2">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
@@ -3818,13 +3875,13 @@ export default function Home() {
                 !canUseDb ||
                 loading ||
                 checkingUpdatePrerequisites ||
-                Boolean(pendingModulesWithMissingCode.length) ||
-                Boolean(updateFilestoreStatus?.missing && !allowMissingFilestore)
+                Boolean(updateScope === "all" && pendingModulesWithMissingCode.length) ||
+                Boolean(updateScope === "all" && updateFilestoreStatus?.missing && !allowMissingFilestore)
               }
               onClick={confirmUpdateAllOdooModules}
             >
               {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
-              Lancer la MAJ complète
+              {updateScope === "imported" && detectedImportedModules.length ? "Traiter les modules importés" : "Lancer la MAJ complète"}
             </Button>
           </div>
         </DialogContent>

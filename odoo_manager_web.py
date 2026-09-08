@@ -1800,6 +1800,7 @@ class Job:
         self.finished_at = None
         self.lines = []
         self.output = ""
+        self.result = {}
         self.target = target
         self.args = args
         self.thread = None
@@ -1856,7 +1857,13 @@ class Job:
                 self.thread = None
             publish_event(
                 "job_completed",
-                {"id": self.id, "status": self.status, "project": self.project, "finished_at": self.finished_at},
+                {
+                    "id": self.id,
+                    "status": self.status,
+                    "project": self.project,
+                    "finished_at": self.finished_at,
+                    "result": self.result,
+                },
             )
 
 
@@ -2790,6 +2797,37 @@ def module_command_job(job, flag, project, db_name, modules):
     )
 
 
+def update_imported_modules_job(job, project, db_name, modules):
+    project = validate_project(project)
+    db_name = validate_odoo_db(db_name)
+    requested = module_name_list(modules)
+    available = {path.name for path in module_dirs(project)}
+    missing = sorted(set(requested) - available)
+    if missing:
+        raise RuntimeError("Modules importés introuvables dans le projet : " + ", ".join(missing))
+
+    restored_exclusions = sorted(set(requested) & ignored_missing_modules(project, db_name))
+    if restored_exclusions:
+        forget_ignored_missing_modules(project, db_name, restored_exclusions)
+        job.add("Code restauré, exclusions locales retirées : " + ", ".join(restored_exclusions))
+
+    states = installed_modules(project, db_name)
+    to_update = [name for name in requested if states.get(name, {}).get("state") in {"installed", "to upgrade"}]
+    to_install = [name for name in requested if name not in to_update]
+    if to_install:
+        job.add("Nouveaux modules à installer : " + ", ".join(to_install))
+        module_command_job(job, "--install-module", project, db_name, ",".join(to_install))
+    if to_update:
+        job.add("Modules existants à mettre à jour : " + ", ".join(to_update))
+        module_command_job(job, "--update-module", project, db_name, ",".join(to_update))
+    job.result = {"kind": "module_update", "scope": "imported", "modules": requested}
+
+
+def update_all_modules_job(job, project, db_name, modules):
+    module_command_job(job, "--update-module", project, db_name, modules)
+    job.result = {"kind": "module_update", "scope": "all", "modules": []}
+
+
 def delete_module_code_job(job, project, modules, db_name="", uninstall_first=False):
     project = validate_project(project)
     module_names = [name.strip() for name in validate_modules(modules).split(",") if name.strip()]
@@ -2995,6 +3033,11 @@ def repository_modules_job(job, project, url, branch, mode, names):
             clear_project_module_cache(project)
         job.add(f"Code préparé : {len(candidates)} module(s), source {url}, branche {branch}.")
         job.add("Installe ou mets à jour ces modules dans la base Odoo depuis l’interface.")
+        job.result = {
+            "kind": "repository_modules",
+            "mode": mode,
+            "modules": [candidate.name for candidate in candidates],
+        }
 
 
 def safe_import_name(filename):
@@ -3155,6 +3198,7 @@ def jobs_snapshot(detail_job_id=None, compact=False):
                 "finished_at": job.finished_at,
                 "lines": list(job.lines) if not compact or job.id == detail_job_id else [],
                 "output": job.output if not compact or job.id == detail_job_id else "",
+                "result": dict(job.result),
             }
             for job in reversed(values)
         ]
@@ -3794,17 +3838,27 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError("Aucun module installé avec code disponible à mettre à jour.")
                     job = Job(
                         f"Mettre à jour les modules disponibles sur {db_name}{title_suffix}",
-                        module_command_job,
-                        ("--update-module", project, db_name, ",".join(modules)),
+                        update_all_modules_job,
+                        (project, db_name, ",".join(modules)),
                         project=project,
                     )
                 else:
                     job = Job(
                         f"Mettre à jour tous les modules sur {db_name}{title_suffix}",
-                        module_command_job,
-                        ("--update-module", project, db_name, "all"),
+                        update_all_modules_job,
+                        (project, db_name, "all"),
                         project=project,
                     )
+            elif action == "update_imported_modules":
+                project = validate_project(payload.get("project", ""))
+                db_name = validate_odoo_db(payload.get("db", ""))
+                modules = validate_modules(payload.get("modules", ""))
+                job = Job(
+                    f"Installer ou mettre à jour les modules importés sur {db_name}",
+                    update_imported_modules_job,
+                    (project, db_name, modules),
+                    project=project,
+                )
             elif action == "update_local_modules":
                 project = validate_project(payload.get("project", ""))
                 db_name = validate_odoo_db(payload.get("db", ""))

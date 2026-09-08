@@ -17,8 +17,10 @@ class RepositoryModulesTests(ModuleLayoutTests):
         return subprocess.CompletedProcess(command, 0)
 
     def run_import(self, mode='add', names=None):
+        job = DummyJob()
         with mock.patch.object(web.subprocess, 'run', side_effect=self.clone):
-            web.repository_modules_job(DummyJob(), self.project, 'ssh://git@gitlab.sudokeys.com:10022/team/addons.git', '18.0', mode, names or [])
+            web.repository_modules_job(job, self.project, 'ssh://git@gitlab.sudokeys.com:10022/team/addons.git', '18.0', mode, names or [])
+        return job
 
     def test_repository_validation(self):
         invalid_urls = (
@@ -56,7 +58,8 @@ class RepositoryModulesTests(ModuleLayoutTests):
                 '18.0', 'add', [])
 
     def test_repository_add_select_and_conflict(self):
-        self.run_import(names=['alpha'])
+        job = self.run_import(names=['alpha'])
+        self.assertEqual(job.result, {'kind': 'repository_modules', 'mode': 'add', 'modules': ['alpha']})
         self.assertTrue((self.project_root / 'odoo/addons/alpha').is_symlink())
         self.assertFalse((self.project_root / 'odoo/addons/beta').exists())
         with self.assertRaises(ValueError):

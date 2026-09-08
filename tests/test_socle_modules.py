@@ -55,3 +55,24 @@ class SocleModulesTests(ModuleLayoutTests):
     def test_unknown_socle_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "inconnues"):
             web.validate_socle_presets("sales,unknown")
+
+    def test_imported_modules_are_installed_or_updated_according_to_database_state(self):
+        alpha = self.create_enterprise_module("alpha")
+        beta = self.create_enterprise_module("beta")
+        calls = []
+
+        def record_command(job, flag, project, db_name, modules):
+            calls.append((flag, modules))
+
+        job = DummyJob()
+        with mock.patch.object(web, "module_dirs", return_value=iter([alpha, beta])), \
+                mock.patch.object(web, "installed_modules", return_value={
+                    "alpha": {"state": "installed"},
+                    "beta": {"state": "uninstalled"},
+                }), \
+                mock.patch.object(web, "ignored_missing_modules", return_value=set()), \
+                mock.patch.object(web, "module_command_job", side_effect=record_command):
+            web.update_imported_modules_job(job, self.project, "test_db", "alpha,beta")
+
+        self.assertEqual(calls, [("--install-module", "beta"), ("--update-module", "alpha")])
+        self.assertEqual(job.result, {"kind": "module_update", "scope": "imported", "modules": ["alpha", "beta"]})
