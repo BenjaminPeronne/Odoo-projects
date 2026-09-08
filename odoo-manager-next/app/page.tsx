@@ -555,30 +555,10 @@ function odooAccessUrl(project?: Project, db?: string) {
 function moduleRepositoryUrlError(value: string) {
   const rawUrl = value.trim();
   if (!rawUrl) return "";
-  const invalidMessage = "Colle une seule URL HTTPS complète, par exemple https://gitlab.example/equipe/depot.git.";
-  if (rawUrl.toLowerCase().split("https://").length !== 2 || rawUrl.includes("\\") || /\s/.test(rawUrl)) {
-    return invalidMessage;
-  }
-  try {
-    const parsed = new URL(rawUrl);
-    const normalizedPath = parsed.pathname.toLowerCase();
-    if (
-      parsed.protocol !== "https:" ||
-      !parsed.hostname ||
-      !parsed.pathname.replaceAll("/", "") ||
-      parsed.username ||
-      parsed.password ||
-      parsed.search ||
-      parsed.hash ||
-      parsed.pathname.includes("://") ||
-      (normalizedPath.includes(".git") && normalizedPath.indexOf(".git") !== normalizedPath.length - 4)
-    ) {
-      return invalidMessage;
-    }
-  } catch {
-    return invalidMessage;
-  }
-  return "";
+  const validSshUrl = /^(?:ssh:\/\/git@gitlab\.sudokeys\.com:10022\/|git@gitlab\.sudokeys\.com:)[A-Za-z0-9._/-]+\.git$/;
+  return validSshUrl.test(rawUrl)
+    ? ""
+    : "Utilise l’URL SSH du dépôt GitLab Sudokeys, par exemple ssh://git@gitlab.sudokeys.com:10022/equipe/depot.git.";
 }
 
 function compactWorkspacePath(path: string | undefined, workspace: string | undefined) {
@@ -657,8 +637,6 @@ export default function Home() {
   const [repositoryBranch, setRepositoryBranch] = useState("");
   const [repositoryMode, setRepositoryMode] = useState("add");
   const [repositoryModules, setRepositoryModules] = useState("");
-  const [repositoryUsername, setRepositoryUsername] = useState("");
-  const [repositoryToken, setRepositoryToken] = useState("");
   const repositoryUrlError = moduleRepositoryUrlError(repositoryUrl);
   const [zipDialogOpen, setZipDialogOpen] = useState(false);
   const [createDbOpen, setCreateDbOpen] = useState(false);
@@ -2500,7 +2478,7 @@ export default function Home() {
                         </Button>
                         <Button className="w-full" variant="outline" onClick={() => setRepositoryOpen(true)} disabled={!selectedProjectReady || loading}>
                           <CloudDownload className="h-4 w-4" />
-                          Dépôt HTTPS · Ajout / MAJ
+                          Dépôt SSH · Ajout / MAJ
                         </Button>
                         <Button className="w-full" variant="outline" onClick={() => setZipDialogOpen(true)} disabled={!selectedProjectReady}>
                           <FileArchive className="h-4 w-4" />
@@ -3327,46 +3305,40 @@ export default function Home() {
       <Dialog open={repositoryOpen} onOpenChange={setRepositoryOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Modules depuis un dépôt HTTPS</DialogTitle>
+            <DialogTitle>Modules depuis un dépôt SSH</DialogTitle>
             <DialogDescription>Copie le code dans le projet {selectedProject?.name}. Choisis une branche compatible avec sa version Odoo.</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <label className="block space-y-2">
-              <span>URL HTTPS du dépôt</span>
+              <span>URL SSH du dépôt</span>
               <Input
                 value={repositoryUrl}
                 onChange={(e) => setRepositoryUrl(e.target.value)}
-                placeholder="https://github.com/OCA/sale-workflow.git"
+                placeholder="ssh://git@gitlab.sudokeys.com:10022/equipe/depot.git"
                 aria-invalid={Boolean(repositoryUrlError)}
                 aria-describedby={repositoryUrlError ? "repository-url-error" : undefined}
               />
               {repositoryUrlError ? <span id="repository-url-error" className="block text-sm text-destructive">{repositoryUrlError}</span> : null}
             </label>
             <label className="block space-y-2"><span>Branche ou tag</span><Input value={repositoryBranch} onChange={(e) => setRepositoryBranch(e.target.value)} placeholder="18.0" /></label>
-            <div className="grid gap-4 sm:grid-cols-2">
-              <label className="block space-y-2">
-                <span>Identifiant GitLab <span className="text-muted-foreground">(dépôt privé)</span></span>
-                <Input value={repositoryUsername} onChange={(e) => setRepositoryUsername(e.target.value)} placeholder="oauth2" autoComplete="username" />
-              </label>
-              <label className="block space-y-2">
-                <span>Jeton d’accès GitLab <span className="text-muted-foreground">(dépôt privé)</span></span>
-                <Input type="password" value={repositoryToken} onChange={(e) => setRepositoryToken(e.target.value)} placeholder="glpat-…" autoComplete="off" />
-              </label>
-            </div>
             <Select value={repositoryMode} onValueChange={setRepositoryMode}>
               <SelectTrigger aria-label="Opération"><SelectValue /></SelectTrigger>
               <SelectContent><SelectItem value="add">Ajouter des modules</SelectItem><SelectItem value="update">Mettre à jour le code existant</SelectItem></SelectContent>
             </Select>
             <label className="block space-y-2"><span>Noms techniques, séparés par des virgules</span><Input value={repositoryModules} onChange={(e) => setRepositoryModules(e.target.value)} placeholder="sale_exception, sale_order_type" /></label>
             <p className="text-sm text-muted-foreground">{repositoryMode === "add" ? "Laisse les noms vides pour ajouter tous les modules du dépôt. Tout doublon bloque l’import." : "Les noms sont obligatoires. Seules les copies gérées dans addons-store sont remplacées, avec sauvegarde et restauration en cas d’échec."}</p>
-            <p className="text-sm text-muted-foreground">Après l’import, lance l’installation ou la mise à jour dans la base Odoo. Pour un dépôt privé, saisis ici un jeton avec le droit de lecture. Il n’est ajouté ni à l’URL ni aux logs, et n’est pas conservé après l’opération.</p>
+            <div className="flex flex-col gap-2 rounded-md border p-3 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
+              <span>Le manager utilise la clé SSH de cette machine. Aucun jeton GitLab n’est demandé ni stocké.</span>
+              <Button type="button" size="sm" variant="outline" onClick={openSshAssistant}>
+                <KeyRound className="h-4 w-4" />
+                Gérer la clé SSH
+              </Button>
+            </div>
+            <p className="text-sm text-muted-foreground">Après l’import, lance l’installation ou la mise à jour dans la base Odoo.</p>
             <Button disabled={loading || !selectedProjectReady || !repositoryUrl.trim() || Boolean(repositoryUrlError) || !repositoryBranch.trim() || (repositoryMode === "update" && !repositoryModules.trim())} onClick={async () => {
               if (!selectedProject) return;
-              const job = await createJob("repository_modules", { project: selectedProject.name, url: repositoryUrl.trim(), branch: repositoryBranch.trim(), mode: repositoryMode, modules: repositoryModules.trim(), username: repositoryUsername.trim(), token: repositoryToken.trim() });
-              if (job) {
-                setRepositoryToken("");
-                setRepositoryOpen(false);
-              }
+              const job = await createJob("repository_modules", { project: selectedProject.name, url: repositoryUrl.trim(), branch: repositoryBranch.trim(), mode: repositoryMode, modules: repositoryModules.trim() });
+              if (job) setRepositoryOpen(false);
             }}>{repositoryMode === "add" ? "Ajouter depuis le dépôt" : "Sauvegarder et remplacer le code"}</Button>
           </div>
         </DialogContent>

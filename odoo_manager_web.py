@@ -2750,20 +2750,7 @@ def link_modules_job(job, project, source):
 
 
 def validate_module_repository(url, branch, mode, modules):
-    url = str(url or "").strip()
-    parsed = urllib.parse.urlsplit(url)
-    normalized_path = parsed.path.casefold()
-    contains_embedded_url = "://" in parsed.path or url.casefold().count("https://") != 1
-    contains_trailing_git_path = ".git" in normalized_path and normalized_path.find(".git") != len(normalized_path) - 4
-    if (parsed.scheme != "https" or not parsed.hostname or not parsed.path.strip("/")
-            or parsed.username is not None or parsed.password is not None
-            or parsed.query or parsed.fragment or "\\" in url
-            or contains_embedded_url or contains_trailing_git_path
-            or any(c.isspace() or ord(c) < 32 for c in url)):
-        raise ValueError(
-            "L’URL du dépôt est mal formée. Colle une seule URL HTTPS complète, "
-            "sans identifiants, paramètres ni fragment."
-        )
+    url = validate_gitlab_repository(url)
     branch = validate_git_ref(branch)
     if mode not in {"add", "update"}:
         raise ValueError("Mode d’import invalide.")
@@ -2773,75 +2760,41 @@ def validate_module_repository(url, branch, mode, modules):
     return url, branch, mode, names
 
 
-def validate_repository_credentials(username, token):
-    username = str(username or "").strip()
-    token = str(token or "").strip()
-    if username and not token:
-        raise ValueError("Le jeton d’accès GitLab est obligatoire lorsque l’identifiant est renseigné.")
-    if not token:
-        return "", ""
-    if any(ord(character) < 32 for character in username + token):
-        raise ValueError("Les identifiants GitLab contiennent des caractères invalides.")
-    return username or "oauth2", token
-
-
 def repository_clone_error(stderr):
     details = str(stderr or "").casefold()
     if any(marker in details for marker in (
-            "unable to get password", "could not read username", "authentication failed",
-            "http basic: access denied", "terminal prompts disabled", "error: 401", "error: 403")):
+            "permission denied (publickey)", "no such identity", "sign_and_send_pubkey")):
         return RuntimeError(
-            "GitLab demande une authentification HTTPS. Enregistre d’abord un accès valide "
-            "dans le gestionnaire d’identifiants Git de cet ordinateur, puis relance l’import."
+            "GitLab refuse la clé SSH de cet ordinateur. Ouvre l’assistant Clé SSH du manager, "
+            "puis vérifie que sa clé publique est autorisée dans GitLab."
         )
+    if "host key verification failed" in details:
+        return RuntimeError("L’identité du serveur GitLab n’a pas pu être vérifiée par SSH.")
     if any(marker in details for marker in (
             "remote branch", "couldn't find remote ref", "could not find remote branch",
             "not found in upstream origin")):
         return RuntimeError("La branche ou le tag demandé est introuvable dans ce dépôt.")
-    if any(marker in details for marker in ("could not resolve host", "failed to connect", "connection timed out")):
+    if any(marker in details for marker in (
+            "could not resolve hostname", "failed to connect", "connection timed out", "connection refused")):
         return RuntimeError("GitLab est inaccessible depuis cet ordinateur. Vérifie le réseau et le DNS.")
     return RuntimeError(
-        "Récupération Git impossible. Vérifie l’URL, la branche et les accès HTTPS configurés dans Git."
+        "Récupération Git impossible. Vérifie l’URL SSH, la branche et l’autorisation de la clé dans GitLab."
     )
 
 
-def repository_modules_job(job, project, url, branch, mode, names, username="", token=""):
-    """Import an isolated HTTPS snapshot; roll back every changed module on failure."""
+def repository_modules_job(job, project, url, branch, mode, names):
+    """Import an isolated SSH snapshot; roll back every changed module on failure."""
     project = validate_project(project)
     creator = ProjectCreator(SETTINGS, WORKSPACE, project_service())
     staging = project_staging_imports_root(project)
     staging.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="repository-", dir=staging) as temporary:
-        temporary_path = Path(temporary)
-        checkout = Path(temporary) / urllib.parse.urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+        checkout = Path(temporary) / url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
         job.add(f"Récupération du dépôt {url}, branche {branch}…")
-        credential_arguments = []
-        if token:
-            parsed_url = urllib.parse.urlsplit(url)
-            encoded_username = urllib.parse.quote(username, safe="")
-            encoded_token = urllib.parse.quote(token, safe="")
-            credentials_file = temporary_path / ".git-credentials"
-            credentials_file.write_text(
-                urllib.parse.urlunsplit((
-                    parsed_url.scheme,
-                    f"{encoded_username}:{encoded_token}@{parsed_url.netloc}",
-                    "",
-                    "",
-                    "",
-                )) + "\n",
-                encoding="utf-8",
-            )
-            credentials_file.chmod(0o600)
-            helper_path = creator.command_path(credentials_file)
-            credential_arguments = [
-                "-c", "credential.helper=",
-                "-c", f"credential.helper=store --file={shlex.quote(helper_path)}",
-            ]
         command = creator.git(
-            "-c", "credential.interactive=false", "-c", "core.askPass=",
-            *credential_arguments,
-            "-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
-            "-c", "http.followRedirects=false", "clone", "--depth", "1",
+            "-c", "core.sshCommand=ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new",
+            "-c", "protocol.allow=never", "-c", "protocol.ssh.allow=always",
+            "clone", "--depth", "1",
             "--single-branch", "--branch", branch, "--", url, creator.command_path(checkout),
         )
         result = subprocess.run(command, cwd=creator.command_cwd, capture_output=True, text=True,
@@ -3663,10 +3616,8 @@ class Handler(BaseHTTPRequestHandler):
                 project = validate_project(payload.get("project", ""))
                 url, branch, mode, names = validate_module_repository(
                     payload.get("url"), payload.get("branch"), payload.get("mode"), payload.get("modules"))
-                username, token = validate_repository_credentials(
-                    payload.get("username"), payload.get("token"))
                 job = Job(f"{'Ajouter' if mode == 'add' else 'Actualiser'} des modules depuis Git · {project}",
-                          repository_modules_job, (project, url, branch, mode, names, username, token), project=project)
+                          repository_modules_job, (project, url, branch, mode, names), project=project)
             elif action == "start_project":
                 project = validate_project(payload.get("project", ""))
                 job = Job(f"Démarrer {project}", start_project_job, (project,), project=project)

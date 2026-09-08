@@ -1,6 +1,4 @@
-import os
 import subprocess
-import shlex
 from pathlib import Path
 from unittest import mock
 
@@ -20,53 +18,42 @@ class RepositoryModulesTests(ModuleLayoutTests):
 
     def run_import(self, mode='add', names=None):
         with mock.patch.object(web.subprocess, 'run', side_effect=self.clone):
-            web.repository_modules_job(DummyJob(), self.project, 'https://example.com/addons.git', '18.0', mode, names or [])
+            web.repository_modules_job(DummyJob(), self.project, 'ssh://git@gitlab.sudokeys.com:10022/team/addons.git', '18.0', mode, names or [])
 
     def test_repository_validation(self):
         invalid_urls = (
             'http://example.com/a',
-            'https://token@example.com/a',
-            'https://example.com/a?token=x',
+            'https://gitlab.sudokeys.com/team/repository.git',
             'file:///tmp/a',
-            'https://gitlab.example/https://gitlab.example/team/repository.git',
-            'https://gitlab.example/team/repository.gitteam/repository.git',
-            'https://gitlab.example/team\\repository.git',
+            'ssh://git@gitlab.sudokeys.com/team/repository.git',
+            'ssh://token@gitlab.sudokeys.com:10022/team/repository.git',
+            'ssh://git@gitlab.example:10022/team/repository.git',
         )
         for url in invalid_urls:
             with self.assertRaises(ValueError):
                 web.validate_module_repository(url, '18.0', 'add', '')
-        valid_url = 'https://gitlab.example/team/repository.git'
+        valid_url = 'ssh://git@gitlab.sudokeys.com:10022/team/repository.git'
         self.assertEqual(web.validate_module_repository(valid_url, '18.0', 'add', '')[0], valid_url)
+        self.assertEqual(
+            web.validate_module_repository('git@gitlab.sudokeys.com:team/repository.git', '18.0', 'add', '')[0],
+            'git@gitlab.sudokeys.com:team/repository.git',
+        )
         with self.assertRaises(ValueError):
-            web.validate_module_repository('https://example.com/a', '18.0', 'update', '')
+            web.validate_module_repository(valid_url, '18.0', 'update', '')
 
-    def test_repository_credentials_validation(self):
-        self.assertEqual(web.validate_repository_credentials('', ''), ('', ''))
-        self.assertEqual(web.validate_repository_credentials('', 'secret'), ('oauth2', 'secret'))
-        self.assertEqual(web.validate_repository_credentials('benjamin', 'secret'), ('benjamin', 'secret'))
-        with self.assertRaises(ValueError):
-            web.validate_repository_credentials('benjamin', '')
-
-    def test_repository_credentials_are_temporary_and_absent_from_command(self):
-        def authenticated_clone(command, **kwargs):
-            # On Windows, ProjectCreator probes WSL before building the clone command.
-            # Keep that probe separate from the Git command asserted below.
-            if not any(str(argument).startswith('credential.helper=store --file=') for argument in command):
-                return subprocess.CompletedProcess(command, 1)
+    def test_repository_clone_uses_non_interactive_ssh_without_credentials(self):
+        def ssh_clone(command, **kwargs):
             rendered_command = ' '.join(command)
-            self.assertNotIn('secret-token', rendered_command)
-            helper = next(argument for argument in command if argument.startswith('credential.helper=store --file='))
-            helper_command = helper.removeprefix('credential.helper=')
-            credentials_path = Path(shlex.split(helper_command)[1].removeprefix('--file='))
-            if os.name != 'nt':
-                self.assertEqual(credentials_path.stat().st_mode & 0o777, 0o600)
-            self.assertIn('benjamin:secret-token@', credentials_path.read_text())
+            self.assertIn('core.sshCommand=ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new', command)
+            self.assertIn('protocol.ssh.allow=always', command)
+            self.assertNotIn('credential.helper', rendered_command)
             return self.clone(command, **kwargs)
 
-        with mock.patch.object(web.subprocess, 'run', side_effect=authenticated_clone):
+        with mock.patch('odoo_manager_core.project_creator.platform_id', return_value='linux'), \
+                mock.patch.object(web.subprocess, 'run', side_effect=ssh_clone):
             web.repository_modules_job(
-                DummyJob(), self.project, 'https://example.com/addons.git', '18.0',
-                'add', [], 'benjamin', 'secret-token')
+                DummyJob(), self.project, 'ssh://git@gitlab.sudokeys.com:10022/team/addons.git',
+                '18.0', 'add', [])
 
     def test_repository_add_select_and_conflict(self):
         self.run_import(names=['alpha'])
@@ -104,15 +91,17 @@ class RepositoryModulesTests(ModuleLayoutTests):
     def test_repository_clone_failure_leaves_project_unchanged(self):
         with mock.patch.object(web.subprocess, 'run', return_value=subprocess.CompletedProcess([], 128)):
             with self.assertRaises(RuntimeError):
-                web.repository_modules_job(DummyJob(), self.project, 'https://example.com/addons.git', '18.0', 'add', [])
+                web.repository_modules_job(
+                    DummyJob(), self.project,
+                    'ssh://git@gitlab.sudokeys.com:10022/team/addons.git', '18.0', 'add', [])
         self.assertEqual(list((self.project_root / 'odoo/addons-store').iterdir()), [])
 
     def test_repository_clone_reports_missing_credentials(self):
-        failure = subprocess.CompletedProcess([], 128, stderr='fatal: unable to get password from user')
+        failure = subprocess.CompletedProcess([], 128, stderr='git@gitlab.sudokeys.com: Permission denied (publickey).')
         with mock.patch.object(web.subprocess, 'run', return_value=failure):
-            with self.assertRaisesRegex(RuntimeError, 'authentification HTTPS'):
+            with self.assertRaisesRegex(RuntimeError, 'clé SSH'):
                 web.repository_modules_job(
-                    DummyJob(), self.project, 'https://example.com/addons.git', '18.0', 'add', [])
+                    DummyJob(), self.project, 'ssh://git@gitlab.sudokeys.com:10022/team/addons.git', '18.0', 'add', [])
 
     def test_repository_symlink_rejected(self):
         def clone_link(command, **kwargs):
@@ -121,5 +110,5 @@ class RepositoryModulesTests(ModuleLayoutTests):
             return result
         with mock.patch.object(web.subprocess, 'run', side_effect=clone_link):
             with self.assertRaises(ValueError):
-                web.repository_modules_job(DummyJob(), self.project, 'https://example.com/addons.git', '18.0', 'add', [])
+                web.repository_modules_job(DummyJob(), self.project, 'ssh://git@gitlab.sudokeys.com:10022/team/addons.git', '18.0', 'add', [])
         self.assertEqual(list((self.project_root / 'odoo/addons-store').iterdir()), [])
