@@ -657,6 +657,8 @@ export default function Home() {
   const [repositoryBranch, setRepositoryBranch] = useState("");
   const [repositoryMode, setRepositoryMode] = useState("add");
   const [repositoryModules, setRepositoryModules] = useState("");
+  const [repositoryUsername, setRepositoryUsername] = useState("");
+  const [repositoryToken, setRepositoryToken] = useState("");
   const repositoryUrlError = moduleRepositoryUrlError(repositoryUrl);
   const [zipDialogOpen, setZipDialogOpen] = useState(false);
   const [createDbOpen, setCreateDbOpen] = useState(false);
@@ -3341,17 +3343,30 @@ export default function Home() {
               {repositoryUrlError ? <span id="repository-url-error" className="block text-sm text-destructive">{repositoryUrlError}</span> : null}
             </label>
             <label className="block space-y-2"><span>Branche ou tag</span><Input value={repositoryBranch} onChange={(e) => setRepositoryBranch(e.target.value)} placeholder="18.0" /></label>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <label className="block space-y-2">
+                <span>Identifiant GitLab <span className="text-muted-foreground">(dépôt privé)</span></span>
+                <Input value={repositoryUsername} onChange={(e) => setRepositoryUsername(e.target.value)} placeholder="oauth2" autoComplete="username" />
+              </label>
+              <label className="block space-y-2">
+                <span>Jeton d’accès GitLab <span className="text-muted-foreground">(dépôt privé)</span></span>
+                <Input type="password" value={repositoryToken} onChange={(e) => setRepositoryToken(e.target.value)} placeholder="glpat-…" autoComplete="off" />
+              </label>
+            </div>
             <Select value={repositoryMode} onValueChange={setRepositoryMode}>
               <SelectTrigger aria-label="Opération"><SelectValue /></SelectTrigger>
               <SelectContent><SelectItem value="add">Ajouter des modules</SelectItem><SelectItem value="update">Mettre à jour le code existant</SelectItem></SelectContent>
             </Select>
             <label className="block space-y-2"><span>Noms techniques, séparés par des virgules</span><Input value={repositoryModules} onChange={(e) => setRepositoryModules(e.target.value)} placeholder="sale_exception, sale_order_type" /></label>
             <p className="text-sm text-muted-foreground">{repositoryMode === "add" ? "Laisse les noms vides pour ajouter tous les modules du dépôt. Tout doublon bloque l’import." : "Les noms sont obligatoires. Seules les copies gérées dans addons-store sont remplacées, avec sauvegarde et restauration en cas d’échec."}</p>
-            <p className="text-sm text-muted-foreground">Après l’import, lance l’installation ou la mise à jour dans la base Odoo. Pour un dépôt privé, configure les accès HTTPS dans Git ; ne saisis aucun jeton dans l’URL.</p>
+            <p className="text-sm text-muted-foreground">Après l’import, lance l’installation ou la mise à jour dans la base Odoo. Pour un dépôt privé, saisis ici un jeton avec le droit de lecture. Il n’est ajouté ni à l’URL ni aux logs, et n’est pas conservé après l’opération.</p>
             <Button disabled={loading || !selectedProjectReady || !repositoryUrl.trim() || Boolean(repositoryUrlError) || !repositoryBranch.trim() || (repositoryMode === "update" && !repositoryModules.trim())} onClick={async () => {
               if (!selectedProject) return;
-              const job = await createJob("repository_modules", { project: selectedProject.name, url: repositoryUrl.trim(), branch: repositoryBranch.trim(), mode: repositoryMode, modules: repositoryModules.trim() });
-              if (job) setRepositoryOpen(false);
+              const job = await createJob("repository_modules", { project: selectedProject.name, url: repositoryUrl.trim(), branch: repositoryBranch.trim(), mode: repositoryMode, modules: repositoryModules.trim(), username: repositoryUsername.trim(), token: repositoryToken.trim() });
+              if (job) {
+                setRepositoryToken("");
+                setRepositoryOpen(false);
+              }
             }}>{repositoryMode === "add" ? "Ajouter depuis le dépôt" : "Sauvegarder et remplacer le code"}</Button>
           </div>
         </DialogContent>

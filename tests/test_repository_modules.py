@@ -1,4 +1,5 @@
 import subprocess
+import shlex
 from pathlib import Path
 from unittest import mock
 
@@ -37,6 +38,29 @@ class RepositoryModulesTests(ModuleLayoutTests):
         self.assertEqual(web.validate_module_repository(valid_url, '18.0', 'add', '')[0], valid_url)
         with self.assertRaises(ValueError):
             web.validate_module_repository('https://example.com/a', '18.0', 'update', '')
+
+    def test_repository_credentials_validation(self):
+        self.assertEqual(web.validate_repository_credentials('', ''), ('', ''))
+        self.assertEqual(web.validate_repository_credentials('', 'secret'), ('oauth2', 'secret'))
+        self.assertEqual(web.validate_repository_credentials('benjamin', 'secret'), ('benjamin', 'secret'))
+        with self.assertRaises(ValueError):
+            web.validate_repository_credentials('benjamin', '')
+
+    def test_repository_credentials_are_temporary_and_absent_from_command(self):
+        def authenticated_clone(command, **kwargs):
+            rendered_command = ' '.join(command)
+            self.assertNotIn('secret-token', rendered_command)
+            helper = next(argument for argument in command if argument.startswith('credential.helper=store --file='))
+            helper_command = helper.removeprefix('credential.helper=')
+            credentials_path = Path(shlex.split(helper_command)[1].removeprefix('--file='))
+            self.assertEqual(credentials_path.stat().st_mode & 0o777, 0o600)
+            self.assertIn('benjamin:secret-token@', credentials_path.read_text())
+            return self.clone(command, **kwargs)
+
+        with mock.patch.object(web.subprocess, 'run', side_effect=authenticated_clone):
+            web.repository_modules_job(
+                DummyJob(), self.project, 'https://example.com/addons.git', '18.0',
+                'add', [], 'benjamin', 'secret-token')
 
     def test_repository_add_select_and_conflict(self):
         self.run_import(names=['alpha'])
