@@ -817,6 +817,14 @@ export default function Home() {
   }, [filteredModules, modulePage]);
 
   const moduleByName = useMemo(() => new Map(modules.map((module) => [module.name, module])), [modules]);
+  const installedSoclePresetIds = useMemo<Set<string>>(
+    () => new Set<string>(
+      SOCLE_PRESETS
+        .filter((preset) => preset.modules.every((moduleName) => moduleByName.get(moduleName)?.state === "installed"))
+        .map((preset) => preset.id),
+    ),
+    [moduleByName],
+  );
   const pendingModulesWithMissingCode = useMemo(
     () => updatePendingModules.filter((module) => !module.code_available),
     [updatePendingModules],
@@ -1296,12 +1304,20 @@ export default function Home() {
     });
   }
 
+  function openSocleDialog() {
+    setSelectedSoclePresets(new Set(installedSoclePresetIds));
+    setSocleDialogOpen(true);
+    void refreshModules();
+  }
+
   async function installSelectedSocle() {
     if (!selectedProject || !selectedDb || !selectedSoclePresets.size) return;
+    const presetsToInstall = Array.from(selectedSoclePresets).filter((presetId) => !installedSoclePresetIds.has(presetId));
+    if (!presetsToInstall.length) return;
     const job = await createJob("install_socle", {
       project: selectedProject.name,
       db: selectedDb,
-      presets: Array.from(selectedSoclePresets).join(","),
+      presets: presetsToInstall.join(","),
     });
     if (job) {
       setSocleDialogOpen(false);
@@ -2623,7 +2639,7 @@ export default function Home() {
                         <Button
                           className="w-full"
                           variant="outline"
-                          onClick={() => setSocleDialogOpen(true)}
+                          onClick={openSocleDialog}
                           disabled={!selectedProjectReady || loading}
                         >
                           <Boxes className="h-4 w-4" />
@@ -3511,25 +3527,30 @@ export default function Home() {
           <div className="grid gap-3 sm:grid-cols-2">
             {SOCLE_PRESETS.map((preset) => {
               const missing = preset.modules.filter((moduleName) => !moduleByName.has(moduleName));
+              const installed = preset.modules.filter((moduleName) => moduleByName.get(moduleName)?.state === "installed");
               const unavailable = missing.length > 0;
+              const alreadyInstalled = !unavailable && installed.length === preset.modules.length;
               return (
                 <label
                   key={preset.id}
                   className={cn(
                     "flex items-start gap-3 rounded-md border p-3 text-sm",
-                    unavailable ? "cursor-not-allowed opacity-55" : "cursor-pointer hover:bg-muted/45",
+                    unavailable || alreadyInstalled ? "cursor-not-allowed bg-muted/35 opacity-60" : "cursor-pointer hover:bg-muted/45",
                   )}
                 >
                   <Checkbox
                     className="mt-0.5"
-                    checked={selectedSoclePresets.has(preset.id)}
-                    disabled={unavailable || loading}
+                    checked={alreadyInstalled || selectedSoclePresets.has(preset.id)}
+                    disabled={unavailable || alreadyInstalled || loading}
                     onCheckedChange={(checked) => toggleSoclePreset(preset.id, checked === true)}
                   />
                   <span className="min-w-0">
                     <span className="block font-medium">{preset.label}</span>
                     <span className="mt-1 block break-all text-xs text-muted-foreground">{preset.modules.join(" + ")}</span>
                     {unavailable && <span className="mt-1 block text-xs text-destructive">Absent : {missing.join(", ")}</span>}
+                    {!unavailable && installed.length > 0 && (
+                      <span className="mt-1 block text-xs text-muted-foreground">Déjà installé : {installed.join(", ")}</span>
+                    )}
                   </span>
                 </label>
               );
@@ -3546,7 +3567,10 @@ export default function Home() {
               <RefreshCcw className="h-4 w-4" />
               Vérifier / créer les liens uniquement
             </Button>
-            <Button disabled={!selectedDb || !selectedSoclePresets.size || loading} onClick={installSelectedSocle}>
+            <Button
+              disabled={!selectedDb || loading || !Array.from(selectedSoclePresets).some((presetId) => !installedSoclePresetIds.has(presetId))}
+              onClick={installSelectedSocle}
+            >
               {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Boxes className="h-4 w-4" />}
               Installer la sélection
             </Button>

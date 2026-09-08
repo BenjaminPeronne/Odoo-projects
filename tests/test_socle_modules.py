@@ -56,6 +56,22 @@ class SocleModulesTests(ModuleLayoutTests):
         with self.assertRaisesRegex(ValueError, "inconnues"):
             web.validate_socle_presets("sales,unknown")
 
+    def test_already_installed_socle_modules_are_not_reinstalled(self):
+        sale = self.create_enterprise_module("sale_management")
+        calls = []
+
+        with mock.patch.object(web, "ensure_enterprise_module_links", return_value={"sale_management"}), \
+                mock.patch.object(web, "module_dirs", return_value=iter([sale])), \
+                mock.patch.object(web, "installed_modules", return_value={
+                    "sale_management": {"state": "installed"},
+                }), \
+                mock.patch.object(web, "module_command_job", side_effect=lambda *args: calls.append(args)):
+            job = DummyJob()
+            web.install_socle_job(job, self.project, "test_db", "sales")
+
+        self.assertEqual([], calls)
+        self.assertTrue(any("déjà entièrement installé" in line for line in job.lines))
+
     def test_imported_modules_are_installed_or_updated_according_to_database_state(self):
         alpha = self.create_enterprise_module("alpha")
         beta = self.create_enterprise_module("beta")
