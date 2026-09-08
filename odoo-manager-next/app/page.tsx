@@ -286,6 +286,7 @@ const DOCKER_CONFIRM_DELAY_MS = 700;
 const API_TIMEOUT_MS = 20_000;
 const UPLOAD_TIMEOUT_MS = 120_000;
 const MODULES_PER_PAGE = 50;
+const LOG_DESCRIPTION_MAX_LENGTH = 240;
 
 class ApiUnavailableError extends Error {
   constructor(message = `Service local SDK Local Manager indisponible. L'application n'arrive pas à joindre l'API locale ${API_BASE || "http://127.0.0.1:18765"}.`) {
@@ -659,6 +660,7 @@ export default function Home() {
   const [selectedSoclePresets, setSelectedSoclePresets] = useState<Set<string>>(new Set());
   const [jobs, setJobs] = useState<Job[]>([]);
   const [selectedJobId, setSelectedJobId] = useState<number | null>(null);
+  const [logDescriptionExpanded, setLogDescriptionExpanded] = useState(false);
   const [externalLogView, setExternalLogView] = useState<{ title: string; content: string; project: string } | null>(null);
   const [loading, setLoading] = useState(false);
   const [openingOdoo, setOpeningOdoo] = useState(false);
@@ -1984,6 +1986,14 @@ export default function Home() {
   const outputTitle = scopedExternalLogView?.title || selectedJob?.title || "Aucune action sélectionnée";
   const outputContent = scopedExternalLogView?.content || selectedJob?.output || selectedJob?.lines?.join("\n") || "Aucune sortie.";
   const outputSource = scopedExternalLogView ? `external:${scopedExternalLogView.title}` : `job:${selectedJob?.id || "none"}`;
+  const outputTitleIsLong = outputTitle.length > LOG_DESCRIPTION_MAX_LENGTH;
+  const displayedOutputTitle = outputTitleIsLong && !logDescriptionExpanded
+    ? `${outputTitle.slice(0, LOG_DESCRIPTION_MAX_LENGTH).trimEnd()}…`
+    : outputTitle;
+
+  useEffect(() => {
+    setLogDescriptionExpanded(false);
+  }, [outputSource]);
 
   useEffect(() => {
     if (activeTab !== "logs") return;
@@ -2994,7 +3004,17 @@ export default function Home() {
                     <CardHeader className="min-w-0 gap-3 min-[1900px]:flex-row min-[1900px]:items-start min-[1900px]:justify-between">
                       <div className="min-w-0 flex-1">
                         <CardTitle>Sortie</CardTitle>
-                        <CardDescription className="break-words">{outputTitle}</CardDescription>
+                        <CardDescription className="break-words">{displayedOutputTitle}</CardDescription>
+                        {outputTitleIsLong && (
+                          <button
+                            type="button"
+                            className="mt-1 text-sm font-medium text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                            aria-expanded={logDescriptionExpanded}
+                            onClick={() => setLogDescriptionExpanded((expanded) => !expanded)}
+                          >
+                            {logDescriptionExpanded ? "Voir moins" : "Voir plus"}
+                          </button>
+                        )}
                       </div>
                       <div className="grid w-full min-w-0 grid-cols-1 gap-2 sm:grid-cols-3 min-[1900px]:w-auto min-[1900px]:shrink-0">
                         <Button className="w-full justify-start sm:justify-center" variant="outline" size="sm" onClick={showDiagnostics} disabled={!selectedProjectReady}>
