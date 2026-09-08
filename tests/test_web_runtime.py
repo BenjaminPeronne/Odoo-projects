@@ -783,7 +783,7 @@ class DiagnosticModuleTests(unittest.TestCase):
             "protexodoo": {"state": "to upgrade"},
         }
 
-        candidates, invalid, blockers = web.local_ignore_plan(
+        candidates, invalid, automatic = web.local_ignore_plan(
             states,
             {"protexodoo"},
             {"auto_backup", "auto_backup_sh"},
@@ -792,15 +792,15 @@ class DiagnosticModuleTests(unittest.TestCase):
 
         self.assertEqual(candidates, ["auto_backup", "auto_backup_sh"])
         self.assertEqual(invalid, [])
-        self.assertEqual(blockers, {})
+        self.assertEqual(automatic, [])
 
-    def test_local_ignore_refuses_a_dependency_of_an_active_available_module(self):
+    def test_local_ignore_automatically_excludes_an_active_dependent_module(self):
         states = {
             "account_invoice_margin": {"state": "to upgrade"},
             "protexodoo": {"state": "to upgrade"},
         }
 
-        candidates, invalid, blockers = web.local_ignore_plan(
+        candidates, invalid, automatic = web.local_ignore_plan(
             states,
             {"protexodoo"},
             {"account_invoice_margin"},
@@ -809,24 +809,42 @@ class DiagnosticModuleTests(unittest.TestCase):
 
         self.assertEqual(candidates, ["account_invoice_margin"])
         self.assertEqual(invalid, [])
-        self.assertEqual(blockers, {"account_invoice_margin": ["protexodoo"]})
+        self.assertEqual(automatic, ["protexodoo"])
 
-    def test_local_ignore_accepts_available_dependent_modules_selected_together(self):
+    def test_local_ignore_only_accepts_requested_modules_with_missing_code(self):
         states = {
             "protexodoo": {"state": "to upgrade"},
             "protex_studio": {"state": "to upgrade"},
         }
 
-        candidates, invalid, blockers = web.local_ignore_plan(
+        candidates, invalid, automatic = web.local_ignore_plan(
             states,
             {"protexodoo", "protex_studio"},
             {"protexodoo", "protex_studio"},
             [("protex_studio", "protexodoo")],
         )
 
-        self.assertEqual(candidates, ["protex_studio", "protexodoo"])
+        self.assertEqual(candidates, [])
+        self.assertEqual(invalid, ["protex_studio", "protexodoo"])
+        self.assertEqual(automatic, [])
+
+    def test_local_ignore_cascades_through_multiple_active_dependents(self):
+        states = {
+            "product_sequence": {"state": "to upgrade"},
+            "emph_base": {"state": "to upgrade"},
+            "emph_sale": {"state": "installed"},
+        }
+
+        candidates, invalid, automatic = web.local_ignore_plan(
+            states,
+            {"emph_base", "emph_sale"},
+            {"product_sequence"},
+            [("emph_base", "product_sequence"), ("emph_sale", "emph_base")],
+        )
+
+        self.assertEqual(candidates, ["product_sequence"])
         self.assertEqual(invalid, [])
-        self.assertEqual(blockers, {})
+        self.assertEqual(automatic, ["emph_base", "emph_sale"])
 
     def test_local_ignore_accepts_dependency_of_an_already_excluded_module(self):
         states = {
@@ -834,7 +852,7 @@ class DiagnosticModuleTests(unittest.TestCase):
             "protexodoo": {"state": "installed"},
         }
 
-        candidates, invalid, blockers = web.local_ignore_plan(
+        candidates, invalid, automatic = web.local_ignore_plan(
             states,
             {"protexodoo"},
             {"account_invoice_margin"},
@@ -844,7 +862,7 @@ class DiagnosticModuleTests(unittest.TestCase):
 
         self.assertEqual(candidates, ["account_invoice_margin"])
         self.assertEqual(invalid, [])
-        self.assertEqual(blockers, {})
+        self.assertEqual(automatic, [])
 
     def test_local_ignored_modules_are_persisted_per_workspace_project_and_database(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -893,6 +911,40 @@ class DiagnosticModuleTests(unittest.TestCase):
         self.assertNotIn("delete", update_query.lower())
         remember_ignored.assert_called_once_with("DEMO", "demo", ["auto_backup", "auto_backup_sh"])
         self.assertIn("Aucune donnée métier", "\n".join(job.lines))
+
+    @patch("odoo_manager_web.remember_ignored_missing_modules")
+    @patch("odoo_manager_web.db_query_lines")
+    @patch("odoo_manager_web.module_dirs")
+    @patch("odoo_manager_web.installed_modules")
+    @patch("odoo_manager_web.container_status", return_value="running")
+    @patch("odoo_manager_web.validate_project", return_value="DEMO")
+    def test_cancel_missing_operations_resets_and_excludes_dependents_automatically(
+        self,
+        _validate_project,
+        _container_status,
+        installed_modules,
+        module_dirs,
+        db_query_lines,
+        remember_ignored,
+    ):
+        installed_modules.return_value = {
+            "product_sequence": {"state": "to upgrade"},
+            "emph_base": {"state": "to upgrade"},
+        }
+        module_dirs.return_value = [Path("/addons/emph_base")]
+        db_query_lines.side_effect = [
+            ["emph_base|product_sequence"],
+            ["emph_base|installed", "product_sequence|installed"],
+        ]
+        job = self.LogJob()
+
+        web.cancel_missing_module_operations_job(job, "DEMO", "demo", "product_sequence")
+
+        update_query = db_query_lines.call_args_list[1].args[2]
+        self.assertIn("'emph_base'", update_query)
+        self.assertIn("'product_sequence'", update_query)
+        remember_ignored.assert_called_once_with("DEMO", "demo", ["emph_base", "product_sequence"])
+        self.assertIn("Dépendants exclus automatiquement", "\n".join(job.lines))
 
 
 class DatabaseNeutralizationTests(unittest.TestCase):

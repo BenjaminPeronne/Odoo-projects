@@ -1239,20 +1239,24 @@ def local_ignore_plan(states, available_names, requested, dependencies, already_
         for name in requested
         if name in states
         and states[name].get("state") in TRANSIENT_MODULE_STATES
+        and name not in available_names
         and name not in DATABASE_ONLY_MODULES
     )
     invalid = sorted(requested - set(candidates))
-    candidate_names = set(candidates)
-    blockers = {}
-    for dependent, dependency in dependencies:
-        if dependency not in candidate_names or dependent in candidate_names or dependent in already_excluded:
-            continue
-        if dependent not in available_names:
-            continue
-        if states.get(dependent, {}).get("state") not in ACTIVE_MODULE_STATES:
-            continue
-        blockers.setdefault(dependency, set()).add(dependent)
-    return candidates, invalid, {name: sorted(values) for name, values in sorted(blockers.items())}
+    excluded = set(candidates) | already_excluded
+    automatic = set()
+    changed = True
+    while changed:
+        changed = False
+        for dependent, dependency in dependencies:
+            if dependency not in excluded or dependent in excluded:
+                continue
+            if states.get(dependent, {}).get("state") not in ACTIVE_MODULE_STATES:
+                continue
+            excluded.add(dependent)
+            automatic.add(dependent)
+            changed = True
+    return candidates, invalid, sorted(automatic)
 
 
 def modules_missing_from_code(states, available_names, accepted_states):
@@ -1990,7 +1994,7 @@ def cancel_missing_module_operations_job(job, project, db_name, modules):
         if separator:
             dependencies.append((dependent, dependency))
 
-    candidates, invalid, blockers = local_ignore_plan(
+    candidates, invalid, automatic_exclusions = local_ignore_plan(
         states,
         available_names,
         requested,
@@ -2001,15 +2005,11 @@ def cancel_missing_module_operations_job(job, project, db_name, modules):
         raise RuntimeError(
             "Ces modules ne sont pas des opérations en attente avec code absent: " + ", ".join(invalid)
         )
-    if blockers:
-        details = "; ".join(
-            f"{name} est requis par {', '.join(dependents)}" for name, dependents in blockers.items()
-        )
-        raise RuntimeError(
-            "Annulation refusée car des modules actifs en dépendent. " + details + ". Restaure leur code avant la mise à jour."
-        )
-
-    quoted = ",".join(f"'{name}'" for name in candidates)
+    reset_modules = sorted(set(candidates) | {
+        name for name in automatic_exclusions
+        if states.get(name, {}).get("state") in TRANSIENT_MODULE_STATES
+    })
+    quoted = ",".join(f"'{name}'" for name in reset_modules)
     query = (
         "begin; "
         "lock table ir_module_module in row exclusive mode; "
@@ -2023,19 +2023,28 @@ def cancel_missing_module_operations_job(job, project, db_name, modules):
     changed = {}
     for line in changed_lines:
         name, separator, state = line.partition("|")
-        if separator and name in candidates:
+        if separator and name in reset_modules:
             changed[name] = state
-    if set(changed) != set(candidates):
-        missing = sorted(set(candidates) - set(changed))
+    if set(changed) != set(reset_modules):
+        missing = sorted(set(reset_modules) - set(changed))
         raise RuntimeError("La base n'a pas confirmé la modification de: " + ", ".join(missing))
 
-    retained = [name for name in candidates if changed[name] == "installed"]
+    retained = sorted(
+        {name for name, state in changed.items() if state == "installed"}
+        | {name for name in automatic_exclusions if states.get(name, {}).get("state") == "installed"}
+    )
     if retained:
         remember_ignored_missing_modules(project, db_name, retained)
 
-    job.add("Modules exclus des mises à jour uniquement sur cette copie locale:")
+    job.add("Opérations annulées pour les modules dont le code est absent:")
     for name in candidates:
         job.add(f"- {name}: {states[name].get('state')} -> {changed[name]}")
+    if automatic_exclusions:
+        job.add("Dépendants exclus automatiquement de cette mise à jour locale:")
+        for name in automatic_exclusions:
+            previous = states.get(name, {}).get("state", "inconnu")
+            current = changed.get(name, previous)
+            job.add(f"- {name}: {previous} -> {current}")
     job.add("Aucune donnée métier, table ou pièce jointe n'a été supprimée.")
     job.add("Les prochaines mises à jour utiliseront uniquement les modules non exclus dont le code est disponible.")
 

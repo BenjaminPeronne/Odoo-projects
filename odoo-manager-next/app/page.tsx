@@ -3732,6 +3732,9 @@ export default function Home() {
                   <span>
                     Odoo avait prévu de les installer, mettre à jour ou supprimer, mais leur dossier n’existe plus dans le projet. Restaure leur code si tu veux conserver l’opération. Sur une copie locale de test, tu peux aussi annuler leur opération sans désinstaller les modules déjà actifs.
                   </span>
+                  <span>
+                    Les modules qui en dépendent seront détectés et exclus automatiquement de cette mise à jour locale afin de conserver un ensemble cohérent.
+                  </span>
                 </div>
               </div>
               <label className="flex cursor-pointer items-center gap-3 rounded-md border border-red-200 bg-white px-3 py-2 font-medium dark:border-red-800 dark:bg-red-950/55">
@@ -3765,7 +3768,7 @@ export default function Home() {
                 Annuler localement {missingModulesToIgnore.size || "la sélection"} opération(s)
               </Button>
               <p className="text-xs text-red-800 dark:text-red-200">
-                Cette action ne désinstalle aucun module et ne supprime aucune donnée. Elle est refusée si un module actif dépend encore d’un élément sélectionné.
+                Cette action ne désinstalle aucun module et ne supprime aucune donnée. Le détail des exclusions automatiques apparaîtra dans les logs.
               </p>
             </div>
           ) : null}
