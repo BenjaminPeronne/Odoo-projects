@@ -21,9 +21,20 @@ class RepositoryModulesTests(ModuleLayoutTests):
             web.repository_modules_job(DummyJob(), self.project, 'https://example.com/addons.git', '18.0', mode, names or [])
 
     def test_repository_validation(self):
-        for url in ('http://example.com/a', 'https://token@example.com/a', 'https://example.com/a?token=x', 'file:///tmp/a'):
+        invalid_urls = (
+            'http://example.com/a',
+            'https://token@example.com/a',
+            'https://example.com/a?token=x',
+            'file:///tmp/a',
+            'https://gitlab.example/https://gitlab.example/team/repository.git',
+            'https://gitlab.example/team/repository.gitteam/repository.git',
+            'https://gitlab.example/team\\repository.git',
+        )
+        for url in invalid_urls:
             with self.assertRaises(ValueError):
                 web.validate_module_repository(url, '18.0', 'add', '')
+        valid_url = 'https://gitlab.example/team/repository.git'
+        self.assertEqual(web.validate_module_repository(valid_url, '18.0', 'add', '')[0], valid_url)
         with self.assertRaises(ValueError):
             web.validate_module_repository('https://example.com/a', '18.0', 'update', '')
 
@@ -65,6 +76,13 @@ class RepositoryModulesTests(ModuleLayoutTests):
             with self.assertRaises(RuntimeError):
                 web.repository_modules_job(DummyJob(), self.project, 'https://example.com/addons.git', '18.0', 'add', [])
         self.assertEqual(list((self.project_root / 'odoo/addons-store').iterdir()), [])
+
+    def test_repository_clone_reports_missing_credentials(self):
+        failure = subprocess.CompletedProcess([], 128, stderr='fatal: unable to get password from user')
+        with mock.patch.object(web.subprocess, 'run', return_value=failure):
+            with self.assertRaisesRegex(RuntimeError, 'authentification HTTPS'):
+                web.repository_modules_job(
+                    DummyJob(), self.project, 'https://example.com/addons.git', '18.0', 'add', [])
 
     def test_repository_symlink_rejected(self):
         def clone_link(command, **kwargs):

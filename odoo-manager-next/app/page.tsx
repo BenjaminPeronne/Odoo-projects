@@ -552,6 +552,35 @@ function odooAccessUrl(project?: Project, db?: string) {
   }
 }
 
+function moduleRepositoryUrlError(value: string) {
+  const rawUrl = value.trim();
+  if (!rawUrl) return "";
+  const invalidMessage = "Colle une seule URL HTTPS complète, par exemple https://gitlab.example/equipe/depot.git.";
+  if (rawUrl.toLowerCase().split("https://").length !== 2 || rawUrl.includes("\\") || /\s/.test(rawUrl)) {
+    return invalidMessage;
+  }
+  try {
+    const parsed = new URL(rawUrl);
+    const normalizedPath = parsed.pathname.toLowerCase();
+    if (
+      parsed.protocol !== "https:" ||
+      !parsed.hostname ||
+      !parsed.pathname.replaceAll("/", "") ||
+      parsed.username ||
+      parsed.password ||
+      parsed.search ||
+      parsed.hash ||
+      parsed.pathname.includes("://") ||
+      (normalizedPath.includes(".git") && normalizedPath.indexOf(".git") !== normalizedPath.length - 4)
+    ) {
+      return invalidMessage;
+    }
+  } catch {
+    return invalidMessage;
+  }
+  return "";
+}
+
 function compactWorkspacePath(path: string | undefined, workspace: string | undefined) {
   if (!path) return "";
   if (!workspace) return path;
@@ -628,6 +657,7 @@ export default function Home() {
   const [repositoryBranch, setRepositoryBranch] = useState("");
   const [repositoryMode, setRepositoryMode] = useState("add");
   const [repositoryModules, setRepositoryModules] = useState("");
+  const repositoryUrlError = moduleRepositoryUrlError(repositoryUrl);
   const [zipDialogOpen, setZipDialogOpen] = useState(false);
   const [createDbOpen, setCreateDbOpen] = useState(false);
   const [restoreDbOpen, setRestoreDbOpen] = useState(false);
@@ -2472,7 +2502,7 @@ export default function Home() {
                         </Button>
                         <Button className="w-full" variant="outline" onClick={() => setZipDialogOpen(true)} disabled={!selectedProjectReady}>
                           <FileArchive className="h-4 w-4" />
-                          Ajouter un ZIP
+                          Ajouter un pauvre zip
                         </Button>
                       </div>
                     </CardHeader>
@@ -3299,7 +3329,17 @@ export default function Home() {
             <DialogDescription>Copie le code dans le projet {selectedProject?.name}. Choisis une branche compatible avec sa version Odoo.</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
-            <label className="block space-y-2"><span>URL HTTPS du dépôt</span><Input value={repositoryUrl} onChange={(e) => setRepositoryUrl(e.target.value)} placeholder="https://github.com/OCA/sale-workflow.git" /></label>
+            <label className="block space-y-2">
+              <span>URL HTTPS du dépôt</span>
+              <Input
+                value={repositoryUrl}
+                onChange={(e) => setRepositoryUrl(e.target.value)}
+                placeholder="https://github.com/OCA/sale-workflow.git"
+                aria-invalid={Boolean(repositoryUrlError)}
+                aria-describedby={repositoryUrlError ? "repository-url-error" : undefined}
+              />
+              {repositoryUrlError ? <span id="repository-url-error" className="block text-sm text-destructive">{repositoryUrlError}</span> : null}
+            </label>
             <label className="block space-y-2"><span>Branche ou tag</span><Input value={repositoryBranch} onChange={(e) => setRepositoryBranch(e.target.value)} placeholder="18.0" /></label>
             <Select value={repositoryMode} onValueChange={setRepositoryMode}>
               <SelectTrigger aria-label="Opération"><SelectValue /></SelectTrigger>
@@ -3308,7 +3348,7 @@ export default function Home() {
             <label className="block space-y-2"><span>Noms techniques, séparés par des virgules</span><Input value={repositoryModules} onChange={(e) => setRepositoryModules(e.target.value)} placeholder="sale_exception, sale_order_type" /></label>
             <p className="text-sm text-muted-foreground">{repositoryMode === "add" ? "Laisse les noms vides pour ajouter tous les modules du dépôt. Tout doublon bloque l’import." : "Les noms sont obligatoires. Seules les copies gérées dans addons-store sont remplacées, avec sauvegarde et restauration en cas d’échec."}</p>
             <p className="text-sm text-muted-foreground">Après l’import, lance l’installation ou la mise à jour dans la base Odoo. Pour un dépôt privé, configure les accès HTTPS dans Git ; ne saisis aucun jeton dans l’URL.</p>
-            <Button disabled={loading || !selectedProjectReady || !repositoryUrl.trim() || !repositoryBranch.trim() || (repositoryMode === "update" && !repositoryModules.trim())} onClick={async () => {
+            <Button disabled={loading || !selectedProjectReady || !repositoryUrl.trim() || Boolean(repositoryUrlError) || !repositoryBranch.trim() || (repositoryMode === "update" && !repositoryModules.trim())} onClick={async () => {
               if (!selectedProject) return;
               const job = await createJob("repository_modules", { project: selectedProject.name, url: repositoryUrl.trim(), branch: repositoryBranch.trim(), mode: repositoryMode, modules: repositoryModules.trim() });
               if (job) setRepositoryOpen(false);

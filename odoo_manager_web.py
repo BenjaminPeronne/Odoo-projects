@@ -2752,10 +2752,18 @@ def link_modules_job(job, project, source):
 def validate_module_repository(url, branch, mode, modules):
     url = str(url or "").strip()
     parsed = urllib.parse.urlsplit(url)
+    normalized_path = parsed.path.casefold()
+    contains_embedded_url = "://" in parsed.path or url.casefold().count("https://") != 1
+    contains_trailing_git_path = ".git" in normalized_path and normalized_path.find(".git") != len(normalized_path) - 4
     if (parsed.scheme != "https" or not parsed.hostname or not parsed.path.strip("/")
             or parsed.username is not None or parsed.password is not None
-            or parsed.query or parsed.fragment or any(c.isspace() or ord(c) < 32 for c in url)):
-        raise ValueError("Utilise l’URL HTTPS du dépôt, sans identifiants, paramètres ni fragment.")
+            or parsed.query or parsed.fragment or "\\" in url
+            or contains_embedded_url or contains_trailing_git_path
+            or any(c.isspace() or ord(c) < 32 for c in url)):
+        raise ValueError(
+            "L’URL du dépôt est mal formée. Colle une seule URL HTTPS complète, "
+            "sans identifiants, paramètres ni fragment."
+        )
     branch = validate_git_ref(branch)
     if mode not in {"add", "update"}:
         raise ValueError("Mode d’import invalide.")
@@ -2763,6 +2771,26 @@ def validate_module_repository(url, branch, mode, modules):
     if mode == "update" and not names:
         raise ValueError("Indique les noms techniques des modules à remplacer.")
     return url, branch, mode, names
+
+
+def repository_clone_error(stderr):
+    details = str(stderr or "").casefold()
+    if any(marker in details for marker in (
+            "unable to get password", "could not read username", "authentication failed",
+            "http basic: access denied", "terminal prompts disabled", "error: 401", "error: 403")):
+        return RuntimeError(
+            "GitLab demande une authentification HTTPS. Enregistre d’abord un accès valide "
+            "dans le gestionnaire d’identifiants Git de cet ordinateur, puis relance l’import."
+        )
+    if any(marker in details for marker in (
+            "remote branch", "couldn't find remote ref", "could not find remote branch",
+            "not found in upstream origin")):
+        return RuntimeError("La branche ou le tag demandé est introuvable dans ce dépôt.")
+    if any(marker in details for marker in ("could not resolve host", "failed to connect", "connection timed out")):
+        return RuntimeError("GitLab est inaccessible depuis cet ordinateur. Vérifie le réseau et le DNS.")
+    return RuntimeError(
+        "Récupération Git impossible. Vérifie l’URL, la branche et les accès HTTPS configurés dans Git."
+    )
 
 
 def repository_modules_job(job, project, url, branch, mode, names):
@@ -2784,7 +2812,7 @@ def repository_modules_job(job, project, url, branch, mode, names):
                                 timeout=300, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
                                 **hidden_process_kwargs())
         if result.returncode:
-            raise RuntimeError("Récupération Git impossible. Vérifie l’URL, la branche et les accès HTTPS configurés dans Git.")
+            raise repository_clone_error(result.stderr)
         # Reject symlinks before discovery/copy, including links outside the checkout.
         if any(path.is_symlink() for path in checkout.rglob("*") if ".git" not in path.relative_to(checkout).parts):
             raise ValueError("Ce dépôt contient des liens symboliques : import refusé.")
