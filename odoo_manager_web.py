@@ -47,6 +47,7 @@ from odoo_manager_core.platform import (
     wsl_command_prefix,
     wsl_command_with_cwd,
     wsl_executable_available,
+    wsl_execution_path,
     wsl_path_context,
     wsl_unc_path,
 )
@@ -1073,11 +1074,20 @@ def linux_path_is_relative_to(path, parent):
     return path == parent or path.startswith(parent.rstrip("/") + "/")
 
 
-def wsl_module_metadata(project, linux_path, source_path, is_link, distribution):
-    link_parent = workspace_execution_path(project_addons_link_parent(project), SETTINGS, WORKSPACE)
-    storage_parent = workspace_execution_path(project_addons_storage_parent(project), SETTINGS, WORKSPACE)
-    legacy_parent = workspace_execution_path(project_legacy_addons_storage_parent(project), SETTINGS, WORKSPACE)
-    imports_roots = [workspace_execution_path(root, SETTINGS, WORKSPACE) for root in module_import_roots(project)]
+def wsl_module_metadata(
+    project,
+    linux_path,
+    source_path,
+    is_link,
+    distribution,
+    host_path="",
+    host_source_path="",
+):
+    translate = lambda path: wsl_execution_path(path, distribution)
+    link_parent = translate(project_addons_link_parent(project))
+    storage_parent = translate(project_addons_storage_parent(project))
+    legacy_parent = translate(project_legacy_addons_storage_parent(project))
+    imports_roots = [translate(root) for root in module_import_roots(project)]
     parent = posixpath.dirname(linux_path)
     source_parent = posixpath.dirname(source_path)
     name = posixpath.basename(linux_path)
@@ -1144,11 +1154,12 @@ def wsl_module_metadata(project, linux_path, source_path, is_link, distribution)
         removal_note = "Module hors du dossier odoo/addons du projet."
         removable = False
 
-    host_path = wsl_unc_path(distribution, linux_path)
+    host_path = host_path or wsl_unc_path(distribution, linux_path)
+    host_source_path = host_source_path or wsl_unc_path(distribution, source_path)
     return host_path, {
         "path": host_path,
-        "link_path": wsl_unc_path(distribution, link_path) if link_path else "",
-        "source_path": wsl_unc_path(distribution, source_path),
+        "link_path": host_path if link_path else "",
+        "source_path": host_source_path,
         "path_kind": kind,
         "removable": removable,
         "removal_mode": removal_mode,
@@ -1158,8 +1169,7 @@ def wsl_module_metadata(project, linux_path, source_path, is_link, distribution)
 
 def wsl_module_dirs(project):
     context = active_workspace_wsl_context()
-    if not context:
-        return []
+    distribution = context.distribution if context else SETTINGS.wsl_distribution
     candidates = [
         project_addons_link_parent(project),
         project_addons_storage_parent(project),
@@ -1168,7 +1178,7 @@ def wsl_module_dirs(project):
         project_odoo_root(project) / "addons-store" / "odoo_entreprise",
         project_odoo_root(project) / "addons-store" / "odoo_enterprise",
     ]
-    linux_candidates = [workspace_execution_path(path, SETTINGS, WORKSPACE) for path in candidates]
+    linux_candidates = [wsl_execution_path(path, distribution) for path in candidates]
     script = (
         'found_parent=0; for parent do [ -d "$parent" ] && found_parent=1; done; '
         '[ "$found_parent" -eq 1 ] || { echo "Aucun dossier addons lisible depuis WSL." >&2; exit 3; }; '
@@ -1178,11 +1188,13 @@ def wsl_module_dirs(project):
         '[ -f "$child/__manifest__.py" ] || [ -f "$child/__openerp__.py" ] || continue; '
         'target=$(readlink -f -- "$child" 2>/dev/null || printf "%s" "$child"); '
         'if [ -L "$child" ]; then linked=1; else linked=0; fi; '
-        'printf "%s\\t%s\\t%s\\n" "$child" "$target" "$linked"; '
+        'child_windows=$(wslpath -w "$child" 2>/dev/null || printf "%s" "$child"); '
+        'target_windows=$(wslpath -w "$target" 2>/dev/null || printf "%s" "$target"); '
+        'printf "%s\\t%s\\t%s\\t%s\\t%s\\n" "$child" "$target" "$linked" "$child_windows" "$target_windows"; '
         'done; done'
     )
     code, output = run_capture(
-        [*workspace_tool_prefix(), "sh", "-c", script, "odoo-manager", *linux_candidates],
+        [*wsl_command_prefix(distribution), "sh", "-c", script, "odoo-manager", *linux_candidates],
         cwd=workspace_tool_cwd(),
         timeout=30,
     )
@@ -1193,10 +1205,12 @@ def wsl_module_dirs(project):
     seen = set()
     paths = []
     for line in output.splitlines():
-        linux_path, separator, remainder = line.partition("\t")
-        source_path, second_separator, linked = remainder.partition("\t")
-        if not separator or not second_separator:
+        parts = line.split("\t", 4)
+        if len(parts) < 3:
             continue
+        linux_path, source_path, linked = parts[:3]
+        windows_path = parts[3] if len(parts) >= 4 else ""
+        windows_source_path = parts[4] if len(parts) >= 5 else ""
         name = posixpath.basename(linux_path)
         if not SAFE_MODULE_RE.fullmatch(name) or name in seen:
             continue
@@ -1206,7 +1220,9 @@ def wsl_module_dirs(project):
             posixpath.normpath(linux_path),
             posixpath.normpath(source_path or linux_path),
             linked == "1",
-            context.distribution,
+            distribution,
+            windows_path,
+            windows_source_path,
         )
         WSL_MODULE_METADATA[host_path.casefold()] = metadata
         paths.append(Path(host_path))
@@ -1217,6 +1233,15 @@ def module_dirs(project):
     if active_workspace_wsl_context():
         yield from wsl_module_dirs(project)
         return
+    if platform_id() == "windows" and wsl_executable_available("sh", SETTINGS.wsl_distribution):
+        try:
+            yield from wsl_module_dirs(project)
+            return
+        except RuntimeError:
+            # A native scan remains useful when WSL is temporarily unavailable.
+            # Individual inaccessible WSL links are ignored below instead of
+            # turning the whole modules endpoint into an HTTP 500 response.
+            pass
     base = project_odoo_root(project)
     candidates = [
         project_addons_link_parent(project),
@@ -1381,8 +1406,7 @@ def modules_missing_from_code(states, available_names, accepted_states):
 def clear_project_module_cache(project):
     with MODULE_CACHE_LOCK:
         MODULE_CACHE.pop(project, None)
-        if active_workspace_wsl_context():
-            WSL_MODULE_METADATA.clear()
+        WSL_MODULE_METADATA.clear()
 
 
 def manifest_value(text, key):
@@ -1430,6 +1454,15 @@ def parse_manifest(path):
     }
 
 
+def safe_resolve(path):
+    """Resolve a path without failing on Windows links owned by WSL."""
+    path = Path(path)
+    try:
+        return path.resolve(strict=False)
+    except OSError:
+        return path.absolute()
+
+
 def module_location_info(project, path):
     metadata = WSL_MODULE_METADATA.get(str(path).casefold())
     if metadata:
@@ -1437,20 +1470,23 @@ def module_location_info(project, path):
             key: metadata[key]
             for key in ("path", "link_path", "source_path", "path_kind")
         }
-    link_parent = project_addons_link_parent(project).resolve(strict=False)
-    storage_parent = project_addons_storage_parent(project).resolve(strict=False)
-    legacy_storage_parent = project_legacy_addons_storage_parent(project).resolve(strict=False)
+    link_parent = safe_resolve(project_addons_link_parent(project))
+    storage_parent = safe_resolve(project_addons_storage_parent(project))
+    legacy_storage_parent = safe_resolve(project_legacy_addons_storage_parent(project))
     imports_roots = module_import_roots(project)
-    parent = path.parent.resolve(strict=False)
-    source_path = path.resolve(strict=False) if path.is_symlink() else path
+    parent = safe_resolve(path.parent)
+    source_path = safe_resolve(path) if path.is_symlink() else path
 
     link_path = ""
     if parent == link_parent:
         link_path = str(path)
     else:
         candidate_link = project_addons_link_parent(project) / path.name
-        if candidate_link.exists() or candidate_link.is_symlink():
-            link_path = str(candidate_link)
+        try:
+            if candidate_link.exists() or candidate_link.is_symlink():
+                link_path = str(candidate_link)
+        except OSError:
+            pass
 
     if parent == link_parent and path.is_symlink():
         if path_is_direct_child_of(source_path, storage_parent):
@@ -1469,7 +1505,7 @@ def module_location_info(project, path):
         kind = "addons-store"
     elif parent == legacy_storage_parent:
         kind = "ancien stockage"
-    elif path_is_relative_to(path.resolve(strict=False), storage_parent):
+    elif path_is_relative_to(safe_resolve(path), storage_parent):
         kind = "addons-store"
     else:
         kind = "source externe"
@@ -1494,7 +1530,7 @@ def module_origin(source_path):
 
 def basic_module(project, path):
     location = module_location_info(project, path)
-    name = posixpath.basename(str(path).replace("\\", "/")) if wsl_path_context(path) else path.name
+    name = posixpath.basename(str(path).replace("\\", "/"))
     return {
         "name": name,
         "title": name,
@@ -1525,11 +1561,11 @@ def module_removal_info(project, path):
             key: metadata[key]
             for key in ("removable", "removal_mode", "removal_note")
         }
-    link_parent = project_addons_link_parent(project).resolve()
-    storage_parent = project_addons_storage_parent(project).resolve()
-    legacy_storage_parent = project_legacy_addons_storage_parent(project).resolve()
+    link_parent = safe_resolve(project_addons_link_parent(project))
+    storage_parent = safe_resolve(project_addons_storage_parent(project))
+    legacy_storage_parent = safe_resolve(project_legacy_addons_storage_parent(project))
     imports_roots = module_import_roots(project)
-    parent = path.parent.resolve()
+    parent = safe_resolve(path.parent)
 
     if parent != link_parent:
         if parent == storage_parent:
@@ -1551,7 +1587,7 @@ def module_removal_info(project, path):
         }
 
     if path.is_symlink():
-        target = path.resolve(strict=False)
+        target = safe_resolve(path)
         if path_is_direct_child_of(target, storage_parent):
             return {
                 "removable": True,

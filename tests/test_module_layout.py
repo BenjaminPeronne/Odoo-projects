@@ -121,6 +121,43 @@ class ModuleLayoutTests(unittest.TestCase):
             web.WORKSPACE = self.root
             web.clear_project_module_cache(self.project)
 
+    @mock.patch("odoo_manager_web.platform_id", return_value="windows")
+    @mock.patch("odoo_manager_web.wsl_executable_available", return_value=True)
+    @mock.patch("odoo_manager_web.wsl_execution_path")
+    @mock.patch("odoo_manager_web.run_capture")
+    def test_native_windows_workspace_resolves_wsl_links_inside_wsl(
+        self, run_capture, execution_path, _wsl_available, _platform
+    ):
+        linux_root = "/mnt/c/Users/demo/Odoo-projects/TEST_PROJECT"
+
+        def translate(path, _distribution=""):
+            text = str(path).replace("\\", "/")
+            marker = "/TEST_PROJECT"
+            suffix = text.split(marker, 1)[1] if marker in text else ""
+            return linux_root + suffix
+
+        execution_path.side_effect = translate
+        run_capture.return_value = (
+            0,
+            f"{linux_root}/odoo/addons/account_3way_match\t"
+            f"{linux_root}/odoo/addons-store/account_3way_match\t1\t"
+            r"C:\Users\demo\Odoo-projects\TEST_PROJECT\odoo\addons\account_3way_match"
+            "\t"
+            r"C:\Users\demo\Odoo-projects\TEST_PROJECT\odoo\addons-store\account_3way_match",
+        )
+
+        modules = web.modules_for(self.project)
+
+        self.assertEqual([module["name"] for module in modules], ["account_3way_match"])
+        self.assertEqual(modules[0]["path_kind"], "lien vers addons-store")
+        self.assertEqual(modules[0]["removal_mode"], "link_and_storage")
+        self.assertEqual(
+            modules[0]["source_path"],
+            r"C:\Users\demo\Odoo-projects\TEST_PROJECT\odoo\addons-store\account_3way_match",
+        )
+        command = run_capture.call_args.args[0]
+        self.assertEqual(command[:2], ["wsl.exe", "--exec"])
+
     @mock.patch("odoo_manager_web.module_dirs", return_value=iter(()))
     def test_empty_module_scan_is_not_cached(self, module_dirs):
         self.assertEqual(web.modules_for(self.project), [])
