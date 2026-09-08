@@ -2677,6 +2677,7 @@ export default function Home() {
                             <SelectItem value="all">Tous les états</SelectItem>
                             <SelectItem value="installed">Installés</SelectItem>
                             <SelectItem value="uninstalled">Disponibles</SelectItem>
+                            <SelectItem value="to upgrade">À mettre à jour</SelectItem>
                           </SelectContent>
                         </Select>
                         <Select value={moduleOriginFilter} onValueChange={setModuleOriginFilter}>

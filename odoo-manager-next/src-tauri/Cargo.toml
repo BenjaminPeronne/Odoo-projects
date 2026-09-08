@@ -1,6 +1,6 @@
 [package]
 name = "odoo-manager"
-version = "0.1.18"
+version = "0.1.19"
 description = "Gestionnaire local de projets Odoo"
 authors = ["Sudokeys"]
 edition = "2021"
