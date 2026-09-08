@@ -663,6 +663,7 @@ export default function Home() {
   const [desktopRuntime, setDesktopRuntime] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [repositoryOpen, setRepositoryOpen] = useState(false);
+  const [repositorySubmitting, setRepositorySubmitting] = useState(false);
   const [repositoryUrl, setRepositoryUrl] = useState("");
   const [repositoryBranch, setRepositoryBranch] = useState("");
   const [repositoryMode, setRepositoryMode] = useState("add");
@@ -1247,7 +1248,8 @@ export default function Home() {
   }, [refreshModules]);
 
   async function createJob(action: string, payload: Record<string, unknown> = {}) {
-    setLoading(true);
+    const useGlobalLoading = action !== "repository_modules";
+    if (useGlobalLoading) setLoading(true);
     void requestTaskNotificationPermission().catch(() => {
       // The in-app completion toast remains available if system notifications are refused.
     });
@@ -1261,13 +1263,13 @@ export default function Home() {
       setExternalLogView(null);
       enableLogAutoFollow();
       pushToast("success", `Action lancée : ${result.job.title}`);
-      await refreshJobs();
+      void refreshJobs();
       return result.job;
     } catch (err) {
       pushToast("error", err instanceof Error ? err.message : "Action impossible.");
       return null;
     } finally {
-      setLoading(false);
+      if (useGlobalLoading) setLoading(false);
     }
   }
 
@@ -1462,6 +1464,25 @@ export default function Home() {
     setActiveTab("logs");
     await completeOnboarding();
     schedule(refreshOverview, 2500);
+  }
+
+  async function submitRepositoryModules() {
+    if (!selectedProject || repositorySubmitting) return;
+    setRepositorySubmitting(true);
+    try {
+      const job = await createJob("repository_modules", {
+        project: selectedProject.name,
+        url: repositoryUrl.trim(),
+        branch: repositoryBranch.trim(),
+        mode: repositoryMode,
+        modules: repositoryModules.trim(),
+      });
+      if (!job) return;
+      setRepositoryOpen(false);
+      setActiveTab("logs");
+    } finally {
+      setRepositorySubmitting(false);
+    }
   }
 
   async function saveSettings() {
@@ -3514,11 +3535,15 @@ export default function Home() {
               </Button>
             </div>
             <p className="text-sm text-muted-foreground">Après l’import, lance l’installation ou la mise à jour dans la base Odoo.</p>
-            <Button disabled={loading || !selectedProjectReady || !repositoryUrl.trim() || Boolean(repositoryUrlError) || !repositoryBranch.trim() || (repositoryMode === "update" && !repositoryModules.trim())} onClick={async () => {
-              if (!selectedProject) return;
-              const job = await createJob("repository_modules", { project: selectedProject.name, url: repositoryUrl.trim(), branch: repositoryBranch.trim(), mode: repositoryMode, modules: repositoryModules.trim() });
-              if (job) setRepositoryOpen(false);
-            }}>{repositoryMode === "add" ? "Ajouter depuis le dépôt" : "Sauvegarder et remplacer le code"}</Button>
+            <Button
+              disabled={repositorySubmitting || !selectedProjectReady || !repositoryUrl.trim() || Boolean(repositoryUrlError) || !repositoryBranch.trim() || (repositoryMode === "update" && !repositoryModules.trim())}
+              onClick={submitRepositoryModules}
+            >
+              {repositorySubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <CloudDownload className="h-4 w-4" />}
+              {repositorySubmitting
+                ? "Lancement de l’import…"
+                : repositoryMode === "add" ? "Ajouter depuis le dépôt" : "Sauvegarder et remplacer le code"}
+            </Button>
           </div>
         </DialogContent>
       </Dialog>
