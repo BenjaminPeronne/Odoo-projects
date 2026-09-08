@@ -1065,6 +1065,7 @@ export default function Home() {
     setSettingsDraft(fallbackManagerSettings(settings, overview, systemStatus));
     setSettingsOpen(true);
     void loadSettings();
+    void loadSshKeys();
   }, [loadSettings, overview, settings, systemStatus]);
 
   const loadCreationPrerequisites = useCallback(async () => {
@@ -1082,6 +1083,12 @@ export default function Home() {
       setLoadingCreationPrerequisites(false);
     }
   }, [markApiFailure, markApiSuccess, pushToast]);
+
+  const reopenInitialConfiguration = useCallback(() => {
+    setSettingsOpen(false);
+    setOnboardingOpen(true);
+    void loadCreationPrerequisites();
+  }, [loadCreationPrerequisites]);
 
   const openCreateProjectDialog = useCallback(() => {
     setCreateProjectOpen(true);
@@ -3089,14 +3096,14 @@ export default function Home() {
       </div>
 
       <Dialog open={onboardingOpen} onOpenChange={setOnboardingOpen}>
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="max-h-[90vh] max-w-2xl space-y-5 overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Préparer le gestionnaire Odoo</DialogTitle>
             <DialogDescription>
               Vérifie les prérequis une seule fois, puis crée ton premier environnement depuis l’application.
             </DialogDescription>
           </DialogHeader>
-          <div className="divide-y rounded-md border">
+          <div className="divide-y overflow-hidden rounded-md border">
             <PrerequisiteRow
               ready={Boolean(creationPrerequisites?.workspace_ready)}
               icon={FolderPlus}
@@ -3179,7 +3186,7 @@ export default function Home() {
               Vérification de Git et de la clé SSH…
             </div>
           )}
-          <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <div className="flex flex-col-reverse gap-2 pt-1 sm:flex-row sm:justify-end">
             <Button
               variant="outline"
               onClick={async () => {
@@ -3329,8 +3336,40 @@ export default function Home() {
                 <div className="text-sm font-medium">Exécution automatique</div>
                 <p className="mt-1 text-xs font-normal leading-relaxed text-muted-foreground">
                   Le gestionnaire choisit automatiquement les outils adaptés au système. Sous Windows, Docker,
-                  Git et Traefik restent natifs ; WSL est utilisé uniquement lorsqu’une opération le nécessite.
+                  Git et les chemins sont exécutés dans l’environnement compatible avec le workspace. Les chemins Windows
+                  sont traduits automatiquement lorsque Docker ou Git passe par WSL.
                 </p>
+              </div>
+
+              <div className="grid gap-3 rounded-md border p-3">
+                <div className="flex min-w-0 items-start gap-3">
+                  <KeyRound className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm font-medium">Clé SSH GitLab</div>
+                    <p className="mt-1 break-words text-xs leading-relaxed text-muted-foreground">
+                      {selectedSshKey
+                        ? `${selectedSshKey.name} · ${selectedSshKey.public_key}`
+                        : "Aucune clé publique détectée dans l’environnement Git utilisé par le gestionnaire."}
+                    </p>
+                  </div>
+                </div>
+                <Button type="button" variant="outline" onClick={openSshAssistant}>
+                  <KeyRound className="h-4 w-4" />
+                  {selectedSshKey ? "Gérer la clé SSH" : "Configurer une clé"}
+                </Button>
+              </div>
+
+              <div className="grid gap-3 rounded-md border p-3">
+                <div>
+                  <div className="text-sm font-medium">Configuration initiale</div>
+                  <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                    Rouvre l’assistant du premier démarrage pour vérifier le workspace, Docker, Git, SSH et Traefik.
+                  </p>
+                </div>
+                <Button type="button" variant="outline" onClick={reopenInitialConfiguration}>
+                  <Settings className="h-4 w-4" />
+                  Ouvrir l’assistant de configuration
+                </Button>
               </div>
 
               <div className="grid gap-2">
@@ -4097,8 +4136,8 @@ function PrerequisiteRow({
   action?: React.ReactNode;
 }) {
   return (
-    <div className="flex min-w-0 flex-col gap-3 p-3 sm:flex-row sm:items-center">
-      <div className="flex min-w-0 flex-1 items-start gap-3">
+    <div className="flex min-w-0 flex-col gap-4 p-4 sm:flex-row sm:items-center">
+      <div className="flex min-w-0 flex-1 items-start gap-4">
         <div className={cn("mt-0.5 rounded-md p-2", ready ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300" : "bg-amber-50 text-amber-700 dark:bg-amber-950 dark:text-amber-300")}>
           <Icon className="h-4 w-4" />
         </div>
@@ -4110,7 +4149,7 @@ function PrerequisiteRow({
           <div className="mt-0.5 break-words text-xs leading-5 text-muted-foreground">{detail}</div>
         </div>
       </div>
-      {action && <div className="shrink-0 pl-11 sm:pl-0">{action}</div>}
+      {action && <div className="shrink-0 pl-12 sm:pl-0">{action}</div>}
     </div>
   );
 }

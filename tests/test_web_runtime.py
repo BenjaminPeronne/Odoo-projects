@@ -372,6 +372,25 @@ class CommandWorkingDirectoryTests(unittest.TestCase):
         self.assertIn("Dossier de travail introuvable", output)
         run.assert_not_called()
 
+    @patch("odoo_manager_web.platform_id", return_value="windows")
+    @patch("odoo_manager_web.wsl_command_with_cwd")
+    @patch("odoo_manager_web.subprocess.run")
+    def test_wsl_command_translates_windows_cwd_before_execution(self, run, prepare_cwd, _platform):
+        windows_cwd = Path(r"C:\Users\Demo\Odoo-projects\DEMO")
+        prepared = ["wsl.exe", "--cd", "/mnt/c/Users/Demo/Odoo-projects/DEMO", "--exec", "docker", "compose", "ps"]
+        prepare_cwd.return_value = prepared
+        run.return_value = Mock(returncode=0, stdout="ok")
+
+        code, output = web.run_capture(
+            ["wsl.exe", "--exec", "docker", "compose", "ps"],
+            cwd=windows_cwd,
+        )
+
+        self.assertEqual((code, output), (0, "ok"))
+        prepare_cwd.assert_called_once()
+        self.assertEqual(run.call_args.args[0], prepared)
+        self.assertEqual(Path(run.call_args.kwargs["cwd"]), Path.home())
+
 
 class WslManagerCommandTests(unittest.TestCase):
     @patch("odoo_manager_web.execution_path")

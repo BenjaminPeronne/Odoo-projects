@@ -33,6 +33,27 @@ class TerminalLaunchTests(unittest.TestCase):
             ["C:/Windows/wt.exe", "docker", "exec", "-it", "postgresql-DEMO", "psql"],
         )
 
+    @mock.patch("odoo_manager_core.platform.wsl_command_with_cwd")
+    @mock.patch("odoo_manager_core.platform.subprocess.Popen")
+    @mock.patch("odoo_manager_core.platform.shutil.which")
+    @mock.patch("odoo_manager_core.platform.platform_id", return_value="windows")
+    def test_windows_terminal_translates_cwd_for_wsl_command(self, _platform, which, popen, prepare_cwd):
+        which.side_effect = lambda name: "C:/Windows/wt.exe" if name == "wt.exe" else None
+        prepared = ["wsl.exe", "--cd", "/mnt/c/Odoo/DEMO", "--exec", "docker", "compose", "logs"]
+        prepare_cwd.return_value = prepared
+        settings = ManagerSettings.from_dict({}, r"C:\Odoo")
+
+        result = open_terminal_command(
+            settings,
+            ["wsl.exe", "--exec", "docker", "compose", "logs"],
+            cwd=r"C:\Odoo\DEMO",
+        )
+
+        self.assertTrue(result.ok)
+        prepare_cwd.assert_called_once()
+        self.assertEqual(popen.call_args.args[0], ["C:/Windows/wt.exe", *prepared])
+        self.assertEqual(Path(popen.call_args.kwargs["cwd"]), Path.home())
+
     @mock.patch("odoo_manager_core.platform.subprocess.Popen")
     @mock.patch("odoo_manager_core.platform.shutil.which")
     @mock.patch("odoo_manager_core.platform.platform_id", return_value="linux")

@@ -30,6 +30,7 @@ RUNTIME_LOG_PATH, _RUNTIME_STREAMS = initialize_runtime_streams()
 
 from odoo_manager_core import ManagerSettings, ProjectCreator, SettingsStore, ProjectService, docker_status, start_docker
 from odoo_manager_core.platform import (
+    command_uses_wsl,
     command_prefix,
     executable_available,
     executable_search_path,
@@ -44,6 +45,7 @@ from odoo_manager_core.platform import (
     workspace_execution_path,
     workspace_wsl_context,
     wsl_command_prefix,
+    wsl_command_with_cwd,
     wsl_executable_available,
     wsl_path_context,
     wsl_unc_path,
@@ -327,8 +329,6 @@ def parse_multipart_form(content_type, body):
 
 def run_capture(args, cwd=None, timeout=12):
     requested_cwd = Path(cwd) if cwd is not None else None
-    if requested_cwd is not None and not requested_cwd.is_dir():
-        return 2, f"Dossier de travail introuvable: {requested_cwd}"
     command_cwd = requested_cwd
     if command_cwd is None:
         command_cwd = next(
@@ -339,9 +339,18 @@ def run_capture(args, cwd=None, timeout=12):
             ),
             Path.cwd(),
         )
+    command = [str(argument) for argument in args]
+    if platform_id() == "windows" and command_uses_wsl(command):
+        try:
+            command = wsl_command_with_cwd(command, command_cwd, SETTINGS, WORKSPACE)
+        except RuntimeError as exc:
+            return 2, str(exc)
+        command_cwd = Path.home()
+    elif requested_cwd is not None and not requested_cwd.is_dir():
+        return 2, f"Dossier de travail introuvable: {requested_cwd}"
     try:
         result = subprocess.run(
-            args,
+            command,
             cwd=str(command_cwd),
             env=command_env(),
             stdout=subprocess.PIPE,
@@ -1542,6 +1551,29 @@ def filestore_files(project, db_name):
     files = set()
     if filestore == filestore_root or not path_is_relative_to(filestore, filestore_root):
         return files, filestore
+    context = active_workspace_wsl_context()
+    if context:
+        linux_filestore = workspace_execution_path(filestore, SETTINGS, WORKSPACE)
+        code, output = run_capture(
+            [
+                *wsl_command_prefix(context.distribution),
+                "find",
+                linux_filestore,
+                "-mindepth",
+                "2",
+                "-maxdepth",
+                "2",
+                "-type",
+                "f",
+                "-printf",
+                "%P\\n",
+            ],
+            cwd=WORKSPACE,
+            timeout=30,
+        )
+        if code == 0:
+            files.update(line.strip() for line in output.splitlines() if line.strip())
+        return files, filestore
     if not filestore.exists():
         return files, filestore
     for path in filestore.glob("*/*"):
@@ -1892,10 +1924,17 @@ def terminate_active_subprocesses(wait_seconds=0.5):
 
 def run_stream(job, args, cwd=None):
     cwd = cwd or WORKSPACE
-    job.add("$ " + " ".join(str(arg) for arg in args))
+    command = [str(argument) for argument in args]
+    process_cwd = Path(cwd)
+    if platform_id() == "windows" and command_uses_wsl(command):
+        command = wsl_command_with_cwd(command, process_cwd, SETTINGS, WORKSPACE)
+        process_cwd = Path.home()
+    elif not process_cwd.is_dir():
+        raise RuntimeError(f"Dossier de travail introuvable: {process_cwd}")
+    job.add("$ " + " ".join(command))
     process = subprocess.Popen(
-        args,
-        cwd=str(cwd),
+        command,
+        cwd=str(process_cwd),
         env=command_env(),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -2976,11 +3015,9 @@ def repository_modules_job(job, project, url, branch, mode, names):
             "clone", "--depth", "1",
             "--single-branch", "--branch", branch, "--", url, creator.command_path(checkout),
         )
-        result = subprocess.run(command, cwd=creator.command_cwd, capture_output=True, text=True,
-                                timeout=300, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
-                                **hidden_process_kwargs())
-        if result.returncode:
-            raise repository_clone_error(result.stderr)
+        code, output = creator.project_service.capture(command, cwd=creator.command_cwd, timeout=300)
+        if code:
+            raise repository_clone_error(output)
         # Reject symlinks before discovery/copy, including links outside the checkout.
         if any(path.is_symlink() for path in checkout.rglob("*") if ".git" not in path.relative_to(checkout).parts):
             raise ValueError("Ce dépôt contient des liens symboliques : import refusé.")
@@ -3318,9 +3355,10 @@ def start_log_follow_process(project):
             return None
         command = docker_command(SETTINGS, "compose", "logs", "-f", "--tail", "200", service)
         cwd = WORKSPACE / project
+    command, process_cwd = project_service().prepare_command(command, cwd)
     return subprocess.Popen(
         command,
-        cwd=str(cwd),
+        cwd=str(process_cwd),
         env=command_env(),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,

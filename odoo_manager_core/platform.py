@@ -395,6 +395,9 @@ def open_terminal_command(settings, command, cwd=None, label="la commande"):
             return LaunchResult(True, f"{application} ouvert pour {label}.")
 
         if current_platform == "windows":
+            if command_uses_wsl(command):
+                command = wsl_command_with_cwd(command, cwd, settings, settings.workspace)
+                cwd = Path.home()
             windows_terminal = shutil.which("wt.exe")
             if windows_terminal:
                 subprocess.Popen([windows_terminal, *command], cwd=str(cwd))
