@@ -262,6 +262,15 @@ type BackendDiagnostics = {
   details: string;
 };
 
+type ManagerErrorEntry = {
+  id: number;
+  timestamp: string;
+  source: string;
+  project?: string;
+  message: string;
+  details?: string;
+};
+
 type ProjectDiagnostics = {
   project: string;
   docker_ok: boolean;
@@ -634,6 +643,9 @@ export default function Home() {
   const [settings, setSettings] = useState<ManagerSettings | null>(null);
   const [settingsDraft, setSettingsDraft] = useState<ManagerSettings | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [managerErrors, setManagerErrors] = useState<ManagerErrorEntry[]>([]);
+  const [managerErrorLogPath, setManagerErrorLogPath] = useState("");
+  const [loadingManagerErrors, setLoadingManagerErrors] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [appVersion, setAppVersion] = useState(FALLBACK_APP_VERSION);
   const [onboardingOpen, setOnboardingOpen] = useState(false);
@@ -875,6 +887,13 @@ export default function Home() {
     const id = toastId.current++;
     setToasts((current) => [...current, { id, kind, message }]);
     schedule(() => setToasts((current) => current.filter((toast) => toast.id !== id)), 4200);
+    if (kind === "error") {
+      void fetch(`${API_BASE}/api/errors/report`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message }),
+      }).catch(() => undefined);
+    }
   }, [schedule]);
 
   const notifyJobCompletion = useCallback((job: Job) => {
@@ -1066,6 +1085,7 @@ export default function Home() {
     setSettingsOpen(true);
     void loadSettings();
     void loadSshKeys();
+    void loadManagerErrors();
   }, [loadSettings, overview, settings, systemStatus]);
 
   const loadCreationPrerequisites = useCallback(async () => {
@@ -1456,6 +1476,43 @@ export default function Home() {
     } catch (err) {
       pushToast("error", err instanceof Error ? err.message : "Impossible de lire les clés SSH.");
       return [];
+    }
+  }
+
+  async function loadManagerErrors() {
+    setLoadingManagerErrors(true);
+    try {
+      const payload = await api<{ entries: ManagerErrorEntry[]; path: string }>("/api/errors");
+      setManagerErrors(payload.entries);
+      setManagerErrorLogPath(payload.path);
+    } catch (err) {
+      pushToast("error", err instanceof Error ? err.message : "Impossible de charger le journal d’erreurs.");
+    } finally {
+      setLoadingManagerErrors(false);
+    }
+  }
+
+  async function copyManagerErrors() {
+    const content = managerErrors.map((entry) => [
+      `[${entry.timestamp}] ${entry.source}${entry.project ? ` · ${entry.project}` : ""}`,
+      entry.message,
+      entry.details || "",
+    ].filter(Boolean).join("\n")).join("\n\n");
+    try {
+      await navigator.clipboard.writeText(content);
+      pushToast("success", "Journal d’erreurs copié.");
+    } catch {
+      pushToast("error", "Impossible de copier le journal d’erreurs.");
+    }
+  }
+
+  async function clearManagerErrors() {
+    try {
+      await api<{ ok: boolean }>("/api/errors", { method: "DELETE" });
+      setManagerErrors([]);
+      pushToast("success", "Journal d’erreurs effacé.");
+    } catch (err) {
+      pushToast("error", err instanceof Error ? err.message : "Impossible d’effacer le journal d’erreurs.");
     }
   }
 
@@ -3492,6 +3549,49 @@ export default function Home() {
                   Port préféré de l’API locale. Un redémarrage est nécessaire après modification. S’il est occupé, notamment par Docker, le gestionnaire choisit automatiquement un port libre.
                 </span>
               </label>
+
+              <div className="grid gap-3 rounded-md border p-3">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium">Journal d’erreurs du gestionnaire</div>
+                    <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                      Les erreurs d’API, de jobs et d’interface sont conservées localement. Les mots de passe, jetons et secrets détectés sont masqués.
+                    </p>
+                    {managerErrorLogPath && <p className="mt-1 break-all text-xs text-muted-foreground">Fichier : {managerErrorLogPath}</p>}
+                  </div>
+                  <Badge className="shrink-0" variant={managerErrors.length ? "warning" : "secondary"}>
+                    {managerErrors.length} erreur(s)
+                  </Badge>
+                </div>
+                <div className="max-h-72 space-y-2 overflow-y-auto rounded-md border bg-muted/30 p-2">
+                  {loadingManagerErrors ? (
+                    <div className="flex items-center gap-2 p-2 text-xs text-muted-foreground">
+                      <Loader2 className="h-4 w-4 animate-spin" /> Chargement…
+                    </div>
+                  ) : managerErrors.length ? managerErrors.map((entry) => (
+                    <details key={entry.id} className="rounded-md border bg-card p-2 text-xs">
+                      <summary className="cursor-pointer break-words font-medium">
+                        {entry.timestamp} · {entry.source}{entry.project ? ` · ${entry.project}` : ""}
+                      </summary>
+                      <p className="mt-2 whitespace-pre-wrap break-words text-destructive">{entry.message}</p>
+                      {entry.details && <pre className="log-terminal mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-slate-950 p-2 text-[11px] text-slate-100">{entry.details}</pre>}
+                    </details>
+                  )) : (
+                    <p className="p-2 text-xs text-muted-foreground">Aucune erreur enregistrée.</p>
+                  )}
+                </div>
+                <div className="grid gap-2 sm:grid-cols-3">
+                  <Button type="button" variant="outline" onClick={loadManagerErrors} disabled={loadingManagerErrors}>
+                    <RefreshCcw className="h-4 w-4" /> Actualiser
+                  </Button>
+                  <Button type="button" variant="outline" onClick={copyManagerErrors} disabled={!managerErrors.length}>
+                    <Copy className="h-4 w-4" /> Copier
+                  </Button>
+                  <Button type="button" variant="outline" onClick={clearManagerErrors} disabled={!managerErrors.length}>
+                    <Trash2 className="h-4 w-4" /> Effacer
+                  </Button>
+                </div>
+              </div>
 
               <div className="grid gap-3 rounded-md border bg-muted/40 p-3 text-sm">
                 <div>

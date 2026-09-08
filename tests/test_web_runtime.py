@@ -28,6 +28,27 @@ class CorsTests(unittest.TestCase):
         handler.send_header.assert_not_called()
 
 
+class ManagerErrorLogTests(unittest.TestCase):
+    def test_error_log_is_persistent_redacted_and_clearable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            error_file = Path(temporary) / "errors.jsonl"
+            with patch.object(web, "ERROR_LOG_PATH", error_file):
+                web.record_manager_error(
+                    "API POST /api/jobs",
+                    "clone failed token=private-value",
+                    details="https://user:password@example.test/repository.git",
+                    project="DEMO",
+                )
+                snapshot = web.manager_errors_snapshot()
+                self.assertEqual(len(snapshot["entries"]), 1)
+                self.assertEqual(snapshot["entries"][0]["project"], "DEMO")
+                self.assertNotIn("private-value", snapshot["entries"][0]["message"])
+                self.assertNotIn("password@example", snapshot["entries"][0]["details"])
+
+                web.clear_manager_errors()
+                self.assertEqual(web.manager_errors_snapshot()["entries"], [])
+
+
 class ServerRuntimeTests(unittest.TestCase):
     def test_recognizes_address_in_use_on_supported_platforms(self):
         for error_number in (48, 98, 10048):

@@ -130,6 +130,71 @@ EVENT_WATCH_INTERVAL_SECONDS = 2
 _EVENT_WATCH_THREAD_STARTED = False
 _EVENT_WATCH_THREAD_LOCK = threading.Lock()
 LOCAL_MODULE_OVERRIDES_LOCK = threading.Lock()
+ERROR_LOG_LOCK = threading.Lock()
+ERROR_LOG_PATH = SETTINGS_STORE.path.with_name("errors.jsonl")
+MAX_ERROR_LOG_BYTES = 2 * 1024 * 1024
+MAX_ERROR_ENTRIES_RETURNED = 250
+
+
+def sanitize_error_text(value, limit=4000):
+    text = str(value or "").strip()
+    text = re.sub(r"(https?://[^:/\s]+:)[^@/\s]+@", r"\1***@", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"(?i)(password|passwd|token|secret|authorization)(\s*[:=]\s*)[^\s,;]+",
+        r"\1\2***",
+        text,
+    )
+    return text[:limit]
+
+
+def record_manager_error(source, message, *, details="", project=""):
+    entry = {
+        "id": time.time_ns(),
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "source": sanitize_error_text(source, 160) or "manager",
+        "project": sanitize_error_text(project, 120),
+        "message": sanitize_error_text(message, 1200) or "Erreur sans message.",
+        "details": sanitize_error_text(details, 4000),
+    }
+    line = json.dumps(entry, ensure_ascii=False) + "\n"
+    try:
+        with ERROR_LOG_LOCK:
+            ERROR_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            if ERROR_LOG_PATH.exists() and ERROR_LOG_PATH.stat().st_size >= MAX_ERROR_LOG_BYTES:
+                previous = ERROR_LOG_PATH.with_name("errors.previous.jsonl")
+                previous.unlink(missing_ok=True)
+                ERROR_LOG_PATH.replace(previous)
+            with ERROR_LOG_PATH.open("a", encoding="utf-8") as handle:
+                handle.write(line)
+    except OSError:
+        traceback.print_exc()
+    return entry
+
+
+def manager_errors_snapshot():
+    entries = []
+    with ERROR_LOG_LOCK:
+        lines = []
+        for path in (ERROR_LOG_PATH.with_name("errors.previous.jsonl"), ERROR_LOG_PATH):
+            try:
+                lines.extend(path.read_text(encoding="utf-8", errors="replace").splitlines())
+            except OSError:
+                continue
+    for line in lines[-MAX_ERROR_ENTRIES_RETURNED:]:
+        try:
+            entry = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(entry, dict):
+            entries.append(entry)
+    entries.reverse()
+    return {"entries": entries, "path": str(ERROR_LOG_PATH)}
+
+
+def clear_manager_errors():
+    with ERROR_LOG_LOCK:
+        ERROR_LOG_PATH.unlink(missing_ok=True)
+        ERROR_LOG_PATH.with_name("errors.previous.jsonl").unlink(missing_ok=True)
 
 
 def truthy(value):
@@ -261,6 +326,12 @@ def add_cors_headers(handler):
 
 
 def json_response(handler, payload, status=200):
+    if status >= 400 and isinstance(payload, dict) and payload.get("error"):
+        record_manager_error(
+            f"API {getattr(handler, 'command', '')} {getattr(handler, 'path', '')}",
+            payload["error"],
+            details=f"HTTP {status}",
+        )
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     try:
         handler.send_response(status)
@@ -1882,6 +1953,12 @@ class Job:
         except Exception as exc:
             self.add(f"Erreur: {exc}")
             self.status = "error"
+            record_manager_error(
+                f"Job #{self.id} · {self.title}",
+                exc,
+                details=traceback.format_exc(),
+                project=self.project or "",
+            )
         finally:
             with JOBS_LOCK:
                 self.finished_at = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -3505,6 +3582,8 @@ class Handler(BaseHTTPRequestHandler):
                 return json_response(self, overview())
             if path == "/api/settings":
                 return json_response(self, {"settings": settings_snapshot()})
+            if path == "/api/errors":
+                return json_response(self, manager_errors_snapshot())
             if path == "/api/system/status":
                 return json_response(self, system_status_snapshot())
             if path == "/api/system/project-creation-prerequisites":
@@ -3671,6 +3750,19 @@ class Handler(BaseHTTPRequestHandler):
 
             threading.Thread(target=shutdown_server, daemon=True).start()
             return
+
+        if parsed.path == "/api/errors/report":
+            try:
+                payload = self.read_json()
+                record_manager_error(
+                    "Interface",
+                    payload.get("message", ""),
+                    details=payload.get("details", ""),
+                    project=payload.get("project", ""),
+                )
+                return json_response(self, {"ok": True}, status=201)
+            except Exception as exc:
+                return json_response(self, {"error": str(exc)}, status=400)
 
         if parsed.path == "/api/settings":
             try:
@@ -4040,6 +4132,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/api/errors":
+            clear_manager_errors()
+            return json_response(self, {"ok": True})
         match = re.match(r"^/api/jobs/([0-9]+)$", parsed.path)
         if match:
             try:
