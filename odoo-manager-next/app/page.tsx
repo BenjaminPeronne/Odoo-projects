@@ -799,6 +799,19 @@ export default function Home() {
   }, [filteredModules, modulePage]);
 
   const moduleByName = useMemo(() => new Map(modules.map((module) => [module.name, module])), [modules]);
+  const pendingModulesWithMissingCode = useMemo(
+    () => updatePendingModules.filter((module) => !module.code_available),
+    [updatePendingModules],
+  );
+  const pendingModulesWithAvailableCode = useMemo(
+    () => updatePendingModules.filter((module) => module.code_available),
+    [updatePendingModules],
+  );
+  const allMissingPendingModulesSelected =
+    pendingModulesWithMissingCode.length > 0 &&
+    pendingModulesWithMissingCode.every((module) => missingModulesToIgnore.has(module.name));
+  const someMissingPendingModulesSelected =
+    pendingModulesWithMissingCode.some((module) => missingModulesToIgnore.has(module.name)) && !allMissingPendingModulesSelected;
   const filteredModuleNames = useMemo(() => filteredModules.map((module) => module.name), [filteredModules]);
   const selectedFilteredModuleCount = useMemo(
     () => filteredModuleNames.filter((name) => selectedModules.has(name)).length,
@@ -1505,6 +1518,10 @@ export default function Home() {
     });
   }
 
+  function toggleAllMissingModulesToIgnore(checked: boolean) {
+    setMissingModulesToIgnore(checked ? new Set(pendingModulesWithMissingCode.map((module) => module.name)) : new Set());
+  }
+
   async function ignoreSelectedMissingModulesLocally() {
     const db = selectedDatabaseOrNotify("l'annulation locale des opérations module");
     if (!db || !selectedProject || !missingModulesToIgnore.size) return;
@@ -1516,7 +1533,15 @@ export default function Home() {
     });
     if (job) {
       setUpdateAllDialogOpen(false);
-      schedule(refreshModules, 1500);
+      try {
+        await waitForJob(job.id);
+        pushToast("success", "Les opérations locales ont été annulées. Le précontrôle est actualisé.");
+        await refreshModules();
+        await requestUpdateAllOdooModules();
+      } catch (err) {
+        pushToast("error", err instanceof Error ? err.message : "Impossible d’actualiser le précontrôle.");
+        setActiveTab("logs");
+      }
     }
   }
 
@@ -3678,20 +3703,48 @@ export default function Home() {
               </Button>
             </div>
           ) : null}
-          {updatePendingModules.length ? (
+          {pendingModulesWithAvailableCode.length ? (
+            <div className="grid gap-2 rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-950 dark:border-blue-800 dark:bg-blue-950/45 dark:text-blue-100">
+              <div className="flex items-start gap-2">
+                <Info className="mt-0.5 h-4 w-4 shrink-0" />
+                <div className="grid gap-1">
+                  <span className="font-medium">Opérations Odoo à terminer</span>
+                  <span>
+                    Une installation ou une mise à jour précédente a laissé {pendingModulesWithAvailableCode.length} module(s) en attente. Leur code est présent : la mise à jour complète peut les reprendre automatiquement.
+                  </span>
+                </div>
+              </div>
+              <div className="flex max-h-28 flex-wrap gap-1.5 overflow-y-auto">
+                {pendingModulesWithAvailableCode.map((module) => (
+                  <Badge key={module.name} variant="outline" className="border-blue-300 bg-white font-mono text-blue-950 dark:border-blue-700 dark:bg-blue-950/70 dark:text-blue-100">
+                    {module.name} · {module.state}
+                  </Badge>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          {pendingModulesWithMissingCode.length ? (
             <div className="grid gap-3 rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-950 dark:border-red-800 dark:bg-red-950/45 dark:text-red-100">
               <div className="flex items-start gap-2">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-600" />
                 <div className="grid gap-1">
-                  <span className="font-medium">Opérations de modules en attente</span>
+                  <span className="font-medium">Code source manquant pour {pendingModulesWithMissingCode.length} module(s)</span>
                   <span>
-                    Sélectionne uniquement les modules que tu ne veux pas mettre à jour pour tes tests. Le gestionnaire annulera leur opération sur cette
-                    copie locale sans les désinstaller. Une dépendance nécessaire à un module actif non sélectionné sera automatiquement refusée.
+                    Odoo avait prévu de les installer, mettre à jour ou supprimer, mais leur dossier n’existe plus dans le projet. Restaure leur code si tu veux conserver l’opération. Sur une copie locale de test, tu peux aussi annuler leur opération sans désinstaller les modules déjà actifs.
                   </span>
                 </div>
               </div>
+              <label className="flex cursor-pointer items-center gap-3 rounded-md border border-red-200 bg-white px-3 py-2 font-medium dark:border-red-800 dark:bg-red-950/55">
+                <Checkbox
+                  color="red"
+                  checked={someMissingPendingModulesSelected ? "indeterminate" : allMissingPendingModulesSelected}
+                  disabled={loading}
+                  onCheckedChange={(checked) => toggleAllMissingModulesToIgnore(checked === true)}
+                />
+                Tout sélectionner ({pendingModulesWithMissingCode.length})
+              </label>
               <div className="max-h-48 space-y-2 overflow-y-auto rounded-md border border-red-200 bg-white p-2 dark:border-red-800 dark:bg-red-950/55">
-                {updatePendingModules.map((module) => (
+                {pendingModulesWithMissingCode.map((module) => (
                   <label key={module.name} className="flex cursor-pointer items-center gap-3 rounded px-2 py-2 hover:bg-red-50 dark:hover:bg-red-900/50">
                     <Checkbox
                       color="red"
@@ -3699,9 +3752,7 @@ export default function Home() {
                       onCheckedChange={(checked) => toggleMissingModuleToIgnore(module.name, checked === true)}
                     />
                     <span className="min-w-0 flex-1 break-all font-mono text-xs">{module.name}</span>
-                    <Badge className="shrink-0" variant={module.code_available ? "outline" : "destructive"}>
-                      {module.code_available ? module.state : "code absent"}
-                    </Badge>
+                    <Badge className="shrink-0" variant="destructive">{module.state} · code absent</Badge>
                   </label>
                 ))}
               </div>
@@ -3711,10 +3762,10 @@ export default function Home() {
                 onClick={ignoreSelectedMissingModulesLocally}
               >
                 {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <PackageX className="h-4 w-4" />}
-                Ignorer la sélection sur cette copie locale
+                Annuler localement {missingModulesToIgnore.size || "la sélection"} opération(s)
               </Button>
               <p className="text-xs text-red-800 dark:text-red-200">
-                Relance ensuite cette fenêtre. Les modules non exclus dont le code manque devront être restaurés avant la mise à jour.
+                Cette action ne désinstalle aucun module et ne supprime aucune donnée. Elle est refusée si un module actif dépend encore d’un élément sélectionné.
               </p>
             </div>
           ) : null}
@@ -3750,7 +3801,7 @@ export default function Home() {
                 !canUseDb ||
                 loading ||
                 checkingUpdatePrerequisites ||
-                Boolean(updatePendingModules.length) ||
+                Boolean(pendingModulesWithMissingCode.length) ||
                 Boolean(updateFilestoreStatus?.missing && !allowMissingFilestore)
               }
               onClick={confirmUpdateAllOdooModules}
