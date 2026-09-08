@@ -3426,7 +3426,7 @@ export default function Home() {
                     Choisir
                   </Button>
                 </div>
-                <span className="break-all text-xs font-normal text-muted-foreground">
+                <span className="text-xs font-normal leading-relaxed text-muted-foreground">
                   Le dossier est créé s’il n’existe pas encore. Dans l’application installée, « Choisir » ouvre le sélecteur du système.
                 </span>
               </div>
