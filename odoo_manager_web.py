@@ -1973,6 +1973,7 @@ class Job:
         self.status = "running"
         self.started_at = time.strftime("%Y-%m-%d %H:%M:%S")
         self.finished_at = None
+        self.error_message = ""
         self.lines = []
         self.output = ""
         self.result = {}
@@ -2022,7 +2023,8 @@ class Job:
             if self.status == "running":
                 self.status = "done"
         except Exception as exc:
-            self.add(f"Erreur: {exc}")
+            self.error_message = str(exc).strip() or "Une erreur inattendue est survenue."
+            self.add(f"Erreur: {self.error_message}")
             self.status = "error"
             record_manager_error(
                 f"Job #{self.id} · {self.title}",
@@ -3388,6 +3390,7 @@ def jobs_snapshot(detail_job_id=None, compact=False):
                 "status": job.status,
                 "started_at": job.started_at,
                 "finished_at": job.finished_at,
+                "error_message": job.error_message,
                 "lines": list(job.lines) if not compact or job.id == detail_job_id else [],
                 "output": job.output if not compact or job.id == detail_job_id else "",
                 "result": dict(job.result),

@@ -319,6 +319,22 @@ class JobResourceTests(unittest.TestCase):
         self.assertEqual(by_id[second.id]["lines"], ["second output"])
         self.assertIn("second output", by_id[second.id]["output"])
 
+    @patch("odoo_manager_web.record_manager_error")
+    def test_failed_job_exposes_business_error_without_traceback(self, _record_error):
+        def reject_authentication(_job):
+            raise RuntimeError("RIKA a refusé l'authentification. Vérifie tes identifiants.")
+
+        job = web.Job("Créer le projet sodial_dev", reject_authentication, project="sodial_dev")
+        self.wait_for(job)
+
+        snapshot = web.jobs_snapshot(detail_job_id=job.id, compact=True)[0]
+        self.assertEqual(snapshot["status"], "error")
+        self.assertEqual(
+            snapshot["error_message"],
+            "RIKA a refusé l'authentification. Vérifie tes identifiants.",
+        )
+        self.assertNotIn("Traceback", snapshot["error_message"])
+
 
 class ContainerStatusBatchTests(unittest.TestCase):
     @patch("odoo_manager_web.run_capture")

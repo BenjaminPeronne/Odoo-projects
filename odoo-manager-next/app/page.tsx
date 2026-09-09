@@ -166,6 +166,7 @@ type Job = {
   status: "running" | "done" | "error" | string;
   started_at: string;
   finished_at?: string | null;
+  error_message?: string;
   lines: string[];
   output?: string;
   result?: {
@@ -402,7 +403,7 @@ function delay(milliseconds: number) {
 
 function jobsFingerprint(items: Job[]) {
   return items
-    .map((job) => `${job.id}:${job.status}:${job.finished_at || ""}:${job.lines.length}:${job.lines.at(-1) || ""}:${job.output?.length || 0}`)
+    .map((job) => `${job.id}:${job.status}:${job.finished_at || ""}:${job.error_message || ""}:${job.lines.length}:${job.lines.at(-1) || ""}:${job.output?.length || 0}`)
     .join("|");
 }
 
@@ -471,7 +472,7 @@ async function requestTaskNotificationPermission() {
 async function sendTaskNotification(job: Job) {
   const successful = job.status === "done";
   const title = successful ? "Tâche terminée" : "Tâche en erreur";
-  const body = job.title;
+  const body = !successful && job.error_message ? `${job.title}\n${job.error_message}` : job.title;
   if (isTauriRuntime()) {
     const { isPermissionGranted, sendNotification } = await import("@tauri-apps/plugin-notification");
     if (await isPermissionGranted()) sendNotification({ title, body });
@@ -906,7 +907,7 @@ export default function Home() {
   const pushToast = useCallback((kind: Toast["kind"], message: string) => {
     const id = toastId.current++;
     setToasts((current) => [...current, { id, kind, message }]);
-    schedule(() => setToasts((current) => current.filter((toast) => toast.id !== id)), 4200);
+    schedule(() => setToasts((current) => current.filter((toast) => toast.id !== id)), kind === "error" ? 8000 : 4200);
     if (kind === "error") {
       void fetch(`${API_BASE}/api/errors/report`, {
         method: "POST",
@@ -918,7 +919,9 @@ export default function Home() {
 
   const notifyJobCompletion = useCallback((job: Job) => {
     const successful = job.status === "done";
-    pushToast(successful ? "success" : "error", `${successful ? "Tâche terminée" : "Tâche en erreur"} : ${job.title}`);
+    const title = `${successful ? "Tâche terminée" : "Tâche en erreur"} : ${job.title}`;
+    const message = !successful && job.error_message ? `${title}\n${job.error_message}` : title;
+    pushToast(successful ? "success" : "error", message);
     void sendTaskNotification(job).catch(() => {
       // A refused system permission must not affect job polling.
     });
@@ -4299,7 +4302,7 @@ export default function Home() {
           <div
             key={toast.id}
             className={cn(
-              "w-full break-words rounded-md border bg-card p-3 text-sm shadow-lg",
+              "w-full whitespace-pre-line break-words rounded-md border bg-card p-3 text-sm shadow-lg",
               toast.kind === "error" && "border-red-200 bg-red-50 text-red-800 dark:border-red-800 dark:bg-red-950 dark:text-red-200",
               toast.kind === "success" && "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-200",
             )}
