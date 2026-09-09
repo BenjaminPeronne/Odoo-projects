@@ -106,5 +106,7 @@ jobs:
             odoo-manager-next/src-tauri/target/release/bundle/deb/*.deb
             odoo-manager-next/src-tauri/target/release/bundle/appimage/*.AppImage
             odoo-manager-next/src-tauri/target/release/bundle/nsis/*.exe
-          retention-days: 7
+          # Desktop installers are large (especially AppImage). Keep them only
+          # long enough to download the result of the latest manual/tag build.
+          retention-days: 1
           if-no-files-found: error
