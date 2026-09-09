@@ -89,8 +89,6 @@ def main():
         str(build_root),
         "--add-data",
         f"{ROOT / 'odoo_manager.sh'}{data_separator}.",
-        "--add-data",
-        f"{ROOT / 'odoo_manager_core'}{data_separator}odoo_manager_core",
     ]
     if is_windows:
         pyinstaller_args.extend(["--noconsole", "--contents-directory", WINDOWS_RUNTIME_NAME])
