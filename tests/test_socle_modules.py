@@ -1,4 +1,5 @@
 import subprocess
+from pathlib import Path
 from unittest import mock
 
 from test_module_layout import DummyJob, ModuleLayoutTests
@@ -20,7 +21,10 @@ class SocleModulesTests(ModuleLayoutTests):
         creator = web.ProjectCreator(web.SETTINGS, web.WORKSPACE, service)
         creator.settings = mock.Mock(execution_mode="wsl", wsl_distribution="Ubuntu")
         with mock.patch("odoo_manager_core.project_creator.platform_id", return_value="windows"), \
-                mock.patch("odoo_manager_core.project_creator.wsl_execution_path", side_effect=lambda path, distribution: str(path)):
+                mock.patch(
+                    "odoo_manager_core.project_creator.wsl_execution_path",
+                    side_effect=lambda path, distribution: Path(path).as_posix(),
+                ):
             states = creator.module_link_states(sources, addons)
         self.assertEqual({"valid": "correct", "absent": "missing", "broken": "conflict", "other": "conflict"}, states)
         self.assertEqual([], list(addons.glob(".odoo_manager_check_*")))
