@@ -51,6 +51,11 @@ jobs:
             return 1
           }
 
+          # Chrome is preinstalled on GitHub runners and its external APT
+          # repository is not needed to build the Tauri Linux package. Disable
+          # it so a transient Google index mismatch cannot block our packages.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
+
           retry sudo apt-get update
 
           FUSE_PACKAGE=libfuse2
