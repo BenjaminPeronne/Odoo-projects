@@ -63,6 +63,8 @@ class ManagerSettings:
     api_port: int = DEFAULT_API_PORT
     start_project_before_open: bool = False
     show_technical_details: bool = False
+    bases_layout: str = "classic"
+    modules_layout: str = "classic"
     interface_icon: str = "manager"
     onboarding_completed: bool = False
 
@@ -102,6 +104,8 @@ class ManagerSettings:
             api_port=api_port,
             start_project_before_open=bool(payload.get("start_project_before_open", False)),
             show_technical_details=bool(payload.get("show_technical_details", False)),
+            bases_layout="compact" if payload.get("bases_layout") == "compact" else "classic",
+            modules_layout="compact" if payload.get("modules_layout") == "compact" else "classic",
             interface_icon=interface_icon,
             onboarding_completed=bool(payload.get("onboarding_completed", False)),
         )

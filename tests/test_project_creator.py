@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -9,6 +10,7 @@ from odoo_manager_core.project_creator import (
     validate_git_ref,
     validate_gitlab_repository,
     validate_new_project_name,
+    validate_rika_instance,
 )
 from odoo_manager_core.project_service import ProjectService
 
@@ -150,6 +152,42 @@ class ProjectCreatorTests(unittest.TestCase):
         link = target / "odoo" / "addons" / "custom_module"
         self.assertTrue(link.is_symlink())
         self.assertEqual(Path("../addons-store/client-addons/custom_module"), link.readlink())
+
+    def test_rika_project_detects_version_and_reuses_downloaded_tree(self):
+        runner = FakeRunner()
+        creator = self.creator(runner)
+
+        def download(instance, login, password, temporary, log=None):
+            self.assertEqual((instance, login, password), ("prod01", "user@example.com", "secret"))
+            source = Path(temporary) / "rika" / instance
+            release = source / "odoo" / "odoo" / "release.py"
+            release.parent.mkdir(parents=True)
+            release.write_text("version_info = (18, 0, 0)\n", encoding="utf-8")
+            return source, "18.0"
+
+        with mock.patch.object(creator, "download_rika_project", side_effect=download):
+            target = creator.create(
+                "RIKA_COPY",
+                "",
+                source_type="rika",
+                rika_instance="prod01",
+                rika_login="user@example.com",
+                rika_password="secret",
+            )
+
+        self.assertTrue((target / "odoo" / "odoo" / "odoo" / "release.py").is_file())
+        template_clone = next(command for command in runner.commands if "clone" in command)
+        self.assertIn("18.0", template_clone)
+        self.assertFalse(any("odoo_entreprise.git" in command for command in runner.commands))
+
+    def test_rika_archive_rejects_parent_directory_escape(self):
+        archive = self.workspace / "unsafe.zip"
+        with zipfile.ZipFile(archive, "w") as bundle:
+            bundle.writestr("../outside.txt", "unsafe")
+
+        with self.assertRaisesRegex(RuntimeError, "chemin non sécurisé"):
+            ProjectCreator.extract_rika_archive(archive, self.workspace / "extract")
+
 
     @mock.patch("odoo_manager_core.project_creator.platform_id", return_value="windows")
     @mock.patch("odoo_manager_core.project_creator.host_executable_available", return_value=False)
@@ -360,6 +398,9 @@ class ProjectCreatorTests(unittest.TestCase):
                 validate_git_ref(invalid)
         with self.assertRaises(ValueError):
             validate_gitlab_repository("https://example.com/repository.git")
+        for invalid in ("", "../prod01", "https://rika.sudokeys.com/prod01", "prod 01"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                validate_rika_instance(invalid)
 
 
 if __name__ == "__main__":

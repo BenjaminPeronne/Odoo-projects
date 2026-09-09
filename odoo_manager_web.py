@@ -1463,17 +1463,25 @@ def safe_resolve(path):
         return path.absolute()
 
 
-def module_location_info(project, path):
+def module_layout_context(project):
+    # Shared only within one listing: never reuse filesystem safety checks
+    # across requests or destructive operations.
+    return (
+        safe_resolve(project_addons_link_parent(project)),
+        safe_resolve(project_addons_storage_parent(project)),
+        safe_resolve(project_legacy_addons_storage_parent(project)),
+        module_import_roots(project),
+    )
+
+
+def module_location_info(project, path, layout=None):
     metadata = WSL_MODULE_METADATA.get(str(path).casefold())
     if metadata:
         return {
             key: metadata[key]
             for key in ("path", "link_path", "source_path", "path_kind")
         }
-    link_parent = safe_resolve(project_addons_link_parent(project))
-    storage_parent = safe_resolve(project_addons_storage_parent(project))
-    legacy_storage_parent = safe_resolve(project_legacy_addons_storage_parent(project))
-    imports_roots = module_import_roots(project)
+    link_parent, storage_parent, legacy_storage_parent, imports_roots = layout or module_layout_context(project)
     parent = safe_resolve(path.parent)
     source_path = safe_resolve(path) if path.is_symlink() else path
 
@@ -1528,8 +1536,8 @@ def module_origin(source_path):
     return "other"
 
 
-def basic_module(project, path):
-    location = module_location_info(project, path)
+def basic_module(project, path, layout=None):
+    location = module_location_info(project, path, layout)
     name = posixpath.basename(str(path).replace("\\", "/"))
     return {
         "name": name,
@@ -1554,17 +1562,14 @@ def should_parse_manifest(path):
     return True
 
 
-def module_removal_info(project, path):
+def module_removal_info(project, path, layout=None):
     metadata = WSL_MODULE_METADATA.get(str(path).casefold())
     if metadata:
         return {
             key: metadata[key]
             for key in ("removable", "removal_mode", "removal_note")
         }
-    link_parent = safe_resolve(project_addons_link_parent(project))
-    storage_parent = safe_resolve(project_addons_storage_parent(project))
-    legacy_storage_parent = safe_resolve(project_legacy_addons_storage_parent(project))
-    imports_roots = module_import_roots(project)
+    link_parent, storage_parent, legacy_storage_parent, imports_roots = layout or module_layout_context(project)
     parent = safe_resolve(path.parent)
 
     if parent != link_parent:
@@ -1645,6 +1650,7 @@ def installed_modules(project, db_name):
 
 def modules_for(project, db_name=None):
     cache_key = project
+    layout = module_layout_context(project)
     now = time.time()
     with MODULE_CACHE_LOCK:
         cached = MODULE_CACHE.get(cache_key)
@@ -1654,7 +1660,7 @@ def modules_for(project, db_name=None):
             base_modules = None
 
     if base_modules is None:
-        base_modules = [basic_module(project, path) for path in module_dirs(project)]
+        base_modules = [basic_module(project, path, layout) for path in module_dirs(project)]
         if base_modules:
             with MODULE_CACHE_LOCK:
                 MODULE_CACHE[cache_key] = {"created_at": now, "modules": [dict(item) for item in base_modules]}
@@ -1666,7 +1672,7 @@ def modules_for(project, db_name=None):
         state = states.get(module["name"], {})
         module["state"] = state.get("state", "disponible")
         module["installed_version"] = state.get("installed_version", "")
-        module.update(module_removal_info(project, Path(module["path"])))
+        module.update(module_removal_info(project, Path(module["path"]), layout))
         modules.append(module)
     return modules
 
@@ -2883,19 +2889,10 @@ def ensure_enterprise_module_links(job, project):
         raise RuntimeError("Le dossier Odoo Enterprise ne contient aucun module reconnaissable.")
 
     link_parent = project_addons_link_parent(project)
-    conflicts = []
-    missing_before = 0
-    for name, source in candidates.items():
-        link = link_parent / name
-        if not creator.path_entry_exists(link):
-            missing_before += 1
-            continue
-        try:
-            correct = link.is_symlink() and link.resolve(strict=False) == source.resolve(strict=False)
-        except OSError:
-            correct = False
-        if not correct:
-            conflicts.append(name)
+    link_parent.mkdir(parents=True, exist_ok=True)
+    states = creator.module_link_states(candidates, link_parent)
+    conflicts = [name for name, state in states.items() if state == "conflict"]
+    missing_before = sum(state == "missing" for state in states.values())
     if conflicts:
         raise RuntimeError(
             "Liens Enterprise non modifiés car des modules existent déjà avec une autre source dans odoo/addons : "
@@ -2905,7 +2902,8 @@ def ensure_enterprise_module_links(job, project):
     for root in roots:
         creator.link_modules(root, link_parent, log=job.add, replace=False)
 
-    missing_after = [name for name in candidates if not creator.path_entry_exists(link_parent / name)]
+    states = creator.module_link_states(candidates, link_parent)
+    missing_after = [name for name, state in states.items() if state != "correct"]
     if missing_after:
         raise RuntimeError("Création des liens Enterprise incomplète : " + ", ".join(sorted(missing_after)))
     clear_project_module_cache(project)
@@ -3045,7 +3043,18 @@ def delete_module_code_job(job, project, modules, db_name="", uninstall_first=Fa
     job.add(f"Emplacement de récupération: {DELETED_MODULES / project}")
 
 
-def create_project_job(job, name, version, source_type, repository_url, repository_branch, start_after_creation):
+def create_project_job(
+    job,
+    name,
+    version,
+    source_type,
+    repository_url,
+    repository_branch,
+    rika_instance,
+    rika_login,
+    rika_password,
+    start_after_creation,
+):
     creator = ProjectCreator(SETTINGS, WORKSPACE, project_service())
     creator.create(
         name,
@@ -3053,6 +3062,9 @@ def create_project_job(job, name, version, source_type, repository_url, reposito
         source_type=source_type,
         repository_url=repository_url,
         repository_branch=repository_branch,
+        rika_instance=rika_instance,
+        rika_login=rika_login,
+        rika_password=rika_password,
         log=job.add,
     )
 
@@ -4090,12 +4102,19 @@ class Handler(BaseHTTPRequestHandler):
                 )
             elif action == "create_project":
                 name = validate_new_project_name(payload.get("name", ""))
-                version = validate_odoo_version(payload.get("version", ""))
                 source_type = str(payload.get("source_type", "standard") or "standard").strip()
+                version = str(payload.get("version", "") or "").strip()
                 repository_url = str(payload.get("repository_url", "") or "").strip()
                 repository_branch = str(payload.get("repository_branch", "") or "").strip()
-                if source_type not in {"standard", "gitlab"}:
+                rika_instance = str(payload.get("rika_instance", "") or "").strip()
+                rika_login = str(payload.get("rika_login", "") or "").strip()
+                rika_password = str(payload.get("rika_password", "") or "")
+                if source_type not in {"standard", "gitlab", "rika"}:
                     raise ValueError("Type de source invalide.")
+                if source_type != "rika":
+                    version = validate_odoo_version(version)
+                elif not rika_instance or not rika_login or not rika_password:
+                    raise ValueError("L'instance et les identifiants RIKA sont requis.")
                 if source_type == "gitlab":
                     repository_url = validate_gitlab_repository(repository_url)
                     repository_branch = validate_git_ref(repository_branch)
@@ -4105,7 +4124,17 @@ class Handler(BaseHTTPRequestHandler):
                 job = Job(
                     f"Créer le projet {name or 'Odoo'}",
                     create_project_job,
-                    (name, version, source_type, repository_url, repository_branch, start_after_creation),
+                    (
+                        name,
+                        version,
+                        source_type,
+                        repository_url,
+                        repository_branch,
+                        rika_instance,
+                        rika_login,
+                        rika_password,
+                        start_after_creation,
+                    ),
                     project=name,
                 )
             elif action == "install_traefik":

@@ -129,6 +129,8 @@ type ManagerSettings = {
   api_port_actual?: number;
   start_project_before_open: boolean;
   show_technical_details: boolean;
+  bases_layout: "classic" | "compact";
+  modules_layout: "classic" | "compact";
   interface_icon: InterfaceIcon;
   onboarding_completed: boolean;
   config_file?: string;
@@ -294,7 +296,6 @@ const BOOTSTRAP_RETRY_DELAYS_MS = [0, 500, 1000, 2000];
 const DOCKER_CONFIRM_DELAY_MS = 700;
 const API_TIMEOUT_MS = 20_000;
 const UPLOAD_TIMEOUT_MS = 120_000;
-const MODULES_PER_PAGE = 50;
 const LOG_DESCRIPTION_MAX_LENGTH = 240;
 
 class ApiUnavailableError extends Error {
@@ -629,6 +630,8 @@ function fallbackManagerSettings(
     api_port_actual: current?.api_port_actual,
     start_project_before_open: current?.start_project_before_open ?? false,
     show_technical_details: current?.show_technical_details ?? false,
+    bases_layout: current?.bases_layout === "compact" ? "compact" : "classic",
+    modules_layout: current?.modules_layout === "compact" ? "compact" : "classic",
     interface_icon: current?.interface_icon === "local" ? "local" : "manager",
     onboarding_completed: current?.onboarding_completed ?? false,
     config_file: current?.config_file,
@@ -829,11 +832,14 @@ export default function Home() {
       ))
       .filter((module) => moduleOriginFilter === "all" || normalizedModuleOrigin(module.origin, module.source_path || module.path) === moduleOriginFilter);
   }, [deferredModuleSearch, modules, moduleFilter, moduleOriginFilter]);
-  const modulePageCount = Math.max(1, Math.ceil(filteredModules.length / MODULES_PER_PAGE));
+  const compactBases = settings?.bases_layout === "compact";
+  const compactModules = settings?.modules_layout === "compact";
+  const modulesPerPage = compactModules ? 20 : 50;
+  const modulePageCount = Math.max(1, Math.ceil(filteredModules.length / modulesPerPage));
   const visibleModules = useMemo(() => {
-    const start = (modulePage - 1) * MODULES_PER_PAGE;
-    return filteredModules.slice(start, start + MODULES_PER_PAGE);
-  }, [filteredModules, modulePage]);
+    const start = (modulePage - 1) * modulesPerPage;
+    return filteredModules.slice(start, start + modulesPerPage);
+  }, [filteredModules, modulePage, modulesPerPage]);
 
   const moduleByName = useMemo(() => new Map(modules.map((module) => [module.name, module])), [modules]);
   const installedSoclePresetIds = useMemo<Set<string>>(
@@ -1286,10 +1292,12 @@ export default function Home() {
       }
     });
     source.addEventListener("job_completed", () => {
-      void Promise.all([refreshJobs(), refreshOverview(), refreshModules()]);
+      // Applying completed jobs triggers the module synchronization effect.
+      // Fetching modules here as well duplicated the filesystem/SQL scan.
+      void Promise.all([refreshJobs(), refreshOverview()]);
     });
     return () => source.close();
-  }, [applyOverview, commitSystemStatus, initializing, refreshJobs, refreshModules, refreshOverview]);
+  }, [applyOverview, commitSystemStatus, initializing, refreshJobs, refreshOverview]);
 
   useEffect(() => {
     if (selectedProject) {
@@ -2085,7 +2093,7 @@ export default function Home() {
 
   useEffect(() => {
     setModulePage(1);
-  }, [deferredModuleSearch, moduleFilter, moduleOriginFilter, selectedDb, selectedProject?.name]);
+  }, [deferredModuleSearch, moduleFilter, moduleOriginFilter, selectedDb, selectedProject?.name, modulesPerPage]);
 
   useEffect(() => {
     if (modulePage > modulePageCount) setModulePage(modulePageCount);
@@ -2207,7 +2215,7 @@ export default function Home() {
   }
 
   return (
-    <main className="sdk-shell min-h-screen overflow-x-hidden">
+    <main className="sdk-shell min-h-screen overflow-x-clip">
       <div className="flex min-h-screen min-w-0 flex-col lg:flex-row">
         <aside className="min-w-0 border-b bg-card lg:sticky lg:top-0 lg:h-screen lg:w-80 lg:flex-none lg:border-b-0 lg:border-r">
           <div className="flex h-full flex-col">
@@ -2582,7 +2590,7 @@ export default function Home() {
 
               {selectedProjectOnline && (
                 <TabsContent value="bases">
-                  <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_400px]">
+                  <div className={cn("grid min-w-0 gap-4", !compactBases && "xl:grid-cols-[minmax(0,1fr)_400px]")}>
                     <Card>
                       <CardHeader>
                         <CardTitle>Bases Odoo</CardTitle>
@@ -2619,7 +2627,7 @@ export default function Home() {
                         )}
                       </CardContent>
                     </Card>
-                    <div className="grid min-w-0 content-start gap-4">
+                    <div className={cn("grid min-w-0 content-start gap-4", compactBases && "items-start md:grid-cols-2 2xl:grid-cols-3")}>
                       <Card>
                         <CardHeader>
                           <CardTitle>Créer une base Odoo</CardTitle>
@@ -2672,7 +2680,7 @@ export default function Home() {
                         </CardContent>
                       </Card>
 
-                      <Card>
+                      <Card className={cn(compactBases && "md:col-span-2 2xl:col-span-1")}>
                         <CardHeader>
                           <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0">
@@ -2881,7 +2889,7 @@ export default function Home() {
                           {showModuleLocations && <div>Emplacements</div>}
                           <div className="text-right">Actions</div>
                         </div>
-                        <div className="max-h-[min(62vh,720px)] overflow-y-auto">
+                        <div className={cn("min-w-0", !compactModules && "max-h-[min(62vh,720px)] overflow-y-auto")}>
                           {visibleModules.length ? (
                             visibleModules.map((module) => {
                               const sourcePath = module.source_path || module.path;
@@ -3030,7 +3038,7 @@ export default function Home() {
                         {filteredModules.length > 0 && (
                           <div className="flex flex-col gap-3 border-t bg-muted/30 px-3 py-2 text-sm sm:flex-row sm:items-center sm:justify-between">
                             <span className="text-muted-foreground">
-                              {Math.min((modulePage - 1) * MODULES_PER_PAGE + 1, filteredModules.length)}–{Math.min(modulePage * MODULES_PER_PAGE, filteredModules.length)} sur {filteredModules.length} module(s)
+                              {Math.min((modulePage - 1) * modulesPerPage + 1, filteredModules.length)}–{Math.min(modulePage * modulesPerPage, filteredModules.length)} sur {filteredModules.length} module(s)
                             </span>
                             <div className="flex items-center gap-2">
                               <Button size="icon" variant="outline" disabled={modulePage <= 1} onClick={() => setModulePage((page) => Math.max(1, page - 1))} aria-label="Page précédente" title="Page précédente">
@@ -3471,6 +3479,29 @@ export default function Home() {
                 </Button>
               </div>
 
+              <div className="grid gap-3 rounded-md border p-3">
+                <div className="text-sm font-medium">Affichage des pages</div>
+                <p className="text-xs text-muted-foreground">L’affichage classique est utilisé par défaut. Tu peux choisir chaque page séparément.</p>
+                {([
+                  ["bases_layout", "Bases", "Liste à gauche et actions à droite", "Liste en haut et actions en dessous"],
+                  ["modules_layout", "Modules", "50 lignes par page, défilement dans la liste", "20 lignes par page, défilement de la page"],
+                ] as const).map(([key, title, classicDescription, compactDescription]) => (
+                  <div key={key} className="grid gap-2">
+                    <div className="text-sm font-medium">{title}</div>
+                    <div className="grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label={`Affichage ${title}`}>
+                      {(["classic", "compact"] as const).map((value) => (
+                        <InteractiveCard key={value} role="radio" aria-checked={(settingsDraft[key] ?? "classic") === value}
+                          className={cn("p-3 text-left", (settingsDraft[key] ?? "classic") === value && "border-primary bg-primary/10")}
+                          onClick={() => setSettingsDraft({ ...settingsDraft, [key]: value })}>
+                          <span className="block text-sm font-medium">{value === "classic" ? "Classique (ancien)" : "Compact (nouveau)"}</span>
+                          <span className="mt-1 block text-xs text-muted-foreground">{value === "classic" ? classicDescription : compactDescription}</span>
+                        </InteractiveCard>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
               <div className="grid gap-2">
                 <div>
                   <div className="text-sm font-medium">Icône affichée</div>
@@ -3746,6 +3777,7 @@ export default function Home() {
                     disabled={unavailable || alreadyInstalled || loading}
                     onCheckedChange={(checked) => toggleSoclePreset(preset.id, checked === true)}
                   />
+                  <img src={`/odoo-apps/${preset.id}.svg`} alt="" aria-hidden="true" className="h-12 w-12 shrink-0 object-contain" />
                   <span className="min-w-0">
                     <span className="block font-medium">{preset.label}</span>
                     <span className="mt-1 block break-all text-xs text-muted-foreground">{preset.modules.join(" + ")}</span>
@@ -4315,13 +4347,19 @@ function CreateProjectDialog({
 }) {
   const [name, setName] = useState("");
   const [version, setVersion] = useState("19.0");
-  const [sourceType, setSourceType] = useState<"standard" | "gitlab">("standard");
+  const [sourceType, setSourceType] = useState<"standard" | "gitlab" | "rika">("standard");
   const [repositoryUrl, setRepositoryUrl] = useState("");
   const [repositoryBranch, setRepositoryBranch] = useState("master");
+  const [rikaInstance, setRikaInstance] = useState("");
+  const [rikaLogin, setRikaLogin] = useState("");
+  const [rikaPassword, setRikaPassword] = useState("");
   const [startAfterCreation, setStartAfterCreation] = useState(true);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      setRikaPassword("");
+      return;
+    }
     setStartAfterCreation(dockerReady);
     if (prerequisites?.supported_versions?.length && !prerequisites.supported_versions.includes(version)) {
       setVersion(prerequisites.supported_versions.at(-1) || "19.0");
@@ -4331,11 +4369,13 @@ function CreateProjectDialog({
   const prerequisitesReady = Boolean(
     prerequisites?.workspace_ready && prerequisites.git_available && prerequisites.ssh_key_present,
   );
-  const gitlabFieldsReady = sourceType === "standard" || Boolean(repositoryUrl.trim() && repositoryBranch.trim());
+  const sourceFieldsReady = sourceType === "standard"
+    || (sourceType === "gitlab" && Boolean(repositoryUrl.trim() && repositoryBranch.trim()))
+    || (sourceType === "rika" && Boolean(rikaInstance.trim() && rikaLogin.trim() && rikaPassword));
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Créer un projet Odoo local</DialogTitle>
           <DialogDescription>
@@ -4359,7 +4399,7 @@ function CreateProjectDialog({
             </div>
             <div className="grid content-start gap-1.5 text-sm font-medium">
               <label htmlFor="new-project-version">Version Odoo</label>
-              <Select value={version} onValueChange={setVersion}>
+              <Select value={version} onValueChange={setVersion} disabled={sourceType === "rika"}>
                 <SelectTrigger id="new-project-version"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {(prerequisites?.supported_versions || ["15.0", "16.0", "17.0", "18.0", "19.0"]).map((item) => (
@@ -4367,13 +4407,15 @@ function CreateProjectDialog({
                   ))}
                 </SelectContent>
               </Select>
-              <span aria-hidden="true" className="min-h-4 text-xs font-normal">&nbsp;</span>
+              <span className="min-h-4 text-xs font-normal text-muted-foreground">
+                {sourceType === "rika" ? "Détectée automatiquement dans la copie RIKA." : " "}
+              </span>
             </div>
           </div>
 
           <fieldset className="grid gap-2">
             <legend className="mb-1 text-sm font-medium">Source du projet</legend>
-            <div className="grid gap-2 sm:grid-cols-2">
+            <div className="grid gap-2 sm:grid-cols-3">
               <InteractiveCard
                 className={cn(
                   "min-h-20 p-3",
@@ -4394,6 +4436,16 @@ function CreateProjectDialog({
                 <span className="block font-medium">Dépôt d’addons GitLab</span>
                 <span className="mt-1 block text-xs leading-5 text-muted-foreground">Ajoute le dépôt client au socle standard.</span>
               </InteractiveCard>
+              <InteractiveCard
+                className={cn(
+                  "min-h-20 p-3",
+                  sourceType === "rika" && "border-primary bg-primary/5",
+                )}
+                onClick={() => setSourceType("rika")}
+              >
+                <span className="block font-medium">Copie depuis RIKA</span>
+                <span className="mt-1 block text-xs leading-5 text-muted-foreground">Récupère une instance et détecte sa version Odoo.</span>
+              </InteractiveCard>
             </div>
           </fieldset>
 
@@ -4411,6 +4463,39 @@ function CreateProjectDialog({
                 Branche
                 <Input value={repositoryBranch} onChange={(event) => setRepositoryBranch(event.target.value)} placeholder="master" />
               </label>
+            </div>
+          )}
+
+          {sourceType === "rika" && (
+            <div className="grid gap-3 border-l-2 border-primary pl-4 sm:grid-cols-2">
+              <label className="grid min-w-0 gap-1.5 text-sm font-medium sm:col-span-2">
+                Instance RIKA
+                <Input
+                  value={rikaInstance}
+                  onChange={(event) => setRikaInstance(event.target.value)}
+                  placeholder="prod01"
+                />
+              </label>
+              <label className="grid min-w-0 gap-1.5 text-sm font-medium">
+                Identifiant Sudokeys
+                <Input
+                  value={rikaLogin}
+                  onChange={(event) => setRikaLogin(event.target.value)}
+                  autoComplete="username"
+                />
+              </label>
+              <label className="grid min-w-0 gap-1.5 text-sm font-medium">
+                Mot de passe
+                <Input
+                  type="password"
+                  value={rikaPassword}
+                  onChange={(event) => setRikaPassword(event.target.value)}
+                  autoComplete="current-password"
+                />
+              </label>
+              <p className="text-xs leading-5 text-muted-foreground sm:col-span-2">
+                Ces identifiants sont transmis uniquement à RIKA pendant cette création et ne sont pas enregistrés par le gestionnaire.
+              </p>
             </div>
           )}
 
@@ -4447,13 +4532,16 @@ function CreateProjectDialog({
           <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
             <Button variant="outline" onClick={() => onOpenChange(false)}>Annuler</Button>
             <Button
-              disabled={loading || !name.trim() || !prerequisitesReady || !gitlabFieldsReady}
+              disabled={loading || !name.trim() || !prerequisitesReady || !sourceFieldsReady}
               onClick={() => onSubmit({
                 name: name.trim(),
                 version,
                 source_type: sourceType,
                 repository_url: repositoryUrl.trim(),
                 repository_branch: repositoryBranch.trim(),
+                rika_instance: rikaInstance.trim(),
+                rika_login: rikaLogin.trim(),
+                rika_password: rikaPassword,
                 start_after_creation: startAfterCreation,
               })}
             >

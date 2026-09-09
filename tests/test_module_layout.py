@@ -18,6 +18,20 @@ class DummyJob:
 
 
 class ModuleLayoutTests(unittest.TestCase):
+    def test_cached_listing_rechecks_link_safety_without_rebuilding_layout_per_module(self):
+        web.link_module_candidates(DummyJob(), self.project, [self.external])
+        with mock.patch.object(web, "module_layout_context", wraps=web.module_layout_context) as layout:
+            first = web.modules_for(self.project)
+            self.assertEqual(1, layout.call_count)
+        self.assertEqual("link_and_storage", first[0]["removal_mode"])
+        link = self.project_root / "odoo" / "addons" / "custom_module"
+        link.unlink()
+        link.symlink_to(self.external)
+        with mock.patch.object(web, "module_layout_context", wraps=web.module_layout_context) as layout:
+            second = web.modules_for(self.project)
+            self.assertEqual(1, layout.call_count)
+        self.assertEqual("link_only", second[0]["removal_mode"])
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)

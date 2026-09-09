@@ -93,8 +93,11 @@ doit ensuite enregistrer cette cle publique dans GitLab. Le projet est prepare d
 un dossier temporaire du workspace puis deplace a son emplacement final en une
 operation, afin qu'un clone interrompu ne laisse pas de projet partiel.
 
-Le parcours `brainkeys riplika` reste disponible uniquement dans le client CLI
-historique pour les environnements Rika non couverts par l'interface graphique.
+Le formulaire propose aussi **Copie depuis RIKA**. Il demande le nom de
+l'instance et les identifiants Sudokeys, génère et télécharge la copie, contrôle
+le ZIP puis détecte automatiquement la version Odoo avant de préparer le modèle
+Docker correspondant. Les identifiants restent limités au job de création et ne
+sont pas enregistrés dans les paramètres du gestionnaire.
 
 ### Restaurer une sauvegarde Odoo
 

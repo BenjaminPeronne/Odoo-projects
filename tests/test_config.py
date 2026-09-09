@@ -44,6 +44,8 @@ class SettingsTests(unittest.TestCase):
                     "api_port": 19876,
                     "show_technical_details": True,
                     "interface_icon": "local",
+                    "bases_layout": "compact",
+                    "modules_layout": "classic",
                     "onboarding_completed": True,
                 },
                 create_workspace=True,
@@ -56,6 +58,8 @@ class SettingsTests(unittest.TestCase):
             self.assertFalse(loaded.start_project_before_open)
             self.assertTrue(loaded.show_technical_details)
             self.assertEqual(loaded.interface_icon, "local")
+            self.assertEqual(loaded.bases_layout, "compact")
+            self.assertEqual(loaded.modules_layout, "classic")
             self.assertTrue(loaded.onboarding_completed)
 
     def test_open_odoo_does_not_start_project_by_default(self):
@@ -63,6 +67,12 @@ class SettingsTests(unittest.TestCase):
 
         self.assertFalse(settings.start_project_before_open)
         self.assertFalse(settings.show_technical_details)
+
+    def test_layout_defaults_and_invalid_values_use_classic(self):
+        for payload in ({}, {"bases_layout": "unknown", "modules_layout": None}):
+            settings = ManagerSettings.from_dict(payload, "/tmp/workspace")
+            self.assertEqual(settings.bases_layout, "classic")
+            self.assertEqual(settings.modules_layout, "classic")
 
     def test_interface_icon_defaults_to_manager_for_unknown_value(self):
         settings = ManagerSettings.from_dict({"interface_icon": "unknown"}, "/tmp/workspace")

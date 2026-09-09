@@ -1,0 +1,25 @@
+{
+  "source_page": "https://www.odoo.com/page/brand-assets",
+  "downloaded": "2026-09-08",
+  "icons": {
+    "sales": "https://download.odoocdn.com/icons/sale_management/static/description/icon.svg",
+    "crm": "https://download.odoocdn.com/icons/crm/static/description/icon.svg",
+    "purchase": "https://download.odoocdn.com/icons/purchase/static/description/icon.svg",
+    "inventory": "https://download.odoocdn.com/icons/stock/static/description/icon.svg",
+    "accounting_fr": "https://download.odoocdn.com/icons/accountant/static/description/icon.svg",
+    "manufacturing": "https://download.odoocdn.com/icons/mrp/static/description/icon.svg",
+    "project": "https://download.odoocdn.com/icons/project/static/description/icon.svg",
+    "timesheets": "https://download.odoocdn.com/icons/hr_timesheet/static/description/icon.svg",
+    "employees": "https://download.odoocdn.com/icons/hr/static/description/icon.svg",
+    "time_off": "https://download.odoocdn.com/icons/hr_holidays/static/description/icon.svg",
+    "expenses": "https://download.odoocdn.com/icons/hr_expense/static/description/icon.svg",
+    "helpdesk": "https://download.odoocdn.com/icons/helpdesk/static/description/icon.svg",
+    "field_service": "https://download.odoocdn.com/icons/industry_fsm/static/description/icon.svg",
+    "planning": "https://download.odoocdn.com/icons/planning/static/description/icon.svg",
+    "documents": "https://download.odoocdn.com/icons/documents/static/description/icon.svg",
+    "sign": "https://download.odoocdn.com/icons/sign/static/description/icon.svg",
+    "subscriptions": "https://download.odoocdn.com/icons/sale_subscription/static/description/icon.svg",
+    "point_of_sale": "https://download.odoocdn.com/icons/point_of_sale/static/description/icon.svg",
+    "ecommerce": "https://download.odoocdn.com/icons/website_sale/static/description/icon.svg"
+  }
+}

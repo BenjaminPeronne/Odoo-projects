@@ -4,6 +4,11 @@ import shlex
 import shutil
 import tempfile
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import zipfile
+from http.cookiejar import CookieJar
 from pathlib import Path
 
 from .platform import (
@@ -30,6 +35,10 @@ SUDOKEYS_GITLAB_RE = re.compile(
     r"^(?:ssh://git@gitlab\.sudokeys\.com:10022/|git@gitlab\.sudokeys\.com:)"
     r"[A-Za-z0-9._/-]+\.git$"
 )
+RIKA_INSTANCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
+RIKA_BASE_URL = "https://rika.sudokeys.com/"
+MAX_RIKA_ARCHIVE_BYTES = 100 * 1024 * 1024 * 1024
+MAX_RIKA_ARCHIVE_ENTRIES = 2_000_000
 
 
 def validate_new_project_name(name):
@@ -70,6 +79,26 @@ def validate_gitlab_repository(url):
             "URL GitLab SSH invalide. Utilise une URL du GitLab Sudokeys terminée par .git."
         )
     return url
+
+
+def validate_rika_instance(instance):
+    instance = str(instance or "").strip()
+    if not RIKA_INSTANCE_RE.fullmatch(instance) or instance in {".", ".."}:
+        raise ValueError("Instance RIKA invalide. Utilise uniquement son nom, par exemple prod01.")
+    return instance
+
+
+def detected_odoo_version(project_root):
+    release = Path(project_root) / "odoo" / "odoo" / "release.py"
+    try:
+        content = release.read_text(encoding="utf-8", errors="ignore")
+    except OSError as exc:
+        raise RuntimeError("La copie RIKA ne contient pas le fichier de version Odoo attendu.") from exc
+    match = re.search(r"version_info\s*=\s*\(\s*(\d+)\s*,\s*(\d+)\s*,", content)
+    version = f"{match.group(1)}.{match.group(2)}" if match else ""
+    if version not in SUPPORTED_ODOO_VERSIONS:
+        raise RuntimeError("La version Odoo de cette instance RIKA n'est pas prise en charge.")
+    return version
 
 
 def repository_slug(url):
@@ -243,6 +272,57 @@ class ProjectCreator:
             if code != 1:
                 return None
         return False
+
+    def module_link_states(self, candidates, addons_dir):
+        """Inspect links in the filesystem that creates and consumes them."""
+        if platform_id() == "windows" and (self.wsl_context or self.settings.execution_mode == "wsl"):
+            distribution = self.wsl_context.distribution if self.wsl_context else self.settings.wsl_distribution
+            lines = ["set -eu"]
+            for name, source in candidates.items():
+                link = shlex.quote(wsl_execution_path(addons_dir / name, distribution))
+                target = shlex.quote(wsl_execution_path(source, distribution))
+                lines.extend([
+                    f"if [ -L {link} ] && [ -d {link} ] && [ \"$(readlink -f -- {link})\" = \"$(readlink -f -- {target})\" ]; then",
+                    f"printf '%s\\t%s\\n' {shlex.quote(name)} correct",
+                    f"elif [ -e {link} ] || [ -L {link} ]; then",
+                    f"printf '%s\\t%s\\n' {shlex.quote(name)} conflict",
+                    "else",
+                    f"printf '%s\\t%s\\n' {shlex.quote(name)} missing",
+                    "fi",
+                ])
+            # Enterprise contains hundreds of modules: do not exceed Windows'
+            # command-line limit by passing the generated script with sh -c.
+            script_path = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", newline="\n", suffix=".sh",
+                    prefix=".odoo_manager_check_", dir=addons_dir, delete=False,
+                ) as script:
+                    script_path = Path(script.name)
+                    script.write("\n".join(lines) + "\n")
+                code, output = self.project_service.capture(
+                    [*wsl_command_prefix(distribution), "sh", wsl_execution_path(script_path, distribution)],
+                    cwd=self.command_cwd, timeout=60,
+                )
+            finally:
+                if script_path is not None:
+                    script_path.unlink(missing_ok=True)
+            states = dict(line.split("\t", 1) for line in output.splitlines() if "\t" in line)
+            if code != 0 or set(states) != set(candidates) or any(
+                state not in {"correct", "conflict", "missing"} for state in states.values()
+            ):
+                raise RuntimeError("Impossible de vérifier les liens Enterprise depuis WSL. Vérifie l'accès au workspace et réessaie.")
+            return states
+        states = {}
+        for name, source in candidates.items():
+            link = addons_dir / name
+            if not self.path_entry_exists(link):
+                states[name] = "missing"
+            elif link.is_symlink() and link.is_dir() and link.resolve() == source.resolve():
+                states[name] = "correct"
+            else:
+                states[name] = "conflict"
+        return states
 
     def path_entry_exists(self, path):
         try:
@@ -422,6 +502,111 @@ class ProjectCreator:
             content = candidate.read_text(encoding="utf-8")
             candidate.write_text(content.replace("XXXXXX", project_name), encoding="utf-8")
 
+    @staticmethod
+    def extract_rika_archive(archive, destination):
+        destination = Path(destination)
+        destination.mkdir(parents=True, exist_ok=True)
+        destination_root = destination.resolve()
+        with zipfile.ZipFile(archive) as bundle:
+            entries = bundle.infolist()
+            if len(entries) > MAX_RIKA_ARCHIVE_ENTRIES:
+                raise RuntimeError("La copie RIKA contient trop de fichiers.")
+            total_size = sum(max(0, entry.file_size) for entry in entries)
+            if total_size > MAX_RIKA_ARCHIVE_BYTES:
+                raise RuntimeError("La copie RIKA dépasse la taille maximale autorisée.")
+            for entry in entries:
+                normalized = entry.filename.replace("\\", "/")
+                parts = Path(normalized).parts
+                if (
+                    not normalized
+                    or normalized.startswith("/")
+                    or Path(normalized).is_absolute()
+                    or (parts and parts[0].endswith(":"))
+                    or any(part in {"", ".", ".."} for part in parts)
+                    or ((entry.external_attr >> 16) & 0o170000) == 0o120000
+                ):
+                    raise RuntimeError("La copie RIKA contient un chemin non sécurisé.")
+                target = (destination / Path(*parts)).resolve()
+                try:
+                    target.relative_to(destination_root)
+                except ValueError as exc:
+                    raise RuntimeError("La copie RIKA tente d'écrire hors du projet temporaire.") from exc
+            bundle.extractall(destination)
+
+    def download_rika_project(self, instance, login, password, temporary, log=None):
+        instance = validate_rika_instance(instance)
+        login = str(login or "").strip()
+        password = str(password or "")
+        if not login or not password:
+            raise ValueError("L'identifiant et le mot de passe RIKA sont requis.")
+
+        cookies = CookieJar()
+        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookies))
+        auth_payload = urllib.parse.urlencode({
+            "name": login,
+            "password": password,
+            "submit": "Connexion",
+        }).encode("utf-8")
+        try:
+            self.log(log, "Connexion sécurisée à RIKA...")
+            with opener.open(
+                urllib.request.Request(
+                    urllib.parse.urljoin(RIKA_BASE_URL, "login"),
+                    data=auth_payload,
+                    method="POST",
+                ),
+                timeout=30,
+            ):
+                pass
+            if not any(cookie.name == "sessionId" and cookie.value for cookie in cookies):
+                raise RuntimeError("RIKA a refusé l'authentification. Vérifie tes identifiants.")
+
+            encoded_instance = urllib.parse.quote(instance, safe="")
+            self.log(log, f"Génération de la copie RIKA de {instance}...")
+            with opener.open(
+                urllib.parse.urljoin(RIKA_BASE_URL, f"{encoded_instance}?action=zip"),
+                timeout=300,
+            ):
+                pass
+
+            archive = Path(temporary) / f"{instance}.zip"
+            self.log(log, f"Téléchargement de la copie RIKA de {instance}...")
+            with opener.open(
+                urllib.parse.urljoin(RIKA_BASE_URL, f"{encoded_instance}.zip"),
+                timeout=300,
+            ) as response, archive.open("wb") as output:
+                content_length = int(response.headers.get("Content-Length") or 0)
+                if content_length > MAX_RIKA_ARCHIVE_BYTES:
+                    raise RuntimeError("La copie RIKA dépasse la taille maximale autorisée.")
+                downloaded = 0
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    downloaded += len(chunk)
+                    if downloaded > MAX_RIKA_ARCHIVE_BYTES:
+                        raise RuntimeError("La copie RIKA dépasse la taille maximale autorisée.")
+                    output.write(chunk)
+        except urllib.error.HTTPError as exc:
+            if exc.code in {401, 403}:
+                raise RuntimeError("RIKA a refusé l'authentification ou l'accès à cette instance.") from exc
+            if exc.code == 404:
+                raise RuntimeError(f"L'instance RIKA {instance} est introuvable.") from exc
+            raise RuntimeError(f"RIKA a retourné une erreur HTTP {exc.code}.") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError("RIKA est inaccessible. Vérifie la connexion réseau puis réessaie.") from exc
+
+        extracted = Path(temporary) / "rika"
+        self.log(log, "Décompression et contrôle de la copie RIKA...")
+        try:
+            self.extract_rika_archive(archive, extracted)
+        except (OSError, zipfile.BadZipFile) as exc:
+            raise RuntimeError("Le fichier reçu depuis RIKA n'est pas une sauvegarde ZIP exploitable.") from exc
+        source_root = extracted / instance
+        version = detected_odoo_version(source_root)
+        self.log(log, f"Version détectée dans RIKA : Odoo {version}")
+        return source_root, version
+
     def create(
         self,
         name,
@@ -429,19 +614,24 @@ class ProjectCreator:
         source_type="standard",
         repository_url="",
         repository_branch="",
+        rika_instance="",
+        rika_login="",
+        rika_password="",
         log=None,
     ):
         name = validate_new_project_name(name)
-        version = validate_odoo_version(version)
         source_type = str(source_type or "standard").strip().lower()
-        if source_type not in {"standard", "gitlab"}:
+        if source_type not in {"standard", "gitlab", "rika"}:
             raise ValueError("Type de source invalide.")
+        version = validate_odoo_version(version) if source_type != "rika" else ""
 
         repository_url = str(repository_url or "").strip()
         repository_branch = str(repository_branch or "").strip()
         if source_type == "gitlab":
             repository_url = validate_gitlab_repository(repository_url)
             repository_branch = validate_git_ref(repository_branch)
+        if source_type == "rika":
+            rika_instance = validate_rika_instance(rika_instance)
 
         self.workspace.mkdir(parents=True, exist_ok=True)
         target = self.workspace / name
@@ -455,10 +645,31 @@ class ProjectCreator:
         staged_project = temporary / "project"
 
         try:
+            rika_source = None
+            if source_type == "rika":
+                rika_source, version = self.download_rika_project(
+                    rika_instance,
+                    rika_login,
+                    rika_password,
+                    temporary,
+                    log=log,
+                )
             self.log(log, f"Création du projet {name} en Odoo {version}")
             self.clone(LOCAL_TEMPLATE_REPOSITORY, version, staged_project, log=log)
 
             odoo_root = staged_project / "odoo"
+            if rika_source is not None:
+                if odoo_root.exists():
+                    if any(odoo_root.iterdir()):
+                        raise RuntimeError("Le modèle Docker contient déjà un dossier Odoo non vide.")
+                    odoo_root.rmdir()
+                rika_source.replace(odoo_root)
+                self.configure_template(staged_project, name)
+                staged_project.replace(target)
+                self.log(log, f"Projet RIKA copié: {target}")
+                self.log(log, f"URL locale: http://dev.{name}.localhost/")
+                return target
+
             addons_dir = odoo_root / "addons"
             store_dir = odoo_root / "addons-store"
             addons_dir.mkdir(parents=True, exist_ok=True)

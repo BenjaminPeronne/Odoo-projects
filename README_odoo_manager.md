@@ -161,12 +161,11 @@ Le menu permet de :
 - mettre a jour tous les modules Odoo d'une base ;
 - mettre a jour le code / les images d'un projet ;
 - mettre a jour le code / les images de tous les projets ;
-- creer un nouveau projet via `brainkeys riplika` (CLI historique uniquement) ;
+- créer un nouveau projet standard, depuis GitLab ou par copie d'une instance RIKA ;
 - afficher les logs Odoo ;
 - ouvrir un shell dans le conteneur Odoo.
 
-La commande CLI historique `--create-project` utilise encore Brainkeys pour
-les parcours Rika non integres. Si Brainkeys demande :
+La commande CLI historique `--create-project` utilise encore Brainkeys. Si Brainkeys demande :
 
 ```text
 Souhaitez-vous executer les conteneurs du projet ?
