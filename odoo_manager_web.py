@@ -2605,6 +2605,7 @@ def create_database_job(job, project, db_name, master_pwd, login, password, lang
         if db_name in databases:
             job.add(f"Base creee: {db_name}")
             clear_project_module_cache(project)
+            job.result = {"kind": "database_creation", "database": db_name}
             return
         job.add(f"Attente apparition base... {waited}s/60s")
         time.sleep(2)
@@ -3850,7 +3851,11 @@ class Handler(BaseHTTPRequestHandler):
                 with JOBS_LOCK:
                     running = [job.title for job in JOBS.values() if job.status == "running"]
                 if running:
-                    raise ValueError("Un traitement est en cours. Attends sa fin avant de modifier les paramètres.")
+                    raise ValueError(
+                        "Traitement en cours : "
+                        + ", ".join(running)
+                        + ". Consulte le suivi des actions avant de modifier les paramètres."
+                    )
                 create_workspace = bool(payload.pop("create_workspace", False))
                 settings = SETTINGS_STORE.update(payload, create_workspace=create_workspace)
                 apply_settings(settings)

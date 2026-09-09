@@ -733,6 +733,7 @@ export default function Home() {
   const [pendingDeleteCodeModules, setPendingDeleteCodeModules] = useState<string[]>([]);
   const [activeTab, setActiveTab] = useState("bases");
   const [pendingCreatedProjectName, setPendingCreatedProjectName] = useState("");
+  const [pendingCreatedDatabase, setPendingCreatedDatabase] = useState<{ jobId: number; project: string; database: string } | null>(null);
   const zipInputRef = useRef<HTMLInputElement>(null);
   const toastId = useRef(1);
   const lastDockerState = useRef<string | null>(null);
@@ -751,6 +752,7 @@ export default function Home() {
   const zipInspectionGeneration = useRef(0);
   const scheduledTimeouts = useRef<Set<number>>(new Set());
   const onboardingPrompted = useRef(false);
+  const pendingProjectNames = useRef(new Set<string>());
   const logOutputRef = useRef<HTMLPreElement>(null);
   const logAutoFollow = useRef(true);
   const lastLogOutputSource = useRef("");
@@ -782,7 +784,11 @@ export default function Home() {
   }, []);
 
   const selectedProject = useMemo(
-    () => overview?.projects.find((project) => project.name === selectedProjectName) || overview?.projects[0],
+    () => {
+      const matchedProject = overview?.projects.find((project) => project.name === selectedProjectName);
+      if (matchedProject) return matchedProject;
+      return selectedProjectName ? undefined : overview?.projects[0];
+    },
     [overview, selectedProjectName],
   );
   const selectedAppIcon = settings?.interface_icon === "local" ? localIcon : appIcon;
@@ -792,14 +798,32 @@ export default function Home() {
   );
 
   const projectJobs = useMemo(
-    () => jobs.filter((job) => job.project === selectedProject?.name),
-    [jobs, selectedProject?.name],
+    () => jobs.filter((job) => job.project === selectedProjectName),
+    [jobs, selectedProjectName],
   );
   const selectedJob = useMemo(
-    () => projectJobs.find((job) => job.id === selectedJobId) || projectJobs[0],
-    [projectJobs, selectedJobId],
+    () => projectJobs.find((job) => job.id === selectedJobId) || jobs.find((job) => job.id === selectedJobId) || projectJobs[0],
+    [jobs, projectJobs, selectedJobId],
   );
   const hasRunningJobs = useMemo(() => jobs.some((job) => job.status === "running"), [jobs]);
+  const runningJobs = useMemo(
+    () => jobs.filter((job) => job.status === "running"),
+    [jobs],
+  );
+  const pendingProjectCreations = useMemo(
+    () => jobs.filter(
+      (job) =>
+        job.status === "running" &&
+        job.title.startsWith("Créer le projet ") &&
+        Boolean(job.project) &&
+        !(overview?.projects.some((project) => project.name === job.project)),
+    ),
+    [jobs, overview?.projects],
+  );
+  const pendingSelectedProjectCreation = useMemo(
+    () => pendingProjectCreations.find((job) => job.project === selectedProjectName),
+    [pendingProjectCreations, selectedProjectName],
+  );
   const projectLifecycleJobs = useMemo(() => {
     const runningJobs = new Map<string, Job>();
     for (const job of jobs) {
@@ -961,6 +985,7 @@ export default function Home() {
     setSettingsDraft(payload.settings);
     applyJobs(payload.jobs, false);
     setSelectedProjectName((currentName) => {
+      if (currentName && pendingProjectNames.current.has(currentName)) return currentName;
       const project = payload.overview.projects.find((item) => item.name === currentName) || payload.overview.projects[0];
       setSelectedDb((currentDb) => currentDb !== "postgres" && project?.databases?.includes(currentDb) ? currentDb : firstOdooDatabase(project));
       return project?.name || "";
@@ -1053,6 +1078,7 @@ export default function Home() {
     markApiSuccess();
     setError("");
     setSelectedProjectName((currentName) => {
+      if (currentName && pendingProjectNames.current.has(currentName)) return currentName;
       const current = payload.projects.find((project) => project.name === currentName) || payload.projects[0];
       if (current && current.name !== currentName) setSelectedDb(firstOdooDatabase(current));
       return current?.name || "";
@@ -1246,11 +1272,37 @@ export default function Home() {
   useEffect(() => {
     if (!pendingCreatedProjectName || !overview) return;
     const created = overview.projects.find((project) => project.name === pendingCreatedProjectName);
-    if (!created) return;
-    setSelectedProjectName(created.name);
-    setSelectedDb(firstOdooDatabase(created));
+    if (created) {
+      pendingProjectNames.current.delete(pendingCreatedProjectName);
+      setSelectedProjectName(created.name);
+      setSelectedDb(firstOdooDatabase(created));
+      setPendingCreatedProjectName("");
+      return;
+    }
+    const job = jobs.find((item) => item.project === pendingCreatedProjectName && item.title.startsWith("Créer le projet "));
+    if (job?.status !== "error") return;
+    pendingProjectNames.current.delete(pendingCreatedProjectName);
+    setSelectedProjectName((currentName) => currentName === pendingCreatedProjectName ? overview.projects[0]?.name || "" : currentName);
     setPendingCreatedProjectName("");
-  }, [overview, pendingCreatedProjectName]);
+  }, [jobs, overview, pendingCreatedProjectName]);
+
+  useEffect(() => {
+    if (!pendingCreatedDatabase || !overview) return;
+    const job = jobs.find((item) => item.id === pendingCreatedDatabase.jobId);
+    if (!job || job.status === "error") {
+      if (job?.status === "error") setPendingCreatedDatabase(null);
+      return;
+    }
+    if (job.status !== "done") return;
+    const project = overview.projects.find((item) => item.name === pendingCreatedDatabase.project);
+    if (!project?.databases.includes(pendingCreatedDatabase.database)) return;
+
+    setSelectedProjectName(project.name);
+    setSelectedDb(pendingCreatedDatabase.database);
+    setActiveTab("modules");
+    setPendingCreatedDatabase(null);
+    pushToast("success", `Base ${pendingCreatedDatabase.database} prête. La liste des modules est disponible.`);
+  }, [jobs, overview, pendingCreatedDatabase, pushToast]);
 
   useEffect(() => {
     if (initializing) return;
@@ -1583,7 +1635,10 @@ export default function Home() {
     const projectName = String(payload.name || "").trim();
     const job = await createJob("create_project", payload);
     if (!job) return;
+    pendingProjectNames.current.add(projectName);
     setPendingCreatedProjectName(projectName);
+    setSelectedProjectName(projectName);
+    setSelectedDb("");
     setCreateProjectOpen(false);
     setOnboardingOpen(false);
     setActiveTab("logs");
@@ -2266,6 +2321,36 @@ export default function Home() {
               </div>
             </div>
             <div className="min-h-0 max-h-[260px] flex-1 overflow-auto px-2 py-1 sm:max-h-[340px] lg:max-h-none">
+              {pendingProjectCreations.map((job) => (
+                <div
+                  key={`creating-${job.id}`}
+                  className={cn(
+                    "border-b border-primary/30 bg-primary/[0.08] transition-colors dark:bg-primary/[0.14]",
+                    selectedProjectName === job.project && "ring-1 ring-inset ring-primary/35",
+                  )}
+                >
+                  <button
+                    type="button"
+                    className="flex min-h-16 w-full min-w-0 items-center gap-2 px-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                    onClick={() => {
+                      setSelectedProjectName(job.project || "");
+                      setSelectedDb("");
+                      setExternalLogView(null);
+                      selectJob(job.id);
+                      setActiveTab("logs");
+                    }}
+                  >
+                    <span className="min-w-0 flex-1 py-2">
+                      <span className="block truncate text-sm font-semibold">{job.project}</span>
+                      <span className="mt-0.5 flex items-center gap-1.5 text-xs text-primary">
+                        <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden="true" />
+                        Création en cours…
+                      </span>
+                    </span>
+                    <Badge className="shrink-0" variant="outline">Préparation</Badge>
+                  </button>
+                </div>
+              ))}
               {filteredProjects.map((project) => {
                 const running = project.odoo_status === "running";
                 const absent = project.odoo_status === "absent" || project.odoo_status === "docker off";
@@ -2363,16 +2448,23 @@ export default function Home() {
               <div className="min-w-0 flex-1">
                 <div className="flex min-w-0 flex-wrap items-start gap-2">
                   <h2 className="min-w-0 max-w-full break-words text-2xl font-semibold leading-tight sm:text-3xl">
-                    {selectedProject?.name || "Aucun projet"}
+                    {pendingSelectedProjectCreation?.project || selectedProject?.name || "Aucun projet"}
                   </h2>
-                  {selectedProject?.odoo_version && (
+                  {pendingSelectedProjectCreation ? (
+                    <Badge className="mt-0.5 shrink-0" variant="outline">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      Création en cours
+                    </Badge>
+                  ) : selectedProject?.odoo_version && (
                     <Badge className="mt-0.5 shrink-0" variant="outline">
                       Odoo {selectedProject.odoo_version}
                     </Badge>
                   )}
                 </div>
                 <p className="mt-1 max-w-full break-all text-sm text-muted-foreground">
-                  {selectedProject?.url || "Sélectionne un projet."}
+                  {pendingSelectedProjectCreation
+                    ? "Préparation du projet local en arrière-plan. Le journal détaille les étapes en cours."
+                    : selectedProject?.url || "Sélectionne un projet."}
                 </p>
               </div>
               <div className="grid w-full shrink-0 grid-cols-2 items-stretch gap-2 sm:grid-cols-3 xl:w-[480px]">
@@ -2550,6 +2642,43 @@ export default function Home() {
               <div className="mb-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950/45 dark:text-red-200">
                 <AlertTriangle className="mr-2 inline h-4 w-4" />
                 {error}
+              </div>
+            )}
+            {runningJobs.length > 0 && (
+              <div className="mb-4 rounded-md border border-primary/35 bg-primary/[0.08] p-3 text-sm shadow-sm dark:bg-primary/[0.14]">
+                <div className="flex items-start gap-3">
+                  <Loader2 className="mt-0.5 h-5 w-5 shrink-0 animate-spin text-primary" aria-hidden="true" />
+                  <div className="min-w-0 flex-1">
+                    <p className="font-semibold">
+                      {runningJobs.length === 1 ? "Un traitement est en cours" : `${runningJobs.length} traitements sont en cours`}
+                    </p>
+                    <p className="mt-0.5 text-muted-foreground">
+                      Les paramètres sont temporairement verrouillés. Ouvre le suivi pour savoir ce qui est exécuté.
+                    </p>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {runningJobs.map((job) => (
+                        <Button
+                          key={job.id}
+                          size="sm"
+                          variant="outline"
+                          className="max-w-full bg-background/70"
+                          title={`Suivre : ${job.title}`}
+                          onClick={() => {
+                            if (job.project) {
+                              setSelectedProjectName(job.project);
+                              setSelectedDb((currentDb) => currentDb || "postgres");
+                            }
+                            selectJob(job.id);
+                            setActiveTab("logs");
+                          }}
+                        >
+                          <Logs className="h-4 w-4" />
+                          <span className="max-w-72 truncate">Suivre : {job.title}</span>
+                        </Button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
               </div>
             )}
 
@@ -3969,7 +4098,15 @@ export default function Home() {
         project={selectedProject}
         onSubmit={async (payload) => {
           const job = await createJob("create_database", payload);
-          if (job) setCreateDbOpen(false);
+          if (job) {
+            setPendingCreatedDatabase({
+              jobId: job.id,
+              project: String(payload.project || ""),
+              database: String(payload.db || "").trim(),
+            });
+            setCreateDbOpen(false);
+            setActiveTab("logs");
+          }
         }}
       />
 
