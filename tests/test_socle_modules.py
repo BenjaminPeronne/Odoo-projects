@@ -1,19 +1,13 @@
+import os
 import subprocess
+import unittest
 from unittest import mock
 
 from test_module_layout import DummyJob, ModuleLayoutTests
 import odoo_manager_web as web
 
-
-def shell_path(path):
-    """Return a path understood by both POSIX sh and Git Bash on Windows."""
-    value = str(path).replace("\\", "/")
-    if len(value) >= 3 and value[1:3] == ":/":
-        return f"/{value[0].lower()}{value[2:]}"
-    return value
-
-
 class SocleModulesTests(ModuleLayoutTests):
+    @unittest.skipIf(os.name == "nt", "requires POSIX symlink semantics provided by WSL")
     def test_generated_wsl_script_checks_targets_and_cleans_up(self):
         sources = {name: self.create_enterprise_module(name) for name in ("valid", "absent", "broken", "other")}
         addons = self.project_root / "odoo" / "addons"
@@ -30,7 +24,7 @@ class SocleModulesTests(ModuleLayoutTests):
         with mock.patch("odoo_manager_core.project_creator.platform_id", return_value="windows"), \
                 mock.patch(
                     "odoo_manager_core.project_creator.wsl_execution_path",
-                    side_effect=lambda path, distribution: shell_path(path),
+                    side_effect=lambda path, distribution: str(path),
                 ):
             states = creator.module_link_states(sources, addons)
         self.assertEqual({"valid": "correct", "absent": "missing", "broken": "conflict", "other": "conflict"}, states)
