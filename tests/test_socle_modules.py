@@ -1,9 +1,16 @@
 import subprocess
-from pathlib import Path
 from unittest import mock
 
 from test_module_layout import DummyJob, ModuleLayoutTests
 import odoo_manager_web as web
+
+
+def shell_path(path):
+    """Return a path understood by both POSIX sh and Git Bash on Windows."""
+    value = str(path).replace("\\", "/")
+    if len(value) >= 3 and value[1:3] == ":/":
+        return f"/{value[0].lower()}{value[2:]}"
+    return value
 
 
 class SocleModulesTests(ModuleLayoutTests):
@@ -23,7 +30,7 @@ class SocleModulesTests(ModuleLayoutTests):
         with mock.patch("odoo_manager_core.project_creator.platform_id", return_value="windows"), \
                 mock.patch(
                     "odoo_manager_core.project_creator.wsl_execution_path",
-                    side_effect=lambda path, distribution: Path(path).as_posix(),
+                    side_effect=lambda path, distribution: shell_path(path),
                 ):
             states = creator.module_link_states(sources, addons)
         self.assertEqual({"valid": "correct", "absent": "missing", "broken": "conflict", "other": "conflict"}, states)
