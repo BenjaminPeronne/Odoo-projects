@@ -203,26 +203,35 @@ type ModuleInfo = {
   removal_note?: string;
 };
 
+const SOCLE_SECTIONS = [
+  { id: "website", label: "Site internet" },
+  { id: "sales", label: "Ventes" },
+  { id: "finance", label: "Finance" },
+  { id: "inventory-manufacturing", label: "Inventaire & Fabrication" },
+  { id: "human-resources", label: "Ressources humaines" },
+  { id: "services", label: "Services" },
+] as const;
+
 const SOCLE_PRESETS = [
-  { id: "sales", label: "Ventes", modules: ["sale_management"] },
-  { id: "crm", label: "CRM", modules: ["crm"] },
-  { id: "purchase", label: "Achats", modules: ["purchase"] },
-  { id: "inventory", label: "Inventaire", modules: ["stock"] },
-  { id: "accounting_fr", label: "Comptabilité française", modules: ["account_accountant", "l10n_fr"] },
-  { id: "manufacturing", label: "Fabrication", modules: ["mrp"] },
-  { id: "project", label: "Projet", modules: ["project"] },
-  { id: "timesheets", label: "Feuilles de temps", modules: ["hr_timesheet"] },
-  { id: "employees", label: "Employés", modules: ["hr"] },
-  { id: "time_off", label: "Congés", modules: ["hr_holidays"] },
-  { id: "expenses", label: "Notes de frais", modules: ["hr_expense"] },
-  { id: "helpdesk", label: "Assistance", modules: ["helpdesk"] },
-  { id: "field_service", label: "Services sur site", modules: ["industry_fsm"] },
-  { id: "planning", label: "Planification", modules: ["planning"] },
-  { id: "documents", label: "Documents", modules: ["documents"] },
-  { id: "sign", label: "Signature", modules: ["sign"] },
-  { id: "subscriptions", label: "Abonnements", modules: ["sale_subscription"] },
-  { id: "point_of_sale", label: "Point de Vente", modules: ["point_of_sale"] },
-  { id: "ecommerce", label: "eCommerce", modules: ["website_sale"] },
+  { id: "ecommerce", label: "eCommerce", section: "website", modules: ["website_sale"] },
+  { id: "crm", label: "CRM", section: "sales", modules: ["crm"] },
+  { id: "sales", label: "Ventes", section: "sales", modules: ["sale_management"] },
+  { id: "point_of_sale", label: "Point de Vente", section: "sales", modules: ["point_of_sale"] },
+  { id: "subscriptions", label: "Abonnements", section: "sales", modules: ["sale_subscription"] },
+  { id: "accounting_fr", label: "Comptabilité française", section: "finance", modules: ["account_accountant", "l10n_fr"] },
+  { id: "expenses", label: "Notes de frais", section: "finance", modules: ["hr_expense"] },
+  { id: "documents", label: "Documents", section: "finance", modules: ["documents"] },
+  { id: "sign", label: "Signature", section: "finance", modules: ["sign"] },
+  { id: "inventory", label: "Inventaire", section: "inventory-manufacturing", modules: ["stock"] },
+  { id: "manufacturing", label: "Fabrication", section: "inventory-manufacturing", modules: ["mrp"] },
+  { id: "purchase", label: "Achats", section: "inventory-manufacturing", modules: ["purchase"] },
+  { id: "employees", label: "Employés", section: "human-resources", modules: ["hr"] },
+  { id: "time_off", label: "Congés", section: "human-resources", modules: ["hr_holidays"] },
+  { id: "project", label: "Projet", section: "services", modules: ["project"] },
+  { id: "timesheets", label: "Feuilles de temps", section: "services", modules: ["hr_timesheet"] },
+  { id: "field_service", label: "Services sur site", section: "services", modules: ["industry_fsm"] },
+  { id: "helpdesk", label: "Assistance", section: "services", modules: ["helpdesk"] },
+  { id: "planning", label: "Planification", section: "services", modules: ["planning"] },
 ] as const;
 
 type Toast = {
@@ -3757,38 +3766,45 @@ export default function Home() {
               Sélectionne les applications à installer dans {selectedDb || "la base choisie"}. Le manager vérifie et crée d’abord les liens symboliques Enterprise manquants.
             </DialogDescription>
           </DialogHeader>
-          <div className="grid gap-3 sm:grid-cols-2">
-            {SOCLE_PRESETS.map((preset) => {
-              const missing = preset.modules.filter((moduleName) => !moduleByName.has(moduleName));
-              const installed = preset.modules.filter((moduleName) => moduleByName.get(moduleName)?.state === "installed");
-              const unavailable = missing.length > 0;
-              const alreadyInstalled = !unavailable && installed.length === preset.modules.length;
-              return (
-                <label
-                  key={preset.id}
-                  className={cn(
-                    "flex items-start gap-3 rounded-md border p-3 text-sm",
-                    unavailable || alreadyInstalled ? "cursor-not-allowed bg-muted/35 opacity-60" : "cursor-pointer hover:bg-muted/45",
-                  )}
-                >
-                  <Checkbox
-                    className="mt-0.5"
-                    checked={alreadyInstalled || selectedSoclePresets.has(preset.id)}
-                    disabled={unavailable || alreadyInstalled || loading}
-                    onCheckedChange={(checked) => toggleSoclePreset(preset.id, checked === true)}
-                  />
-                  <img src={`/odoo-apps/${preset.id}.svg`} alt="" aria-hidden="true" className="h-12 w-12 shrink-0 object-contain" />
-                  <span className="min-w-0">
-                    <span className="block font-medium">{preset.label}</span>
-                    <span className="mt-1 block break-all text-xs text-muted-foreground">{preset.modules.join(" + ")}</span>
-                    {unavailable && <span className="mt-1 block text-xs text-destructive">Absent : {missing.join(", ")}</span>}
-                    {!unavailable && installed.length > 0 && (
-                      <span className="mt-1 block text-xs text-muted-foreground">Déjà installé : {installed.join(", ")}</span>
-                    )}
-                  </span>
-                </label>
-              );
-            })}
+          <div className="space-y-6">
+            {SOCLE_SECTIONS.map((section) => (
+              <section key={section.id} aria-labelledby={`socle-section-${section.id}`}>
+                <h3 id={`socle-section-${section.id}`} className="mb-3 text-base font-semibold">{section.label}</h3>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {SOCLE_PRESETS.filter((preset) => preset.section === section.id).map((preset) => {
+                    const missing = preset.modules.filter((moduleName) => !moduleByName.has(moduleName));
+                    const installed = preset.modules.filter((moduleName) => moduleByName.get(moduleName)?.state === "installed");
+                    const unavailable = missing.length > 0;
+                    const alreadyInstalled = !unavailable && installed.length === preset.modules.length;
+                    return (
+                      <label
+                        key={preset.id}
+                        className={cn(
+                          "flex items-start gap-3 rounded-md border p-3 text-sm",
+                          unavailable || alreadyInstalled ? "cursor-not-allowed bg-muted/35 opacity-60" : "cursor-pointer hover:bg-muted/45",
+                        )}
+                      >
+                        <Checkbox
+                          className="mt-0.5"
+                          checked={alreadyInstalled || selectedSoclePresets.has(preset.id)}
+                          disabled={unavailable || alreadyInstalled || loading}
+                          onCheckedChange={(checked) => toggleSoclePreset(preset.id, checked === true)}
+                        />
+                        <img src={`/odoo-apps/${preset.id}.svg`} alt="" aria-hidden="true" className="h-12 w-12 shrink-0 object-contain" />
+                        <span className="min-w-0">
+                          <span className="block font-medium">{preset.label}</span>
+                          <span className="mt-1 block break-all text-xs text-muted-foreground">{preset.modules.join(" + ")}</span>
+                          {unavailable && <span className="mt-1 block text-xs text-destructive">Absent : {missing.join(", ")}</span>}
+                          {!unavailable && installed.length > 0 && (
+                            <span className="mt-1 block text-xs text-muted-foreground">Déjà installé : {installed.join(", ")}</span>
+                          )}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </section>
+            ))}
           </div>
           <div className="rounded-md border bg-muted/35 p-3 text-sm">
             <div className="font-medium">Comptabilité</div>
