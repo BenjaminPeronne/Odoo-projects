@@ -93,6 +93,20 @@ class DatabaseNameValidationTests(unittest.TestCase):
         database_option = command.index("-d")
         self.assertEqual(command[database_option + 1], "sodial_recette#1")
 
+    def test_extracts_database_manager_error_from_html(self):
+        content = """
+            <section>
+                <div class="alert alert-danger">
+                    Database creation error: Access &amp; denied
+                </div>
+            </section>
+        """
+
+        self.assertEqual(
+            web.extract_odoo_page_error(content),
+            "Database creation error: Access & denied",
+        )
+
 
 class DatabaseRestoreTests(unittest.TestCase):
     def make_backup(self, root, include_dump=True):
@@ -318,6 +332,17 @@ class JobResourceTests(unittest.TestCase):
         self.assertEqual(by_id[second.id]["project"], "DEMO")
         self.assertEqual(by_id[second.id]["lines"], ["second output"])
         self.assertIn("second output", by_id[second.id]["output"])
+
+    def test_job_snapshot_exposes_structured_progress(self):
+        job = web.Job("Progress", lambda current_job: current_job.set_progress("Initialisation", 30, 120))
+        self.wait_for(job)
+
+        snapshot = web.jobs_snapshot(detail_job_id=job.id, compact=True)[0]
+
+        self.assertEqual(
+            snapshot["progress"],
+            {"label": "Initialisation", "current": 30, "total": 120},
+        )
 
     @patch("odoo_manager_web.record_manager_error")
     def test_failed_job_exposes_business_error_without_traceback(self, _record_error):

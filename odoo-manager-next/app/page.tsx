@@ -169,6 +169,11 @@ type Job = {
   error_message?: string;
   lines: string[];
   output?: string;
+  progress?: {
+    label: string;
+    current?: number | null;
+    total?: number | null;
+  } | null;
   result?: {
     kind?: string;
     scope?: string;
@@ -403,7 +408,7 @@ function delay(milliseconds: number) {
 
 function jobsFingerprint(items: Job[]) {
   return items
-    .map((job) => `${job.id}:${job.status}:${job.finished_at || ""}:${job.error_message || ""}:${job.lines.length}:${job.lines.at(-1) || ""}:${job.output?.length || 0}`)
+    .map((job) => `${job.id}:${job.status}:${job.finished_at || ""}:${job.error_message || ""}:${job.lines.length}:${job.lines.at(-1) || ""}:${job.output?.length || 0}:${job.progress?.label || ""}:${job.progress?.current ?? ""}:${job.progress?.total ?? ""}`)
     .join("|");
 }
 
@@ -2134,6 +2139,11 @@ export default function Home() {
   const outputTitle = scopedExternalLogView?.title || selectedJob?.title || "Aucune action sélectionnée";
   const outputContent = scopedExternalLogView?.content || selectedJob?.output || selectedJob?.lines?.join("\n") || "Aucune sortie.";
   const outputSource = scopedExternalLogView ? `external:${scopedExternalLogView.title}` : `job:${selectedJob?.id || "none"}`;
+  const outputProgress = !scopedExternalLogView && selectedJob?.status === "running" ? selectedJob.progress : null;
+  const outputProgressPercent =
+    outputProgress && typeof outputProgress.current === "number" && typeof outputProgress.total === "number" && outputProgress.total > 0
+      ? Math.max(0, Math.min(100, Math.round((outputProgress.current / outputProgress.total) * 100)))
+      : null;
   const outputTitleIsLong = outputTitle.length > LOG_DESCRIPTION_MAX_LENGTH;
   const displayedOutputTitle = outputTitleIsLong && !logDescriptionExpanded
     ? `${outputTitle.slice(0, LOG_DESCRIPTION_MAX_LENGTH).trimEnd()}…`
@@ -3292,6 +3302,36 @@ export default function Home() {
                       </div>
                     </CardHeader>
                     <CardContent className="min-w-0">
+                      {!scopedExternalLogView && selectedJob?.status === "running" && (
+                        <div className="mb-2 rounded-md border border-emerald-400/20 bg-slate-950 px-3 py-2.5 text-emerald-100">
+                          <div className="flex min-w-0 items-center gap-2 text-xs">
+                            <Loader2 className="h-4 w-4 shrink-0 animate-spin text-emerald-400" />
+                            <span className="min-w-0 flex-1 truncate font-medium">
+                              {outputProgress?.label || selectedJob.lines.at(-1) || "Traitement en cours"}
+                            </span>
+                            {outputProgressPercent !== null && (
+                              <span className="shrink-0 tabular-nums text-emerald-300">{outputProgressPercent}%</span>
+                            )}
+                          </div>
+                          <div
+                            className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-800"
+                            role="progressbar"
+                            aria-label={outputProgress?.label || "Traitement en cours"}
+                            aria-valuemin={0}
+                            aria-valuemax={outputProgressPercent !== null ? 100 : undefined}
+                            aria-valuenow={outputProgressPercent ?? undefined}
+                          >
+                            {outputProgressPercent !== null ? (
+                              <div
+                                className="h-full rounded-full bg-emerald-400 transition-[width] duration-500 ease-out"
+                                style={{ width: `${outputProgressPercent}%` }}
+                              />
+                            ) : (
+                              <div className="h-full w-1/3 animate-pulse rounded-full bg-emerald-400" />
+                            )}
+                          </div>
+                        </div>
+                      )}
                       <pre
                         ref={logOutputRef}
                         className="log-terminal min-h-[260px] max-h-[min(58vh,620px)] max-w-full overflow-auto whitespace-pre-wrap break-words rounded-md bg-slate-950 p-3 text-xs leading-relaxed text-emerald-100 sm:p-4"

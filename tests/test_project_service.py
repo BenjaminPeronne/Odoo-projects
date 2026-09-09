@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from odoo_manager_core.config import ManagerSettings
 from odoo_manager_core.project_service import ODOO_STARTUP_LOG, ODOO_STARTUP_STATUS, ProjectService
@@ -128,6 +128,32 @@ class ProjectServiceTests(unittest.TestCase):
 
         commands = [command for command, _cwd in self.runner.streams]
         self.assertTrue(has_command_tail(commands, ["compose", "up", "-d", "--no-recreate"]))
+
+    @patch("odoo_manager_core.project_service.platform.system", return_value="Darwin")
+    def test_macos_postgres_first_bootstrap_is_retried_and_restores_odoo_role(self, _platform):
+        (self.project_path / "odoo.conf").write_text("db_user = odoo\ndb_password = odoo\n", encoding="utf-8")
+        self.runner.statuses["postgresql-DEMO"] = "exited"
+        self.runner.health_statuses["postgresql-DEMO"] = "healthy"
+        self.runner.captures = []
+        original_capture = self.runner.capture
+
+        def capture(command, cwd=None, timeout=10):
+            if command[-1] == "postgresql-DEMO" and "logs" in command:
+                return 0, 'FATAL: data directory "/var/lib/postgresql/data" has wrong ownership'
+            return original_capture(command, cwd, timeout)
+
+        self.runner.capture = capture
+        with patch.object(self.service, "container_status", return_value="exited"), patch.object(
+            self.service, "wait_for_postgres"
+        ) as wait_for_postgres:
+            result = self.service.recover_macos_postgres_bootstrap("DEMO", self.project_path, log=lambda _line: None)
+
+        self.assertEqual(result, 0)
+        wait_for_postgres.assert_called_once_with("DEMO", log=ANY)
+        commands = [command for command, _cwd in self.runner.streams]
+        self.assertTrue(has_command_tail(commands, ["compose", "up", "-d", "--no-recreate"]))
+        captures = [command for command, _cwd, _timeout in self.runner.captures]
+        self.assertTrue(any("CREATE ROLE \"odoo\"" in command[-1] for command in captures if command and "psql" in command))
         self.assertFalse(has_command_tail(commands, ["compose", "up", "--pull", "always", "-d"]))
 
     def test_start_project_creates_missing_containers_without_forced_pull(self):

@@ -1977,6 +1977,7 @@ class Job:
         self.lines = []
         self.output = ""
         self.result = {}
+        self.progress = None
         self.target = target
         self.args = args
         self.thread = None
@@ -2016,6 +2017,14 @@ class Job:
                 if line:
                     self.lines.append(line)
             self.lines = self.lines[-700:]
+
+    def set_progress(self, label, current=None, total=None):
+        with JOBS_LOCK:
+            self.progress = {
+                "label": str(label),
+                "current": current,
+                "total": total,
+            }
 
     def run(self):
         try:
@@ -2346,12 +2355,24 @@ def post_form_no_redirect(url, data, timeout=240):
     opener = urllib.request.build_opener(NoRedirectHandler)
     try:
         with opener.open(request, timeout=timeout) as response:
-            return response.status, response.read(4096).decode("utf-8", errors="replace")
+            return response.status, response.read(131072).decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         if exc.code in (301, 302, 303, 307, 308):
             return exc.code, ""
         content = exc.read(4096).decode("utf-8", errors="replace")
         raise RuntimeError(f"Odoo a retourne HTTP {exc.code}: {content[:600]}")
+
+
+def extract_odoo_page_error(content):
+    if not content:
+        return ""
+    pattern = r'<div\b[^>]*class=["\'][^"\']*\balert-danger\b[^"\']*["\'][^>]*>(.*?)</div>'
+    for match in re.finditer(pattern, content, flags=re.IGNORECASE | re.DOTALL):
+        message = re.sub(r"<[^>]+>", " ", match.group(1))
+        message = re.sub(r"\s+", " ", html.unescape(message)).strip()
+        if message:
+            return message
+    return ""
 
 
 def validate_odoo_backup_archive(backup_path):
@@ -2595,22 +2616,29 @@ def create_database_job(job, project, db_name, master_pwd, login, password, lang
     job.add("Donnees de demonstration: " + ("oui" if demo else "non"))
     status, content = post_form_no_redirect(url, form)
     job.add(f"Reponse Odoo: HTTP {status}")
+    odoo_error = extract_odoo_page_error(content) if status == 200 else ""
+    if odoo_error:
+        raise RuntimeError(f"Odoo a refusé la création de la base : {odoo_error}")
     if status == 200 and content:
-        preview = re.sub(r"\s+", " ", content).strip()[:500]
-        if preview:
-            job.add(f"Apercu reponse: {preview}")
+        job.add("Odoo a renvoyé une page sans confirmation explicite ; vérification dans PostgreSQL...")
 
-    for waited in range(0, 62, 2):
+    max_wait = 120
+    for waited in range(0, max_wait + 2, 2):
+        job.set_progress("Initialisation de la base Odoo", min(waited, max_wait), max_wait)
         databases = set(list_databases_for(project))
         if db_name in databases:
-            job.add(f"Base creee: {db_name}")
+            job.set_progress("Base Odoo prête", max_wait, max_wait)
+            job.add(f"Base créée : {db_name}")
             clear_project_module_cache(project)
             job.result = {"kind": "database_creation", "database": db_name}
             return
-        job.add(f"Attente apparition base... {waited}s/60s")
+        if waited == 0 or waited % 10 == 0:
+            job.add(f"Initialisation de la base... {waited}s/{max_wait}s")
         time.sleep(2)
 
-    raise RuntimeError("La creation a ete envoyee, mais la base n'apparait pas dans PostgreSQL.")
+    raise RuntimeError(
+        "La création a été envoyée, mais la base n'apparaît pas dans PostgreSQL après 120 secondes."
+    )
 
 
 def delete_project_job(job, project):
@@ -3395,6 +3423,7 @@ def jobs_snapshot(detail_job_id=None, compact=False):
                 "lines": list(job.lines) if not compact or job.id == detail_job_id else [],
                 "output": job.output if not compact or job.id == detail_job_id else "",
                 "result": dict(job.result),
+                "progress": dict(job.progress) if job.progress else None,
             }
             for job in reversed(values)
         ]

@@ -1,6 +1,7 @@
 import http.client
 import os
 import platform
+import re
 import shutil
 import subprocess
 import threading
@@ -288,6 +289,65 @@ class ProjectService:
             log=log,
         )
 
+    def recover_macos_postgres_bootstrap(self, project, path, log=None):
+        """Retry Docker Desktop's first PostgreSQL bind-mount bootstrap safely.
+
+        On some macOS Docker Desktop versions, the temporary PostgreSQL process
+        used by the image entrypoint cannot use a freshly-created bind mount.
+        The cluster is written, but initdb.sql is skipped before the container
+        exits. A second start uses the initialized cluster successfully.
+        """
+        if platform.system() != "Darwin":
+            return None
+        container = f"postgresql-{project}"
+        if self.container_status(container) != "exited":
+            return None
+        logs_code, logs = self.capture(self.docker("logs", "--tail", "120", container), timeout=12)
+        if logs_code != 0 or "data directory" not in logs.lower() or "wrong ownership" not in logs.lower():
+            return None
+
+        config = self.project_path(project) / "odoo.conf"
+        try:
+            content = config.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return None
+        user_match = re.search(r"(?m)^\s*db_user\s*=\s*([^\s#;]+)", content)
+        password_match = re.search(r"(?m)^\s*db_password\s*=\s*(.*?)\s*$", content)
+        if not user_match or not password_match:
+            return None
+        db_user = user_match.group(1)
+        db_password = password_match.group(1)
+        quoted_user = db_user.replace('"', '""')
+        quoted_password = db_password.replace("'", "''")
+
+        self.log(log, "Docker Desktop macOS a interrompu l'initialisation PostgreSQL sur le montage local.")
+        self.log(log, "Reprise contrôlée du cluster neuf et création du rôle Odoo manquant...")
+        code = self.stream(self.docker("compose", "up", "-d", "--no-recreate"), cwd=path, log=log)
+        if code != 0:
+            return code
+        try:
+            self.wait_for_postgres(project, log=log)
+        except RuntimeError:
+            return 1
+        role_sql = (
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '"
+            + db_user.replace("'", "''")
+            + "') THEN CREATE ROLE \""
+            + quoted_user
+            + "\" LOGIN ENCRYPTED PASSWORD '"
+            + quoted_password
+            + "' CREATEDB; END IF; END $$;"
+        )
+        role_code, role_output = self.capture(
+            self.docker("exec", container, "psql", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "postgres", "-c", role_sql),
+            timeout=20,
+        )
+        if role_code != 0:
+            self.log(log, role_output or "Impossible de créer le rôle Odoo après la reprise PostgreSQL.")
+            return role_code
+        self.log(log, "PostgreSQL macOS repris; le rôle Odoo est disponible.")
+        return 0
+
     def fix_macos_localtime_mount(self, compose_file, log=None):
         if platform.system() != "Darwin":
             return
@@ -482,7 +542,9 @@ class ProjectService:
                 self.log(log, "Anomalie Docker apparue pendant le démarrage.")
                 code = self.recreate_stale_containers(path, stale_mounts, stale_networks, log=log)
             else:
-                recovered_code = self.recover_postgres_dependency(project, path, log=log)
+                recovered_code = self.recover_macos_postgres_bootstrap(project, path, log=log)
+                if recovered_code is None:
+                    recovered_code = self.recover_postgres_dependency(project, path, log=log)
                 if recovered_code is not None:
                     code = recovered_code
             if code != 0 and self.is_running(f"odoo-{project}"):
