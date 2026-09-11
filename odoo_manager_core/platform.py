@@ -228,6 +228,45 @@ def wsl_executable_available(executable, distribution="", timeout=6):
     return result.returncode == 0
 
 
+def find_wsl_executable_distribution(executable, preferred_distribution="", timeout=6):
+    """Return the WSL distribution containing an executable, if any.
+
+    Windows may keep Docker Desktop native while Git is installed in a user WSL
+    distribution which is not the current default. Probe the preferred/default
+    distribution first, then the other installed user distributions.
+    """
+    if platform.system() != "Windows" or not host_executable_available("wsl.exe"):
+        return None
+    if wsl_executable_available(executable, preferred_distribution, timeout=timeout):
+        return preferred_distribution
+    try:
+        result = subprocess.run(
+            ["wsl.exe", "--list", "--quiet"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            **hidden_process_kwargs(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    preferred_key = preferred_distribution.casefold()
+    distributions = []
+    for line in result.stdout.replace("\x00", "").splitlines():
+        distribution = line.strip().lstrip("*").strip()
+        key = distribution.casefold()
+        if not distribution or key == preferred_key or key.startswith("docker-desktop"):
+            continue
+        if key not in {item.casefold() for item in distributions}:
+            distributions.append(distribution)
+    for distribution in distributions:
+        if wsl_executable_available(executable, distribution, timeout=timeout):
+            return distribution
+    return None
+
+
 def command_uses_wsl(command):
     if not command:
         return False

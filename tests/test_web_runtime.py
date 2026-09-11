@@ -710,7 +710,7 @@ class TraefikPathTests(unittest.TestCase):
 
 
 class ProjectCreationPrerequisitesTests(unittest.TestCase):
-    @patch("odoo_manager_web.wsl_executable_available", return_value=True)
+    @patch("odoo_manager_web.find_wsl_executable_distribution", return_value="Ubuntu-24.04")
     @patch("odoo_manager_web.host_executable_available", return_value=True)
     @patch("odoo_manager_web.platform_id", return_value="windows")
     @patch("odoo_manager_web.run_capture")

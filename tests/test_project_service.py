@@ -665,6 +665,24 @@ class ProjectServiceTests(unittest.TestCase):
         self.assertTrue(any(len(command) >= 4 and command[1] == "clone" for command in commands))
         self.assertTrue(has_command_tail(commands, ["compose", "up", "-d"]))
 
+    @patch("odoo_manager_core.project_service.find_wsl_executable_distribution", return_value="Ubuntu-24.04")
+    @patch("odoo_manager_core.project_service.host_executable_available", return_value=False)
+    @patch("odoo_manager_core.project_service.platform.system", return_value="Windows")
+    @patch("odoo_manager_core.platform.wsl_execution_path", return_value="/mnt/c/docker-local-tools")
+    def test_traefik_install_uses_git_from_detected_wsl_distribution(self, _path, _system, _native, _wsl):
+        tools = self.root / "docker-local-tools"
+        traefik = tools / "traefik"
+        (tools / ".git").mkdir(parents=True)
+        traefik.mkdir()
+        (traefik / "compose.yml").write_text("services: {}\n", encoding="utf-8")
+        service = ProjectService(self.settings, self.root, traefik_dir=traefik, runner=self.runner)
+
+        service.install_traefik("ssh://git@example.invalid/tools.git", log=lambda _line: None)
+
+        git_command = next(command for command, _cwd in self.runner.streams if "git" in command)
+        self.assertEqual(git_command[:3], ["wsl.exe", "-d", "Ubuntu-24.04"])
+        self.assertEqual(git_command[-4:], ["--exec", "git", "pull", "--ff-only"])
+
 
 if __name__ == "__main__":
     unittest.main()

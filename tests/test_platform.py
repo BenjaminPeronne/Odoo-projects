@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest import mock
 
@@ -6,6 +7,7 @@ from odoo_manager_core.config import ManagerSettings
 from odoo_manager_core.platform import (
     execution_path,
     executable_search_path,
+    find_wsl_executable_distribution,
     hidden_process_kwargs,
     open_terminal_command,
     open_terminal_script,
@@ -222,6 +224,19 @@ class WindowsProcessTests(unittest.TestCase):
             str(Path(r"C:\Users\Demo\AppData\Local") / "Microsoft" / "WindowsApps"),
             search_path,
         )
+
+    @mock.patch("odoo_manager_core.platform.wsl_executable_available")
+    @mock.patch("odoo_manager_core.platform.subprocess.run")
+    @mock.patch("odoo_manager_core.platform.host_executable_available", return_value=True)
+    @mock.patch("odoo_manager_core.platform.platform.system", return_value="Windows")
+    def test_finds_git_in_another_user_wsl_distribution(self, _system, _host, run, available):
+        available.side_effect = lambda _executable, distribution, timeout=6: distribution == "Ubuntu-24.04"
+        run.return_value = SimpleNamespace(returncode=0, stdout="docker-desktop\nUbuntu-24.04\n")
+
+        distribution = find_wsl_executable_distribution("git")
+
+        self.assertEqual(distribution, "Ubuntu-24.04")
+        available.assert_any_call("git", "Ubuntu-24.04", timeout=6)
 
 
 if __name__ == "__main__":

@@ -45,8 +45,9 @@ from odoo_manager_core.platform import (
     workspace_execution_path,
     workspace_wsl_context,
     wsl_command_prefix,
-    wsl_command_with_cwd,
     wsl_executable_available,
+    wsl_command_with_cwd,
+    find_wsl_executable_distribution,
     wsl_execution_path,
     wsl_path_context,
     wsl_unc_path,
@@ -553,15 +554,16 @@ def preferred_git_runtime():
     context = active_workspace_wsl_context()
     distribution = context.distribution if context else SETTINGS.wsl_distribution
     native_available = host_executable_available("git")
-    wsl_available = wsl_executable_available("git", distribution)
+    wsl_distribution = find_wsl_executable_distribution("git", distribution)
+    wsl_available = wsl_distribution is not None
     use_wsl = (bool(context) and wsl_available) or (not native_available and wsl_available)
     if use_wsl:
         return {
             "kind": "wsl",
-            "label": f"WSL ({distribution})" if distribution else "WSL",
-            "distribution": distribution,
+            "label": f"WSL ({wsl_distribution})" if wsl_distribution else "WSL",
+            "distribution": wsl_distribution or "",
             "available": True,
-            "command": [*wsl_command_prefix(distribution), "git"],
+            "command": [*wsl_command_prefix(wsl_distribution or ""), "git"],
             "native_available": native_available,
             "wsl_available": wsl_available,
         }

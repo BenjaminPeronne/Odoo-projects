@@ -21,7 +21,7 @@ from .platform import (
     workspace_wsl_context,
     wsl_command_prefix,
     wsl_command_with_cwd,
-    wsl_executable_available,
+    find_wsl_executable_distribution,
 )
 
 
@@ -150,9 +150,10 @@ class ProjectService:
         context = workspace_wsl_context(self.settings, self.workspace) if platform.system() == "Windows" else None
         distribution = context.distribution if context else self.settings.wsl_distribution
         native_available = host_executable_available("git")
-        wsl_available = wsl_executable_available("git", distribution)
+        wsl_distribution = find_wsl_executable_distribution("git", distribution)
+        wsl_available = wsl_distribution is not None
         if (context and wsl_available) or (not native_available and wsl_available):
-            return [*wsl_command_prefix(distribution), "git", *arguments]
+            return [*wsl_command_prefix(wsl_distribution), "git", *arguments]
         return [resolve_host_executable("git"), *arguments]
 
     def command_path(self, command, path):
