@@ -254,7 +254,7 @@ def find_wsl_executable_distribution(executable, preferred_distribution="", time
         return None
     preferred_key = preferred_distribution.casefold()
     distributions = []
-    for line in result.stdout.replace("\x00", "").splitlines():
+    for line in (result.stdout or "").replace("\x00", "").splitlines():
         distribution = line.strip().lstrip("*").strip()
         key = distribution.casefold()
         if not distribution or key == preferred_key or key.startswith("docker-desktop"):

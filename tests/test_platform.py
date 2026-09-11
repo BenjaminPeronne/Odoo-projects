@@ -238,6 +238,17 @@ class WindowsProcessTests(unittest.TestCase):
         self.assertEqual(distribution, "Ubuntu-24.04")
         available.assert_any_call("git", "Ubuntu-24.04", timeout=6)
 
+    @mock.patch("odoo_manager_core.platform.wsl_executable_available", return_value=False)
+    @mock.patch("odoo_manager_core.platform.subprocess.run")
+    @mock.patch("odoo_manager_core.platform.host_executable_available", return_value=True)
+    @mock.patch("odoo_manager_core.platform.platform.system", return_value="Windows")
+    def test_missing_wsl_distribution_output_reports_git_unavailable(self, _system, _host, run, _available):
+        run.return_value = SimpleNamespace(returncode=0, stdout=None)
+
+        distribution = find_wsl_executable_distribution("git")
+
+        self.assertIsNone(distribution)
+
 
 if __name__ == "__main__":
     unittest.main()
