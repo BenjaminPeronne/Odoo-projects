@@ -413,6 +413,37 @@ class ProjectDiscoveryTests(unittest.TestCase):
 
         self.assertEqual(projects, ["DEMO"])
 
+    @patch("odoo_manager_web.run_capture", return_value=(1, "unavailable"))
+    @patch("odoo_manager_web.project_dirs", return_value=["DEMO"])
+    def test_overview_survives_workspace_becoming_inaccessible(
+        self,
+        _project_dirs,
+        _run_capture,
+    ):
+        workspace = Path(r"\\wsl.localhost\Ubuntu\home\gbr\Odoo-projects")
+
+        def exists(path):
+            if str(path).startswith(str(workspace)):
+                raise OSError(1, "Incorrect function", str(path))
+            return False
+
+        previous_workspace = web.WORKSPACE
+        try:
+            web.WORKSPACE = workspace
+            with patch.object(Path, "exists", autospec=True, side_effect=exists):
+                payload = web.overview(
+                    {
+                        "running": False,
+                        "message": "Docker indisponible.",
+                    }
+                )
+        finally:
+            web.WORKSPACE = previous_workspace
+
+        self.assertEqual(len(payload["projects"]), 1)
+        self.assertEqual(payload["projects"][0]["name"], "DEMO")
+        self.assertEqual(payload["projects"][0]["url"], "http://dev.DEMO.localhost/")
+
 
 class CommandWorkingDirectoryTests(unittest.TestCase):
     @patch("odoo_manager_web.subprocess.run")
@@ -429,6 +460,28 @@ class CommandWorkingDirectoryTests(unittest.TestCase):
 
         self.assertEqual((code, output), (0, "ok"))
         self.assertEqual(Path(run.call_args.kwargs["cwd"]), root)
+
+    @patch("odoo_manager_web.subprocess.run")
+    def test_inaccessible_wsl_workspace_uses_safe_host_directory(self, run):
+        run.return_value = Mock(returncode=0, stdout="ok")
+        inaccessible = Path(r"\\wsl.localhost\Ubuntu\home\gbr\Odoo-projects")
+        original_is_dir = Path.is_dir
+
+        def is_dir(path):
+            if path in (inaccessible, inaccessible.parent):
+                raise OSError(1, "Incorrect function", str(path))
+            return original_is_dir(path)
+
+        previous_workspace = web.WORKSPACE
+        try:
+            web.WORKSPACE = inaccessible
+            with patch.object(Path, "is_dir", autospec=True, side_effect=is_dir):
+                code, output = web.run_capture(["docker", "ps"])
+        finally:
+            web.WORKSPACE = previous_workspace
+
+        self.assertEqual((code, output), (0, "ok"))
+        self.assertEqual(Path(run.call_args.kwargs["cwd"]), Path.home())
 
     @patch("odoo_manager_web.subprocess.run")
     def test_missing_explicit_working_directory_is_reported_without_execution(self, run):
@@ -554,6 +607,44 @@ class BootstrapSnapshotTests(unittest.TestCase):
                 payload = web.bootstrap_snapshot()
             finally:
                 web.WORKSPACE = previous_workspace
+
+        self.assertEqual(payload["overview"]["projects"], [])
+        self.assertFalse(payload["system_status"]["workspace_exists"])
+        self.assertFalse(payload["settings"]["workspace_exists"])
+
+    @patch("odoo_manager_web.jobs_snapshot", return_value=[])
+    @patch("odoo_manager_web.container_status", return_value="absent")
+    @patch("odoo_manager_web.docker_status")
+    def test_inaccessible_wsl_workspace_does_not_block_startup(
+        self,
+        docker_status,
+        _container_status,
+        _jobs_snapshot,
+    ):
+        docker_status.return_value = {
+            "state": "ready",
+            "installed": True,
+            "running": True,
+            "message": "Docker est opérationnel.",
+            "platform": "windows",
+            "execution_mode": "wsl",
+            "can_start": False,
+        }
+        inaccessible = Path(r"\\wsl.localhost\Ubuntu\home\gbr\Odoo-projects")
+        original_is_dir = Path.is_dir
+
+        def is_dir(path):
+            if path == inaccessible:
+                raise OSError(1, "Incorrect function", str(path))
+            return original_is_dir(path)
+
+        previous_workspace = web.WORKSPACE
+        try:
+            web.WORKSPACE = inaccessible
+            with patch.object(Path, "is_dir", autospec=True, side_effect=is_dir):
+                payload = web.bootstrap_snapshot()
+        finally:
+            web.WORKSPACE = previous_workspace
 
         self.assertEqual(payload["overview"]["projects"], [])
         self.assertFalse(payload["system_status"]["workspace_exists"])

@@ -38,3 +38,4 @@ linux:
   icon: electron/icons/128x128@2x.png
   category: Development
   maintainer: Sudokeys
+  syncDesktopName: true

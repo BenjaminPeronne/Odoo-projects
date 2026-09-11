@@ -88,6 +88,28 @@ SAFE_PROJECT_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 SAFE_MODULE_RE = re.compile(r"^[A-Za-z0-9_,.-]+$")
 SAFE_IMPORT_NAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 
+
+def safe_path_is_dir(path):
+    """Return False when the host cannot currently inspect a directory.
+
+    Windows UNC paths backed by WSL can raise ``WinError 1`` while the
+    distribution is stopped or reconnecting. Filesystem availability is a
+    runtime state, so UI snapshots must not fail entirely in that situation.
+    """
+    try:
+        return Path(path).is_dir()
+    except OSError:
+        return False
+
+
+def safe_path_exists(path):
+    """Return False when a path is absent or temporarily inaccessible."""
+    try:
+        return Path(path).exists()
+    except OSError:
+        return False
+
+
 MAX_DB_NAME_BYTES = 63
 MAX_JSON_BODY_BYTES = 1024 * 1024
 MAX_RETAINED_JOBS = 60
@@ -304,7 +326,7 @@ def settings_snapshot():
     payload.update(
         {
             "config_file": str(SETTINGS_STORE.path),
-            "workspace_exists": WORKSPACE.exists() and WORKSPACE.is_dir(),
+            "workspace_exists": safe_path_is_dir(WORKSPACE),
             "platform": platform_id(),
             "api_port_actual": PORT,
         }
@@ -408,7 +430,7 @@ def run_capture(args, cwd=None, timeout=12):
             (
                 candidate
                 for candidate in (WORKSPACE, WORKSPACE.parent, Path.home(), ROOT)
-                if candidate.is_dir()
+                if safe_path_is_dir(candidate)
             ),
             Path.cwd(),
         )
@@ -419,7 +441,7 @@ def run_capture(args, cwd=None, timeout=12):
         except RuntimeError as exc:
             return 2, str(exc)
         command_cwd = Path.home()
-    elif requested_cwd is not None and not requested_cwd.is_dir():
+    elif requested_cwd is not None and not safe_path_is_dir(requested_cwd):
         return 2, f"Dossier de travail introuvable: {requested_cwd}"
     try:
         result = subprocess.run(
@@ -511,7 +533,7 @@ def system_status_snapshot(docker=None):
         "docker": docker,
         "traefik": traefik_status(docker),
         "workspace": str(WORKSPACE),
-        "workspace_exists": WORKSPACE.exists() and WORKSPACE.is_dir(),
+        "workspace_exists": safe_path_is_dir(WORKSPACE),
     }
 
 
@@ -957,7 +979,7 @@ def compose_file(project):
     path = WORKSPACE / project
     for name in ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"):
         candidate = path / name
-        if candidate.exists():
+        if safe_path_exists(candidate):
             return candidate
     return None
 
@@ -984,7 +1006,7 @@ def project_url(project):
 
 def project_odoo_version(project):
     release_file = WORKSPACE / project / "odoo" / "odoo" / "odoo" / "release.py"
-    if release_file.exists():
+    if safe_path_exists(release_file):
         try:
             text = release_file.read_text(encoding="utf-8", errors="ignore")
             match = re.search(r"version_info\s*=\s*\((\d+),\s*(\d+)", text)
