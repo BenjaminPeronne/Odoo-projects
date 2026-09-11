@@ -14,7 +14,7 @@ export const DialogContent = React.forwardRef<
   <RadixDialog.Content
     ref={ref}
     size="3"
-    className={cn("sdk-dialog min-w-0 [overflow-wrap:anywhere] relative max-h-[calc(100dvh-2rem-max(2rem,6dvh))] w-[calc(100vw-2rem)] max-w-lg overflow-y-auto", className)}
+    className={cn("relative max-h-[calc(100dvh-2rem-max(2rem,6dvh))] w-[calc(100vw-2rem)] max-w-lg overflow-y-auto", className)}
     {...props}
   >
     {children}
@@ -35,7 +35,7 @@ export const DialogContent = React.forwardRef<
 DialogContent.displayName = "DialogContent";
 
 export function DialogHeader({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn("mb-5 flex min-w-0 flex-col gap-2 pr-8", className)} {...props} />;
+  return <div className={cn("flex flex-col gap-1.5 pr-8", className)} {...props} />;
 }
 
 export const DialogTitle = React.forwardRef<

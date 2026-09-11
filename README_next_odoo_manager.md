@@ -10,9 +10,6 @@ Le backend Python reste le sidecar API local. La vue Bootstrap historique est
 archivee dans `archive/bootstrap/odoo_manager_bootstrap_legacy.html` et n'est
 plus exposee comme interface de secours.
 
-La liste à jour des technologies, de leurs versions et de leur utilité est
-disponible dans [`docs/technologies.md`](docs/technologies.md).
-
 L'interface utilise la configuration persistante du backend. Le dossier de
 projets peut etre change depuis `Parametres` sans deplacer le gestionnaire.
 

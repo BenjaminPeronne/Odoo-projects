@@ -43,7 +43,6 @@ class SettingsTests(unittest.TestCase):
                     "docker_poll_interval": 1,
                     "api_port": 19876,
                     "show_technical_details": True,
-                    "interface_layout": "modern",
                     "interface_icon": "local",
                     "bases_layout": "compact",
                     "modules_layout": "classic",
@@ -58,7 +57,6 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(loaded.api_port, 19876)
             self.assertFalse(loaded.start_project_before_open)
             self.assertTrue(loaded.show_technical_details)
-            self.assertEqual(loaded.interface_layout, "modern")
             self.assertEqual(loaded.interface_icon, "local")
             self.assertEqual(loaded.bases_layout, "compact")
             self.assertEqual(loaded.modules_layout, "classic")
@@ -71,9 +69,8 @@ class SettingsTests(unittest.TestCase):
         self.assertFalse(settings.show_technical_details)
 
     def test_layout_defaults_and_invalid_values_use_classic(self):
-        for payload in ({}, {"interface_layout": "unknown", "bases_layout": "unknown", "modules_layout": None}):
+        for payload in ({}, {"bases_layout": "unknown", "modules_layout": None}):
             settings = ManagerSettings.from_dict(payload, "/tmp/workspace")
-            self.assertEqual(settings.interface_layout, "classic")
             self.assertEqual(settings.bases_layout, "classic")
             self.assertEqual(settings.modules_layout, "classic")
 
