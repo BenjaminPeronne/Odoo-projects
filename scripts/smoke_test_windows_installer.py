@@ -16,7 +16,7 @@ import urllib.request
 from pathlib import Path
 
 
-TAURI_WINDOWS_ORIGIN = "http://tauri.localhost"
+ELECTRON_ORIGIN = "app://sdk"
 PACKAGED_PROCESS_NAMES = (
     "SDK Local Manager.exe",
     "odoo-manager.exe",
@@ -49,7 +49,7 @@ def request(
 
 def backend_log() -> Path:
     local_data = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-    return local_data / "com.sudokeys.odoo-manager" / "logs" / "backend.log"
+    return Path(os.environ.get("APPDATA", local_data)) / "SDK Local Manager" / "logs" / "backend.log"
 
 
 def log_tail(path: Path, limit: int = 16_000) -> str:
@@ -147,24 +147,24 @@ def wait_for_health(process: subprocess.Popen[bytes], timeout: float) -> None:
                 _preflight_body, preflight_headers = request(
                     f"{BACKEND_URL}/api/bootstrap",
                     method="OPTIONS",
-                    origin=TAURI_WINDOWS_ORIGIN,
+                    origin=ELECTRON_ORIGIN,
                 )
                 bootstrap_body, bootstrap_headers = request(
                     f"{BACKEND_URL}/api/bootstrap",
                     timeout=12.0,
-                    origin=TAURI_WINDOWS_ORIGIN,
+                    origin=ELECTRON_ORIGIN,
                 )
                 bootstrap = json.loads(bootstrap_body)
                 cors_origin = bootstrap_headers.get("access-control-allow-origin", "")
                 preflight_origin = preflight_headers.get("access-control-allow-origin", "")
                 allowed_headers = preflight_headers.get("access-control-allow-headers", "").lower()
                 if (
-                    cors_origin != TAURI_WINDOWS_ORIGIN
-                    or preflight_origin != TAURI_WINDOWS_ORIGIN
+                    cors_origin != ELECTRON_ORIGIN
+                    or preflight_origin != ELECTRON_ORIGIN
                     or "content-type" not in allowed_headers
                 ):
                     failure = (
-                        "L'API ne permet pas les appels de la WebView Windows "
+                        "L'API ne permet pas les appels d’Electron Windows "
                         "(prévalidation CORS incomplète)."
                     )
                     break
@@ -187,6 +187,12 @@ def shutdown_application(process: subprocess.Popen[bytes]) -> None:
     wait_for_backend_shutdown()
 
 
+def installed_paths(install_dir: Path):
+    application = install_dir / "SDK Local Manager.exe"
+    runtime = install_dir / "resources" / "backend" / "odoo-manager-backend-runtime"
+    return (application if application.is_file() else None), runtime
+
+
 def main() -> None:
     if os.name != "nt":
         raise SystemExit("Ce test doit être exécuté sur Windows.")
@@ -206,15 +212,7 @@ def main() -> None:
         config_dir = root / "config"
         subprocess.run([str(installer), "/S", f"/D={install_dir}"], check=True, timeout=90)
 
-        application = next(
-            (
-                candidate
-                for candidate in install_dir.rglob("*.exe")
-                if candidate.name.lower() in {"odoo manager.exe", "odoo-manager.exe"}
-            ),
-            None,
-        )
-        runtime = application.parent / "odoo-manager-backend-runtime" if application else None
+        application, runtime = installed_paths(install_dir)
         if application is None or runtime is None or not runtime.is_dir():
             contents = "\n".join(str(path.relative_to(install_dir)) for path in install_dir.rglob("*"))
             raise SystemExit(f"Installation Windows incomplète.\n{contents}")

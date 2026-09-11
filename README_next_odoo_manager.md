@@ -145,45 +145,48 @@ complete utilise une liste explicite des modules installes dont le code est
 disponible au lieu de `-u all`, afin de ne pas remettre les modules absents en
 etat `to upgrade`.
 
-## Application de bureau Tauri
+## Application de bureau Electron
 
-Le dossier `odoo-manager-next/src-tauri` contient le socle Tauri 2. Le frontend
-Next peut etre exporte statiquement avec :
+L’application utilise Electron 44.3.0 (version stable vérifiée le 10 septembre 2026),
+avec le frontend Next.js exporté et un backend Python embarqué par PyInstaller.
+Le logo, la typographie, les couleurs et les écrans Sudokeys sont conservés.
+Le code natif se trouve dans `odoo-manager-next/electron` ; les anciens fichiers
+`src-tauri` sont conservés comme référence historique et ne participent plus au build.
 
 ```sh
 cd odoo-manager-next
+npm ci
 npm run build:desktop
-```
-
-L'icone source se trouve dans `odoo-manager-next/assets/app-icon.png`. Les
-formats `.icns`, `.ico` et PNG utilises par les installateurs sont generes dans
-`odoo-manager-next/src-tauri/icons/`.
-
-Pour construire l'application sur le systeme courant :
-
-```sh
+cd ..
 sh scripts/build_local_desktop.sh
 ```
 
-Sur macOS, pour generer uniquement le bundle `.app` local :
+Pour construire seulement le bundle macOS :
 
 ```sh
 sh scripts/build_local_desktop.sh --bundles app
 ```
 
-Le script choisit les paquets natifs suivants :
-
-| Systeme de construction | Paquets |
+| Système | Sortie dans `odoo-manager-next/release/` |
 | --- | --- |
 | macOS | `.app` et `.dmg` |
 | Linux | `.deb` et `.AppImage` |
 | Windows | installateur NSIS `.exe` |
 
-Les sorties sont placees dans
-`odoo-manager-next/src-tauri/target/release/bundle/`. Sur un build macOS local,
-le script peut utiliser le dossier temporaire systeme et affiche alors le chemin
-exact en fin de commande. Rust, Node.js, npm et les prerequis Tauri de la
-plateforme doivent etre installes.
+Sur macOS local, le bundle `.app` est signé dans un dossier temporaire dont le
+chemin est affiché par le script ; le DMG final est recopié dans `release/`.
+
+Node.js, npm et Python/PyInstaller sont requis ; Rust et WebKitGTK ne le sont plus.
+Les icônes natives sont dans `odoo-manager-next/electron/icons/`.
+Le backend réutilise le fichier de configuration Odoo Manager existant et choisit
+un port libre si le port configuré est occupé. Les API natives sont exposées par
+un preload isolé ; le rendu ne dispose pas de Node.js. Les liens HTTP(S) externes
+s’ouvrent dans le navigateur système.
+
+Le paquet local macOS est signé ad hoc. La distribution publique avec notarisation
+Apple reste un réglage de publication distinct. Aucune mise à jour automatique
+n’est activée : les nouvelles versions se distribuent par les installateurs.
+Voir `docs/electron-migration.md` pour les validations et les limites.
 
 ## Compilation multiplateforme
 
@@ -207,7 +210,7 @@ GitHub CLI est installe et authentifie (`gh auth login`), le script attend la
 fin du workflow puis telecharge les artefacts dans `dist/all-platforms/<tag>/`.
 
 Les artefacts GitHub Actions contiennent uniquement les installateurs `.dmg`,
-`.deb`, `.AppImage` et `.exe`, conservés pendant 7 jours. Télécharge les paquets
+`.deb`, `.AppImage` et `.exe`, conservés pendant 1 jour. Télécharge les paquets
 à archiver avant leur expiration. Les applications décompressées et les dossiers
 intermédiaires ne sont pas déposés. Cette règle s'applique aux prochains dépôts ;
 elle ne libère pas le stockage occupé par les anciens artefacts.
@@ -223,8 +226,7 @@ sh scripts/build_all_platforms.sh --no-wait --no-download
 
 `--tag` reste disponible pour publier explicitement une nouvelle version
 fonctionnelle. Le numero automatique distingue les compilations successives
-sans modifier la version de l'application dans `package.json`, `Cargo.toml` et
-`tauri.conf.json`.
+sans modifier la version de l’application dans `package.json`.
 
 Pour publier une vraie evolution fonctionnelle, synchronise d'abord sa version :
 

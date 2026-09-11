@@ -9,6 +9,12 @@ import odoo_manager_web as web
 
 
 class CorsTests(unittest.TestCase):
+    def test_allows_packaged_electron_origin(self):
+        handler = Mock()
+        handler.headers = {"Origin": "app://sdk"}
+        web.add_cors_headers(handler)
+        handler.send_header.assert_any_call("Access-Control-Allow-Origin", "app://sdk")
+
     def test_allows_windows_tauri_webview_origin(self):
         handler = Mock()
         handler.headers = {"Origin": "http://tauri.localhost"}

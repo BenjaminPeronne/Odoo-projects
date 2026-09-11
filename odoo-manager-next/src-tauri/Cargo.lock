@@ -2270,7 +2270,7 @@ dependencies = [
 
 [[package]]
 name = "odoo-manager"
-version = "0.1.27"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",

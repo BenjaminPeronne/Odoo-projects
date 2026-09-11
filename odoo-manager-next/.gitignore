@@ -1,5 +1,7 @@
 .next/
 node_modules/
+electron/binaries/
+release/
 out/
 src-tauri/target/
 src-tauri/binaries/*

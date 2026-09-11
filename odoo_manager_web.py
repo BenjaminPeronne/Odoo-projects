@@ -320,6 +320,7 @@ def add_cors_headers(handler):
         "http://tauri.localhost",
         "tauri://localhost",
         "https://tauri.localhost",
+        "app://sdk",
     }
     if origin in allowed:
         handler.send_header("Access-Control-Allow-Origin", origin)
@@ -3682,6 +3683,7 @@ class Handler(BaseHTTPRequestHandler):
                     {
                         "ok": True,
                         "pid": os.getpid(),
+                        "instance_id": os.environ.get("ODOO_MANAGER_INSTANCE_ID", ""),
                         "port": PORT,
                         "log_file": str(RUNTIME_LOG_PATH),
                     },

@@ -1,5 +1,7 @@
 "use client";
 
+import type {} from "@/lib/desktop";
+
 import {
   Activity,
   AlertTriangle,
@@ -306,7 +308,7 @@ type ProjectDiagnostics = {
 
 let API_BASE = process.env.NEXT_PUBLIC_ODOO_MANAGER_API?.replace(/\/$/, "") || "";
 const FALLBACK_APP_VERSION = packageMetadata.version;
-const TAURI_API_RETRY_DELAYS_MS = [0, 250, 750, 1500, 2500];
+const DESKTOP_API_RETRY_DELAYS_MS = [0, 250, 750, 1500, 2500];
 const BOOTSTRAP_RETRY_DELAYS_MS = [0, 500, 1000, 2000];
 const DOCKER_CONFIRM_DELAY_MS = 700;
 const API_TIMEOUT_MS = 20_000;
@@ -322,7 +324,7 @@ class ApiUnavailableError extends Error {
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response | undefined;
-  const retryDelays = isTauriRuntime() ? TAURI_API_RETRY_DELAYS_MS : [0];
+  const retryDelays = isDesktopRuntime() ? DESKTOP_API_RETRY_DELAYS_MS : [0];
   try {
     for (const [index, delay] of retryDelays.entries()) {
       if (delay) await new Promise((resolve) => window.setTimeout(resolve, delay));
@@ -412,33 +414,39 @@ function jobsFingerprint(items: Job[]) {
     .join("|");
 }
 
-function isTauriRuntime() {
-  return typeof window !== "undefined" && Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
+function isDesktopRuntime() {
+  return typeof window !== "undefined" && Boolean(window.sdkDesktop);
 }
 
-async function invokeDesktop<T>(command: string, args?: Record<string, unknown>) {
-  const { invoke } = await import("@tauri-apps/api/core");
-  return invoke<T>(command, args);
+async function invokeDesktop<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  const bridge = window.sdkDesktop;
+  if (!bridge) throw new Error("L’intégration native Electron est indisponible.");
+  switch (command) {
+    case "backend_endpoint": return await bridge.backendEndpoint() as T;
+    case "backend_diagnostics": return await bridge.backendDiagnostics() as T;
+    case "open_external_url": return await bridge.openExternalUrl(String(args?.url || "")) as T;
+    case "open_docker_desktop": return await bridge.openDockerDesktop() as T;
+    default: throw new Error("Commande native inconnue.");
+  }
 }
 
 async function applicationVersion() {
-  if (!isTauriRuntime()) return FALLBACK_APP_VERSION;
+  if (!isDesktopRuntime()) return FALLBACK_APP_VERSION;
   try {
-    const { getVersion } = await import("@tauri-apps/api/app");
-    return await getVersion();
+    return await window.sdkDesktop!.getVersion();
   } catch {
     return FALLBACK_APP_VERSION;
   }
 }
 
 async function configureRuntimeApiBase() {
-  if (!isTauriRuntime()) return;
+  if (!isDesktopRuntime()) return;
   API_BASE = (await invokeDesktop<string>("backend_endpoint")).replace(/\/$/, "");
 }
 
 async function openExternalUrl(url?: string) {
   if (!url || url === "#") return false;
-  if (!isTauriRuntime()) {
+  if (!isDesktopRuntime()) {
     return Boolean(window.open(url, "_blank", "noopener,noreferrer"));
   }
   await invokeDesktop<void>("open_external_url", { url });
@@ -450,23 +458,13 @@ async function openDockerDesktopNative() {
 }
 
 async function pickDirectory(defaultPath?: string) {
-  if (!isTauriRuntime()) return null;
-  const { open } = await import("@tauri-apps/plugin-dialog");
-  const selected = await open({
-    directory: true,
-    multiple: false,
-    canCreateDirectories: true,
-    defaultPath: defaultPath || undefined,
-    title: "Choisir le dossier des projets Odoo",
-  });
-  return typeof selected === "string" ? selected : null;
+  if (!isDesktopRuntime()) return null;
+  return window.sdkDesktop!.pickDirectory(defaultPath || undefined);
 }
 
 async function requestTaskNotificationPermission() {
-  if (isTauriRuntime()) {
-    const { isPermissionGranted, requestPermission } = await import("@tauri-apps/plugin-notification");
-    if (await isPermissionGranted()) return true;
-    return (await requestPermission()) === "granted";
+  if (isDesktopRuntime()) {
+    return window.sdkDesktop!.notificationsSupported();
   }
   if (typeof window === "undefined" || !("Notification" in window)) return false;
   if (window.Notification.permission === "granted") return true;
@@ -478,9 +476,8 @@ async function sendTaskNotification(job: Job) {
   const successful = job.status === "done";
   const title = successful ? "Tâche terminée" : "Tâche en erreur";
   const body = !successful && job.error_message ? `${job.title}\n${job.error_message}` : job.title;
-  if (isTauriRuntime()) {
-    const { isPermissionGranted, sendNotification } = await import("@tauri-apps/plugin-notification");
-    if (await isPermissionGranted()) sendNotification({ title, body });
+  if (isDesktopRuntime()) {
+    await window.sdkDesktop!.notify(title, body);
     return;
   }
   if (typeof window !== "undefined" && "Notification" in window && window.Notification.permission === "granted") {
@@ -1064,7 +1061,7 @@ export default function Home() {
         if (attempt === BOOTSTRAP_RETRY_DELAYS_MS.length - 1) {
           setInitializationError(err instanceof Error ? err.message : "Le service local ne répond pas.");
           setInitializationMessage("Le gestionnaire n’est pas encore prêt.");
-          if (isTauriRuntime()) {
+          if (isDesktopRuntime()) {
             try {
               setBackendDiagnostics(await invokeDesktop<BackendDiagnostics>("backend_diagnostics"));
             } catch {
@@ -1247,7 +1244,7 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    setDesktopRuntime(isTauriRuntime());
+    setDesktopRuntime(isDesktopRuntime());
     void applicationVersion().then(setAppVersion);
     void configureRuntimeApiBase()
       .then(initializeApplication)
@@ -1476,7 +1473,7 @@ export default function Home() {
       schedule(refreshSystemStatus, 1500);
       schedule(refreshSystemStatus, 5000);
     } catch (err) {
-      if (err instanceof ApiUnavailableError && isTauriRuntime()) {
+      if (err instanceof ApiUnavailableError && isDesktopRuntime()) {
         try {
           await openDockerDesktopNative();
           pushToast("info", "Ouverture de Docker Desktop demandée.");

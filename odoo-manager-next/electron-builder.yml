@@ -1,0 +1,40 @@
+appId: com.sudokeys.odoo-manager
+productName: SDK Local Manager
+artifactName: SDK-Local-Manager-${version}-${os}-${arch}.${ext}
+directories:
+  output: release
+  buildResources: electron/icons
+files:
+  - out/**/*
+  - electron/*.cjs
+  - electron/icons/*
+  - package.json
+  - '!node_modules/**/*'
+extraResources:
+  - from: electron/binaries
+    to: backend
+asar: true
+npmRebuild: false
+afterPack: electron/after-pack.cjs
+mac:
+  target: [dmg, zip]
+  category: public.app-category.developer-tools
+  icon: electron/icons/icon.icns
+  identity: '-'
+  timestamp: none
+  hardenedRuntime: true
+  gatekeeperAssess: false
+win:
+  target: [nsis]
+  icon: electron/icons/icon.ico
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: false
+  runAfterFinish: false
+linux:
+  target: [AppImage, deb]
+  icon: electron/icons/128x128@2x.png
+  category: Development
+  maintainer: Sudokeys

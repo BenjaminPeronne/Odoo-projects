@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 const backend = process.env.ODOO_MANAGER_API || "http://127.0.0.1:18765";
 const configDir = dirname(fileURLToPath(import.meta.url));
-const desktopBuild = process.env.TAURI_BUILD === "1";
+const desktopBuild = process.env.ELECTRON_BUILD === "1";
 
 const browserConfig: NextConfig = {
   agentRules: false,

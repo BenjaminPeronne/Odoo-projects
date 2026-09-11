@@ -15,7 +15,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from build_tauri_sidecar import BINARIES, target_triple
+from build_electron_sidecar import BINARIES
 
 
 def available_port() -> int:
@@ -26,7 +26,7 @@ def available_port() -> int:
 
 def sidecar_path() -> Path:
     extension = ".exe" if os.name == "nt" else ""
-    return BINARIES / f"odoo-manager-backend-{target_triple()}{extension}"
+    return BINARIES / f"odoo-manager-backend{extension}"
 
 
 def request(url: str, *, method: str = "GET", timeout: float = 2.0) -> bytes:
