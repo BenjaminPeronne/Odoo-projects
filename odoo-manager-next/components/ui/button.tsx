@@ -8,10 +8,10 @@ type ButtonSize = "default" | "sm" | "icon";
 const buttonVariants = ({ variant = "default", size = "default", className }: { variant?: ButtonVariant | null; size?: ButtonSize | null; className?: string } = {}) =>
   cn(
     "box-border min-w-0 select-none justify-center gap-2 whitespace-normal text-center font-medium leading-snug transition-[background-color,border-color,box-shadow,filter,transform] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:pointer-events-none disabled:!border-border disabled:!bg-muted disabled:!text-muted-foreground disabled:!shadow-none disabled:!filter-none disabled:opacity-60 [&_svg]:shrink-0",
-    (variant === "default" || variant === "destructive") && "app-solid-button hover:brightness-[0.97] active:brightness-[0.93]",
+    (variant === "default" || variant === "destructive") && "app-solid-button hover:brightness-[0.88] active:brightness-[0.93]",
     variant === "default" && "app-primary-button",
     variant === "secondary" && "hover:bg-secondary/80 active:bg-secondary/70",
-    variant === "outline" && "hover:border-primary/45 hover:bg-primary/[0.06] active:bg-primary/[0.10] dark:hover:bg-primary/[0.12]",
+    variant === "outline" && "hover:border-primary/45 hover:bg-primary/[0.12] active:bg-primary/[0.10] dark:hover:bg-primary/[0.12]",
     variant === "ghost" && "m-0 hover:bg-muted active:bg-muted/80",
     variant === "destructive" && "app-destructive-button",
     size === "default" && "h-auto min-h-10 px-4 py-2",

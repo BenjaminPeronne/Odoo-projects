@@ -131,6 +131,7 @@ type ManagerSettings = {
   api_port_actual?: number;
   start_project_before_open: boolean;
   show_technical_details: boolean;
+  interface_layout: "classic" | "modern";
   bases_layout: "classic" | "compact";
   modules_layout: "classic" | "compact";
   interface_icon: InterfaceIcon;
@@ -642,6 +643,7 @@ function fallbackManagerSettings(
     api_port_actual: current?.api_port_actual,
     start_project_before_open: current?.start_project_before_open ?? false,
     show_technical_details: current?.show_technical_details ?? false,
+    interface_layout: current?.interface_layout === "modern" ? "modern" : "classic",
     bases_layout: current?.bases_layout === "compact" ? "compact" : "classic",
     modules_layout: current?.modules_layout === "compact" ? "compact" : "classic",
     interface_icon: current?.interface_icon === "local" ? "local" : "manager",
@@ -868,8 +870,9 @@ export default function Home() {
       ))
       .filter((module) => moduleOriginFilter === "all" || normalizedModuleOrigin(module.origin, module.source_path || module.path) === moduleOriginFilter);
   }, [deferredModuleSearch, modules, moduleFilter, moduleOriginFilter]);
-  const compactBases = settings?.bases_layout === "compact";
-  const compactModules = settings?.modules_layout === "compact";
+  const modernInterface = settings?.interface_layout === "modern";
+  const compactBases = modernInterface || settings?.bases_layout === "compact";
+  const compactModules = modernInterface || settings?.modules_layout === "compact";
   const modulesPerPage = compactModules ? 20 : 50;
   const modulePageCount = Math.max(1, Math.ceil(filteredModules.length / modulesPerPage));
   const visibleModules = useMemo(() => {
@@ -918,7 +921,9 @@ export default function Home() {
   const someFilteredModulesSelected = selectedFilteredModuleCount > 0 && !allFilteredModulesSelected;
   const fallbackDockerGuide = useMemo(() => offlineDockerGuide(), []);
   const showModuleLocations = settings?.show_technical_details ?? false;
-  const moduleTableGridColumns = showModuleLocations
+  const moduleTableGridColumns = modernInterface
+    ? (showModuleLocations ? "xl:grid-cols-[minmax(0,1.5fr)_minmax(0,.7fr)_minmax(0,.7fr)_minmax(0,.8fr)_minmax(0,1fr)_180px]" : "xl:grid-cols-[minmax(0,1.5fr)_minmax(0,.7fr)_minmax(0,.7fr)_minmax(0,.8fr)_180px]")
+    : showModuleLocations
     ? "xl:grid-cols-[minmax(210px,1.35fr)_100px_110px_150px_minmax(220px,1.15fr)_200px]"
     : "xl:grid-cols-[minmax(210px,1.35fr)_100px_110px_150px_200px]";
 
@@ -2289,7 +2294,7 @@ export default function Home() {
   }
 
   return (
-    <main className="sdk-shell min-h-screen overflow-x-clip">
+    <main className={cn("sdk-shell min-h-screen overflow-x-clip", modernInterface && "sdk-modern-interface")}>
       <div className="flex min-h-screen min-w-0 flex-col lg:flex-row">
         <aside className="min-w-0 border-b bg-card lg:sticky lg:top-0 lg:h-screen lg:w-80 lg:flex-none lg:border-b-0 lg:border-r">
           <div className="flex h-full flex-col">
@@ -2483,7 +2488,7 @@ export default function Home() {
                   <Button
                     key="stop-project"
                     className="w-full"
-                    variant="destructive"
+                    variant={modernInterface ? "outline" : "destructive"}
                     disabled={!selectedProjectReady || !selectedProjectHasContainers || loading || Boolean(selectedProjectLifecycleJob)}
                     onClick={requestStopProject}
                   >
@@ -2504,7 +2509,7 @@ export default function Home() {
                 {selectedProject && (
                   <Button
                     className="col-span-2 w-full sm:col-span-1"
-                    variant="outline"
+                    variant={modernInterface && selectedProjectOnline ? "default" : "outline"}
                     disabled={
                       !selectedProjectReady ||
                       openingOdoo ||
@@ -2689,6 +2694,18 @@ export default function Home() {
               </div>
             )}
 
+            {modernInterface && selectedProjectOnline && (
+              <div className="mb-4 flex min-w-0 flex-wrap items-center gap-3 rounded-lg border bg-card px-4 py-3">
+                <label htmlFor="working-database" className="text-sm font-medium">Base de travail</label>
+                <div className="w-full min-w-0 sm:w-80">
+                  <Select value={selectedDb} onValueChange={setSelectedDb}>
+                    <SelectTrigger id="working-database" placeholder="Choisir une base"><SelectValue /></SelectTrigger>
+                    <SelectContent>{odooDatabases.map((db) => <SelectItem key={db} value={db}>{db}</SelectItem>)}</SelectContent>
+                  </Select>
+                </div>
+                <span className="text-xs text-muted-foreground">Cible des actions sur les bases et les modules.</span>
+              </div>
+            )}
             <Tabs
               value={activeTab}
               onValueChange={(value) => {
@@ -2699,6 +2716,7 @@ export default function Home() {
               <TabsList
                 className={cn(
                   "grid w-full overflow-hidden transition-[grid-template-columns] duration-200 ease-out motion-reduce:transition-none lg:w-fit",
+                  modernInterface && "modern-workspace-tabs",
                   selectedProjectOnline
                     ? "grid-cols-4"
                     : "[grid-template-columns:minmax(0,0fr)_minmax(0,0fr)_minmax(0,1fr)_minmax(0,1fr)]",
@@ -2728,17 +2746,55 @@ export default function Home() {
                 </TabsTrigger>
                 <TabsTrigger value="logs">
                   <Logs className="mr-1.5 h-4 w-4" />
-                  Logs
+                  {modernInterface ? "Activité et logs" : "Logs"}
                 </TabsTrigger>
                 <TabsTrigger value="actions">
                   <Settings className="mr-1.5 h-4 w-4" />
-                  Actions
+                  {modernInterface ? "Réglages du projet" : "Actions"}
                 </TabsTrigger>
               </TabsList>
 
               {selectedProjectOnline && (
-                <TabsContent value="bases">
-                  <div className={cn("grid min-w-0 gap-4", !compactBases && "xl:grid-cols-[minmax(0,1fr)_400px]")}>
+                <TabsContent value="bases" data-interface-page="bases">
+                  {modernInterface ? (
+                    <div className="space-y-4">
+                      <Card>
+                        <CardHeader className="gap-4 sm:flex-row sm:items-center sm:justify-between">
+                          <div className="min-w-0"><CardTitle>Bases de données <span className="ml-2 text-muted-foreground">{odooDatabases.length}</span></CardTitle><CardDescription className="mt-2">Sélectionne la base sur laquelle travailler.</CardDescription></div>
+                          <div className="flex flex-wrap gap-2">
+                            <Button variant="outline" disabled={!selectedProjectReady} onClick={() => setRestoreDbOpen(true)}><Upload className="h-4 w-4" />Restaurer un ZIP</Button>
+                            <Button disabled={!selectedProjectReady} onClick={() => setCreateDbOpen(true)}><PlusCircle className="h-4 w-4" />Créer une base</Button>
+                          </div>
+                        </CardHeader>
+                        <CardContent className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+                          {odooDatabases.map((db) => (
+                            <InteractiveCard key={db} aria-pressed={selectedDb === db} onClick={() => setSelectedDb(db)} className={cn("min-w-0 p-4", selectedDb === db && "border-primary bg-primary/[0.08] ring-1 ring-primary/25")}>
+                              <div className="flex items-start gap-3"><Database className="mt-0.5 h-5 w-5 shrink-0 text-muted-foreground" /><span className="min-w-0 flex-1 [overflow-wrap:anywhere] font-medium">{db}</span>{selectedDb === db && <CheckCircle2 className="h-4 w-4 shrink-0 text-primary" />}</div>
+                              <div className="mt-3 flex flex-wrap justify-between gap-2 text-xs text-muted-foreground"><span>{selectedProject?.database_versions?.[db] || "Base Odoo"}</span><span>{selectedDb === db ? "Base de travail" : "Sélectionner"}</span></div>
+                            </InteractiveCard>
+                          ))}
+                          {!odooDatabases.length && <p className="p-4 text-sm text-muted-foreground">Aucune base Odoo. Crée une base ou restaure une sauvegarde pour commencer.</p>}
+                        </CardContent>
+                      </Card>
+                      <Card>
+                        <CardContent className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                          <div className="min-w-0"><p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Base sélectionnée</p><h3 className="mt-1 [overflow-wrap:anywhere] font-semibold">{selectedDb || "Aucune base sélectionnée"}</h3><p className="mt-2 max-w-xl text-sm text-muted-foreground">La neutralisation désactive les tâches planifiées métier et la messagerie, puis contrôle le résultat.</p></div>
+                          <div className="flex shrink-0 flex-col gap-2">
+                            <Button variant="outline" disabled={!canUseDb || loading} onClick={() => setNeutralizeDbOpen(true)}><ShieldCheck className="h-4 w-4" />Neutraliser et contrôler</Button>
+                            {selectedProject && <Button variant="ghost" onClick={() => openUrl(selectedProject.database_manager_url)}><ExternalLink className="h-4 w-4" />Gestionnaire de bases Odoo</Button>}
+                          </div>
+                        </CardContent>
+                      </Card>
+                      <details className="rounded-lg border bg-card">
+                        <summary className="cursor-pointer rounded-lg p-4 text-sm font-medium">Infrastructure · PostgreSQL <span className="ml-2 text-muted-foreground">{selectedProject?.postgres_status || "absent"}</span></summary>
+                        <div className="flex min-w-0 flex-wrap items-center justify-between gap-4 border-t p-4">
+                          <div className="min-w-0 text-sm"><p className="[overflow-wrap:anywhere]">Conteneur : postgresql-{selectedProject?.name}</p><p className="mt-1 text-muted-foreground">La console s’ouvre dans le terminal avec la base de travail sélectionnée.</p></div>
+                          <Button variant="outline" disabled={!canUseDb || selectedProject?.postgres_status !== "running" || openingPostgresql} onClick={openPostgresqlConsole}>{openingPostgresql ? <Loader2 className="h-4 w-4 animate-spin" /> : <Terminal className="h-4 w-4" />}Ouvrir psql</Button>
+                        </div>
+                      </details>
+                    </div>
+                  ) : (
+                  <div className={cn("grid min-w-0 gap-4", modernInterface && "modern-page-grid", !compactBases && "xl:grid-cols-[minmax(0,1fr)_400px]")}>
                     <Card>
                       <CardHeader>
                         <CardTitle>Bases Odoo</CardTitle>
@@ -2863,12 +2919,13 @@ export default function Home() {
                       </Card>
                     </div>
                   </div>
+                  )}
                 </TabsContent>
               )}
 
               {selectedProjectOnline && (
-                <TabsContent value="modules">
-                  <Card>
+                <TabsContent value="modules" data-interface-page="modules">
+                  <Card className={cn(modernInterface && "modern-primary-panel")}>
                     <CardHeader className="gap-3 sm:flex-row sm:items-start sm:justify-between">
                       <div className="min-w-0">
                         <div className="flex items-center gap-2">
@@ -2887,6 +2944,7 @@ export default function Home() {
                         </div>
                         <CardDescription>Recherche, sélection et mise à jour des modules de la base Odoo choisie.</CardDescription>
                       </div>
+                      {!modernInterface && (
                       <div className="grid w-full gap-2 sm:w-auto sm:grid-cols-2">
                         <Button
                           className="w-full"
@@ -2911,11 +2969,40 @@ export default function Home() {
                         </Button>
                         <Button className="w-full" variant="outline" onClick={() => setZipDialogOpen(true)} disabled={!selectedProjectReady}>
                           <FileArchive className="h-4 w-4" />
-                          Ajouter un pauvre zip
+                          Ajouter un ZIP
                         </Button>
                       </div>
+                      )}
                     </CardHeader>
                     <CardContent>
+                      {modernInterface && <details className="mb-4 rounded-md border"><summary className="cursor-pointer rounded-md px-4 py-3 text-sm font-medium">Ajouter des modules et maintenance</summary><div className="border-t p-3">                      <div className="grid w-full gap-2 sm:w-auto sm:grid-cols-2">
+                        <Button
+                          className="w-full"
+                          variant="outline"
+                          onClick={openSocleDialog}
+                          disabled={!selectedProjectReady || loading}
+                        >
+                          <Boxes className="h-4 w-4" />
+                          Installer un socle
+                        </Button>
+                        <Button
+                          className="w-full"
+                          disabled={!selectedProjectReady || loading || checkingUpdatePrerequisites}
+                          onClick={requestUpdateAllOdooModules}
+                        >
+                          {checkingUpdatePrerequisites ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
+                          MAJ complète Odoo
+                        </Button>
+                        <Button className="w-full" variant="outline" onClick={() => setRepositoryOpen(true)} disabled={!selectedProjectReady || loading}>
+                          <CloudDownload className="h-4 w-4" />
+                          Dépôt SSH · Ajout / MAJ
+                        </Button>
+                        <Button className="w-full" variant="outline" onClick={() => setZipDialogOpen(true)} disabled={!selectedProjectReady}>
+                          <FileArchive className="h-4 w-4" />
+                          Ajouter un ZIP
+                        </Button>
+                      </div></div></details>}
+
                       <div className="mb-4 grid min-w-0 gap-3 md:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_180px_210px_220px]">
                         <div className="relative">
                           <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
@@ -3063,13 +3150,13 @@ export default function Home() {
                                       onCheckedChange={(checked) => toggleModuleSelection(module.name, checked === true)}
                                     />
                                     <span className="min-w-0">
-                                      <div className="break-words font-medium">{module.name}</div>
-                                      <div className="mt-0.5 break-words text-xs text-muted-foreground">{module.title || module.name}</div>
+                                      <div className="[overflow-wrap:anywhere] font-medium">{modernInterface ? module.title || module.name : module.name}</div>
+                                      {(!modernInterface || (module.title && module.title !== module.name)) && <div className="mt-0.5 [overflow-wrap:anywhere] text-xs text-muted-foreground">{modernInterface ? module.name : module.title || module.name}</div>}
                                     </span>
                                   </label>
                                   <div className="flex min-w-0 items-center justify-between gap-3 xl:block">
                                     <span className="text-xs font-medium text-muted-foreground xl:hidden">État</span>
-                                    <Badge className="shrink-0" variant={module.state === "installed" ? "success" : "secondary"}>{module.state}</Badge>
+                                    <Badge className="shrink-0" variant={module.state === "installed" ? "success" : "secondary"}>{modernInterface ? ({ installed: "Installé", uninstalled: "Disponible", "to upgrade": "À mettre à jour", "to install": "À installer", "to remove": "À retirer" }[module.state] || module.state) : module.state}</Badge>
                                   </div>
                                   <div className="flex min-w-0 items-start justify-between gap-3 text-sm xl:block">
                                     <span className="text-xs font-medium text-muted-foreground xl:hidden">Version</span>
@@ -3110,6 +3197,7 @@ export default function Home() {
                                       <Button
                                         className="w-full"
                                         size="sm"
+                                        variant={modernInterface ? "outline" : "default"}
                                         disabled={!canUseDb}
                                         onClick={() => createJob("update_module", { project: selectedProject?.name, db: selectedDb, modules: module.name })}
                                       >
@@ -3205,9 +3293,9 @@ export default function Home() {
                 </TabsContent>
               )}
 
-              <TabsContent value="logs">
-                <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(340px,400px)_minmax(0,1fr)]">
-                  <Card className="min-w-0">
+              <TabsContent value="logs" data-interface-page="logs">
+                <div className={cn("grid min-w-0 gap-4", modernInterface ? "xl:grid-cols-[300px_minmax(0,1fr)]" : "xl:grid-cols-[minmax(340px,400px)_minmax(0,1fr)]")}>
+                  <Card className={cn("min-w-0", modernInterface && "modern-history-panel")}>
                     <CardHeader className="gap-3 sm:flex-row sm:items-center sm:justify-between">
                       <div className="min-w-0">
                         <CardTitle>Historique</CardTitle>
@@ -3218,12 +3306,13 @@ export default function Home() {
                         Effacer
                       </Button>
                     </CardHeader>
-                    <CardContent className="max-h-[min(62vh,680px)] min-w-0 space-y-3 overflow-y-auto">
+                    <CardContent className={cn("max-h-[min(62vh,680px)] min-w-0 overflow-y-auto", modernInterface ? "space-y-2" : "space-y-3")}>
                       {projectJobs.length ? projectJobs.map((job) => (
                         <div
                           key={job.id}
                           className={cn(
-                            "group grid h-[172px] min-w-0 grid-rows-[minmax(0,1fr)_36px] gap-2 rounded-md border bg-card p-3 shadow-sm transition-[background-color,border-color,box-shadow] hover:border-primary/40 hover:shadow-md",
+                            "group grid min-w-0 gap-2 rounded-md border bg-card shadow-sm transition-[background-color,border-color,box-shadow] hover:border-primary/40 hover:shadow-md",
+                            modernInterface ? "relative pr-10 p-2" : "h-[172px] grid-rows-[minmax(0,1fr)_36px] p-3",
                             !scopedExternalLogView && selectedJob?.id === job.id && "border-primary bg-primary/[0.08] ring-1 ring-primary/25 dark:bg-primary/[0.14]",
                           )}
                         >
@@ -3243,14 +3332,14 @@ export default function Home() {
                             </Badge>
                           </button>
                           <Button
-                            className="w-full border-red-300 text-red-700 hover:border-red-400 hover:bg-red-50 hover:text-red-800 active:bg-red-100 focus-visible:ring-red-500 dark:border-red-800 dark:text-red-300 dark:hover:border-red-700 dark:hover:bg-red-950/60 dark:hover:text-red-200 dark:active:bg-red-950"
+                            className={modernInterface ? "absolute bottom-2 right-2 !h-8 !min-h-8 !w-8 !p-1 text-muted-foreground hover:text-red-600" : "w-full border-red-300 text-red-700 hover:bg-red-50"}
                             variant="outline"
                             size="sm"
                             title={`Supprimer l'historique ${job.title}`}
                             aria-label={`Supprimer l'historique ${job.title}`}
                             onClick={() => deleteJob(job.id)}
                           >
-                            Supprimer
+                            {modernInterface ? <Trash2 className="h-3.5 w-3.5" /> : "Supprimer"}
                           </Button>
                         </div>
                       )) : (
@@ -3262,10 +3351,10 @@ export default function Home() {
                       )}
                     </CardContent>
                   </Card>
-                  <Card className="min-w-0">
+                  <Card className={cn("min-w-0", modernInterface && "modern-primary-panel")}>
                     <CardHeader className="min-w-0 gap-3 min-[1900px]:flex-row min-[1900px]:items-start min-[1900px]:justify-between">
                       <div className="min-w-0 flex-1">
-                        <CardTitle>Sortie</CardTitle>
+                        <CardTitle>{modernInterface ? "Détail de l’activité" : "Sortie"}</CardTitle>
                         <CardDescription className="break-words">{displayedOutputTitle}</CardDescription>
                         {outputTitleIsLong && (
                           <button
@@ -3329,19 +3418,47 @@ export default function Home() {
                           </div>
                         </div>
                       )}
+                      {modernInterface && !scopedExternalLogView && selectedJob && (
+                        <div className="mb-4 rounded-lg border bg-muted/30 p-4" role="status">
+                          <Badge variant={statusVariant(selectedJob.status)}>{statusLabel(selectedJob.status)}</Badge>
+                          <p className="mt-3 [overflow-wrap:anywhere] font-medium">{selectedJob.title}</p>
+                          <p className="mt-2 [overflow-wrap:anywhere] text-sm text-muted-foreground">{selectedJob.error_message || (selectedJob.status === "done" ? "L’opération s’est terminée avec succès. La sortie détaillée est disponible ci-dessous." : selectedJob.status === "running" ? "L’opération est en cours. Tu peux suivre son avancement et consulter sa sortie." : "Consulte la sortie détaillée pour connaître le résultat de cette opération.")}</p>
+                          {selectedJob.finished_at && <p className="mt-3 text-xs text-muted-foreground">Fin : {selectedJob.finished_at}</p>}
+                        </div>
+                      )}
+                      {modernInterface ? (
+                        <details key={`${selectedJob?.id}-${scopedExternalLogView?.title || "job"}`} open={Boolean(scopedExternalLogView) || selectedJob?.status === "running" || selectedJob?.status === "error"} className="rounded-lg border">
+                          <summary className="cursor-pointer rounded-lg p-3 text-sm font-medium">Sortie détaillée · logs bruts</summary>
                       <pre
                         ref={logOutputRef}
-                        className="log-terminal min-h-[260px] max-h-[min(58vh,620px)] max-w-full overflow-auto whitespace-pre-wrap break-words rounded-md bg-slate-950 p-3 text-xs leading-relaxed text-emerald-100 sm:p-4"
+                        className={cn(
+                          "log-terminal min-h-[260px] max-w-full overflow-auto whitespace-pre-wrap break-words rounded-md bg-slate-950 p-3 text-xs leading-relaxed text-emerald-100 sm:p-4",
+                          modernInterface ? "max-h-[min(68vh,760px)]" : "max-h-[min(58vh,620px)]",
+                        )}
                         onScroll={handleLogOutputScroll}
                       >
                         {outputContent}
                       </pre>
+                        </details>
+                      ) : (
+                      <pre
+                        ref={logOutputRef}
+                        className={cn(
+                          "log-terminal min-h-[260px] max-w-full overflow-auto whitespace-pre-wrap break-words rounded-md bg-slate-950 p-3 text-xs leading-relaxed text-emerald-100 sm:p-4",
+                          modernInterface ? "max-h-[min(68vh,760px)]" : "max-h-[min(58vh,620px)]",
+                        )}
+                        onScroll={handleLogOutputScroll}
+                      >
+                        {outputContent}
+                      </pre>
+                      )}
                     </CardContent>
                   </Card>
                 </div>
               </TabsContent>
 
-              <TabsContent value="actions">
+              <TabsContent value="actions" data-interface-page="settings">
+                {modernInterface && <Card className="mb-4"><CardHeader><CardTitle>Réglages du projet</CardTitle><CardDescription>Environnement local et outils de maintenance.</CardDescription></CardHeader><CardContent><dl className="grid gap-4 text-sm sm:grid-cols-2"><div className="min-w-0"><dt className="text-muted-foreground">Projet</dt><dd className="mt-1 [overflow-wrap:anywhere] font-medium">{selectedProject?.name || "Aucun projet"}</dd></div><div><dt className="text-muted-foreground">Version Odoo</dt><dd className="mt-1 font-medium">{selectedProject?.odoo_version || "—"}</dd></div><div className="min-w-0"><dt className="text-muted-foreground">Adresse locale</dt><dd className="mt-1 [overflow-wrap:anywhere]">{selectedProject?.url || "—"}</dd></div><div className="min-w-0"><dt className="text-muted-foreground">Base de travail</dt><dd className="mt-1 [overflow-wrap:anywhere]">{selectedDb || "Aucune base sélectionnée"}</dd></div></dl></CardContent></Card>}
                 <div className={cn("grid gap-4", settings?.show_technical_details && "xl:grid-cols-2")}>
                   {settings?.show_technical_details && (
                     <Card>
@@ -3363,11 +3480,11 @@ export default function Home() {
                   )}
                   <Card>
                     <CardHeader>
-                      <CardTitle>Zone sensible</CardTitle>
+                      <CardTitle>{modernInterface ? "Suppression du projet" : "Zone sensible"}</CardTitle>
                       <CardDescription>Suppression du projet local sélectionné.</CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-2">
-                      <Button className="w-full" variant="destructive" disabled={!selectedProjectReady} onClick={() => setDeleteDialogOpen(true)}>
+                      <Button className={modernInterface ? "border-red-300 text-red-700 dark:text-red-300" : "w-full"} variant={modernInterface ? "outline" : "destructive"} disabled={!selectedProjectReady} onClick={() => setDeleteDialogOpen(true)}>
                         <Trash2 className="h-4 w-4" />
                         Supprimer projet
                       </Button>
@@ -3658,27 +3775,41 @@ export default function Home() {
               </div>
 
               <div className="grid gap-3 rounded-md border p-3">
-                <div className="text-sm font-medium">Affichage des pages</div>
-                <p className="text-xs text-muted-foreground">L’affichage classique est utilisé par défaut. Tu peux choisir chaque page séparément.</p>
-                {([
-                  ["bases_layout", "Bases", "Liste à gauche et actions à droite", "Liste en haut et actions en dessous"],
-                  ["modules_layout", "Modules", "50 lignes par page, défilement dans la liste", "20 lignes par page, défilement de la page"],
-                ] as const).map(([key, title, classicDescription, compactDescription]) => (
-                  <div key={key} className="grid gap-2">
-                    <div className="text-sm font-medium">{title}</div>
-                    <div className="grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label={`Affichage ${title}`}>
-                      {(["classic", "compact"] as const).map((value) => (
-                        <InteractiveCard key={value} role="radio" aria-checked={(settingsDraft[key] ?? "classic") === value}
-                          className={cn("p-3 text-left", (settingsDraft[key] ?? "classic") === value && "border-primary bg-primary/10")}
-                          onClick={() => setSettingsDraft({ ...settingsDraft, [key]: value })}>
-                          <span className="block text-sm font-medium">{value === "classic" ? "Classique (ancien)" : "Compact (nouveau)"}</span>
-                          <span className="mt-1 block text-xs text-muted-foreground">{value === "classic" ? classicDescription : compactDescription}</span>
-                        </InteractiveCard>
-                      ))}
-                    </div>
-                  </div>
-                ))}
+                <div>
+                  <div className="text-sm font-medium">Interface du gestionnaire</div>
+                  <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                    Le choix s’applique aux Bases, Modules, Logs et Réglages du projet. Tu peux revenir à l’affichage classique à tout moment.
+                  </p>
+                </div>
+                <div className="grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Style de l’interface">
+                  {(["classic", "modern"] as const).map((value) => (
+                    <InteractiveCard
+                      key={value}
+                      role="radio"
+                      aria-checked={(settingsDraft.interface_layout ?? "classic") === value}
+                      className={cn(
+                        "min-h-24 p-3 text-left",
+                        (settingsDraft.interface_layout ?? "classic") === value && "border-primary bg-primary/[0.08] ring-1 ring-primary/25 dark:bg-primary/[0.14]",
+                      )}
+                      onClick={() => setSettingsDraft({ ...settingsDraft, interface_layout: value })}
+                    >
+                      <span className="flex items-center justify-between gap-3 text-sm font-semibold">
+                        {value === "classic" ? "Classique" : "Nouvelle présentation"}
+                        {(settingsDraft.interface_layout ?? "classic") === value && <CheckCircle2 className="h-5 w-5 shrink-0 text-primary" />}
+                      </span>
+                      <span className="mt-2 block text-xs leading-relaxed text-muted-foreground">
+                        {value === "classic"
+                          ? "Présentation historique, listes plus détaillées et panneaux séparés."
+                          : "Bases compactes, modules lisibles, résumé des opérations et réglages regroupés. Charte Sudokeys conservée."}
+                      </span>
+                    </InteractiveCard>
+                  ))}
+                </div>
               </div>
+
+              {settingsDraft.interface_layout !== "modern" && <div className="grid gap-3 sm:grid-cols-2">
+                {(["bases_layout", "modules_layout"] as const).map((field) => <div key={field} className="grid gap-2"><label htmlFor={field} className="text-sm font-medium">Densité des {field === "bases_layout" ? "bases" : "modules"}</label><Select value={settingsDraft[field] || "classic"} onValueChange={(value) => setSettingsDraft({ ...settingsDraft, [field]: value as "classic" | "compact" })}><SelectTrigger id={field}><SelectValue /></SelectTrigger><SelectContent><SelectItem value="classic">Classique</SelectItem><SelectItem value="compact">Compacte</SelectItem></SelectContent></Select></div>)}
+              </div>}
 
               <div className="grid gap-2">
                 <div>

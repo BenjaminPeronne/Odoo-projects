@@ -9,6 +9,7 @@ from .platform import wsl_path_context
 
 CONFIG_VERSION = 1
 INTERFACE_ICONS = {"manager", "local"}
+INTERFACE_LAYOUTS = {"classic", "modern"}
 DEFAULT_API_PORT = 18765
 
 
@@ -63,6 +64,7 @@ class ManagerSettings:
     api_port: int = DEFAULT_API_PORT
     start_project_before_open: bool = False
     show_technical_details: bool = False
+    interface_layout: str = "classic"
     bases_layout: str = "classic"
     modules_layout: str = "classic"
     interface_icon: str = "manager"
@@ -89,6 +91,9 @@ class ManagerSettings:
         interface_icon = str(payload.get("interface_icon", "manager")).strip().lower()
         if interface_icon not in INTERFACE_ICONS:
             interface_icon = "manager"
+        interface_layout = str(payload.get("interface_layout", "classic")).strip().lower()
+        if interface_layout not in INTERFACE_LAYOUTS:
+            interface_layout = "classic"
 
         workspace = str(payload.get("workspace") or default_workspace).strip()
         return cls(
@@ -104,6 +109,7 @@ class ManagerSettings:
             api_port=api_port,
             start_project_before_open=bool(payload.get("start_project_before_open", False)),
             show_technical_details=bool(payload.get("show_technical_details", False)),
+            interface_layout=interface_layout,
             bases_layout="compact" if payload.get("bases_layout") == "compact" else "classic",
             modules_layout="compact" if payload.get("modules_layout") == "compact" else "classic",
             interface_icon=interface_icon,
