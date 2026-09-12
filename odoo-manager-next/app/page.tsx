@@ -656,9 +656,16 @@ function fallbackManagerSettings(
   };
 }
 
-// Interface affinée : vocabulaire commun aux écrans Bases, Activité et Réglages.
+// Interface affinée : vocabulaire commun aux écrans Bases, Modules, Activité et Réglages.
 const REFINED_FOCUS_RING =
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background";
+// Échelle typographique : le nom du projet reste le niveau 1 (24-30px/600), le titre d'écran
+// devient le niveau 2, et le contenu descend à 14px comme le reste de l'application.
+const REFINED_SECTION_TITLE = "text-lg font-semibold leading-tight tracking-[-0.01em]";
+const REFINED_ROW_TITLE = "text-sm font-medium";
+const REFINED_LABEL = "text-xs font-semibold uppercase tracking-wide text-muted-foreground";
+// Identifiants techniques en JetBrains Mono : chiffres alignés et 0/O, 1/l non ambigus.
+const REFINED_IDENTIFIER = "font-mono text-[0.8125rem] font-medium tracking-tight";
 // Les emplacements techniques passent sous le nom du module : la ligne n'a plus de colonne large dédiée.
 // Chaque ligne est sa propre grille : toutes les colonnes sauf le nom ont une largeur fixe, sinon la
 // largeur du bouton d'action ("Installer" / "Mettre à jour") décalerait les colonnes d'une ligne à l'autre.
@@ -678,10 +685,14 @@ function RefinedSectionHeader({
   return (
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div className="min-w-0">
-        <h3 className="text-base font-medium">
-          {title}
-          {typeof count === "number" && <span className="ml-2 text-sm font-normal text-muted-foreground">{count}</span>}
-        </h3>
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <h3 className={cn("min-w-0", REFINED_SECTION_TITLE)}>{title}</h3>
+          {typeof count === "number" && (
+            <Badge className="shrink-0 tabular-nums" variant="outline">
+              {count}
+            </Badge>
+          )}
+        </div>
         {description && <p className="mt-1 text-sm text-muted-foreground">{description}</p>}
       </div>
       {actions && <div className="flex flex-wrap gap-2">{actions}</div>}
@@ -707,7 +718,7 @@ function RefinedRow({
   return (
     <div className={cn("flex flex-wrap items-center justify-between gap-4 p-4", className)}>
       <div className="min-w-0">
-        <div className="font-medium">{title}</div>
+        <div className={REFINED_ROW_TITLE}>{title}</div>
         {description && <p className="mt-1 text-sm text-muted-foreground">{description}</p>}
       </div>
       {children && <div className="flex flex-wrap gap-2">{children}</div>}
@@ -3072,10 +3083,15 @@ export default function Home() {
                               onClick={() => setSelectedDb(db)}
                             >
                               <div className="flex min-w-0 items-start justify-between gap-2">
-                                <span className="min-w-0 break-words font-medium">{db}</span>
+                                <span className={cn("min-w-0 break-all", REFINED_IDENTIFIER)}>{db}</span>
                                 {db === selectedDb && <CheckCircle2 className="h-4 w-4 shrink-0 text-primary" />}
                               </div>
-                              <div className="mt-2 text-sm text-muted-foreground">
+                              <div
+                                className={cn(
+                                  "mt-2 text-xs",
+                                  db === selectedDb ? "font-medium text-primary" : "text-muted-foreground",
+                                )}
+                              >
                                 {db === selectedDb
                                   ? "Base de travail"
                                   : selectedProject?.database_versions?.[db] || "Base Odoo"}
@@ -3091,10 +3107,18 @@ export default function Home() {
                         </div>
                       )}
 
+                      <div className="grid gap-4 xl:grid-cols-2 xl:items-start">
                       {odooDatabases.length > 0 && (
                         <RefinedPanel className="p-4">
-                          <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Base sélectionnée</div>
-                          <div className="mt-1 break-words text-base font-medium">{selectedDb || "Aucune base sélectionnée"}</div>
+                          <div className={REFINED_LABEL}>Base sélectionnée</div>
+                          <div
+                            className={cn(
+                              "mt-1.5 break-all",
+                              selectedDb ? REFINED_IDENTIFIER : "text-sm text-muted-foreground",
+                            )}
+                          >
+                            {selectedDb || "Aucune base sélectionnée"}
+                          </div>
                           <div className="mt-3 flex flex-wrap gap-2">
                             <Button
                               variant="outline"
@@ -3127,7 +3151,7 @@ export default function Home() {
                         >
                           <span className="flex min-w-0 items-center gap-2">
                             <ChevronRight className={cn("h-4 w-4 shrink-0 transition-transform", postgresDetailsOpen && "rotate-90")} />
-                            <span className="min-w-0 font-medium">Infrastructure · PostgreSQL</span>
+                            <span className={cn("min-w-0", REFINED_ROW_TITLE)}>Infrastructure · PostgreSQL</span>
                           </span>
                           <Badge variant={statusVariant(selectedProject?.postgres_status || "absent")} className="shrink-0">
                             {selectedProject?.postgres_status || "absent"}
@@ -3135,11 +3159,20 @@ export default function Home() {
                         </button>
                         {postgresDetailsOpen && (
                           <div id="refined-postgres-details" className="space-y-3 border-t p-4">
-                            <div className="min-w-0 rounded-md bg-muted/55 p-3 text-sm">
-                              <div className="text-muted-foreground">Conteneur</div>
-                              <div className="mt-1 break-all font-medium">{selectedProject ? `postgresql-${selectedProject.name}` : "-"}</div>
-                              <div className="mt-3 text-muted-foreground">Base Odoo ciblée</div>
-                              <div className="mt-1 break-words font-medium">{selectedDb || "Aucune base sélectionnée"}</div>
+                            <div className="min-w-0 rounded-md bg-muted/55 p-3">
+                              <div className="text-xs text-muted-foreground">Conteneur</div>
+                              <div className={cn("mt-1 break-all", REFINED_IDENTIFIER)}>
+                                {selectedProject ? `postgresql-${selectedProject.name}` : "-"}
+                              </div>
+                              <div className="mt-3 text-xs text-muted-foreground">Base Odoo ciblée</div>
+                              <div
+                                className={cn(
+                                  "mt-1 break-all",
+                                  selectedDb ? REFINED_IDENTIFIER : "text-sm text-muted-foreground",
+                                )}
+                              >
+                                {selectedDb || "Aucune base sélectionnée"}
+                              </div>
                             </div>
                             <Button
                               variant="outline"
@@ -3153,6 +3186,7 @@ export default function Home() {
                           </div>
                         )}
                       </RefinedPanel>
+                      </div>
                     </div>
                   ) : (
                     <div className={cn("grid min-w-0 gap-4", !compactBases && "xl:grid-cols-[minmax(0,1fr)_400px]")}>
@@ -3330,7 +3364,7 @@ export default function Home() {
                       {moduleFiltersBlock}
                       {moduleSelectionBlock}
                       <RefinedPanel className="overflow-hidden">
-                        <div className={cn("hidden border-b bg-muted/60 px-3 py-2 text-xs font-medium uppercase text-muted-foreground xl:grid xl:items-center xl:gap-3", REFINED_MODULE_COLUMNS)}>
+                        <div className={cn("hidden border-b bg-muted/60 px-3 py-2 xl:grid xl:items-center xl:gap-3", REFINED_LABEL, REFINED_MODULE_COLUMNS)}>
                           <div>Module</div>
                           <div>État</div>
                           <div>Version</div>
@@ -3368,9 +3402,16 @@ export default function Home() {
                                       onCheckedChange={(checked) => toggleModuleSelection(module.name, checked === true)}
                                     />
                                     <span className="min-w-0">
-                                      <span className="block break-words font-medium">{moduleTitle}</span>
+                                      <span
+                                        className={cn(
+                                          "block",
+                                          showTechnicalName ? cn("break-words", REFINED_ROW_TITLE) : cn("break-all", REFINED_IDENTIFIER),
+                                        )}
+                                      >
+                                        {moduleTitle}
+                                      </span>
                                       {showTechnicalName && (
-                                        <span className="mt-0.5 block break-words font-mono text-xs text-muted-foreground">{module.name}</span>
+                                        <span className="mt-0.5 block break-all font-mono text-xs text-muted-foreground">{module.name}</span>
                                       )}
                                       {showModuleLocations && (
                                         <span className="mt-1.5 block space-y-0.5 text-xs">
@@ -3391,9 +3432,11 @@ export default function Home() {
                                     <span className="text-xs font-medium text-muted-foreground xl:hidden">État</span>
                                     <Badge className="shrink-0" variant={module.state === "installed" ? "success" : "secondary"}>{module.state}</Badge>
                                   </div>
-                                  <div className="flex min-w-0 items-start justify-between gap-3 text-sm xl:block">
+                                  <div className="flex min-w-0 items-start justify-between gap-3 xl:block">
                                     <span className="text-xs font-medium text-muted-foreground xl:hidden">Version</span>
-                                    <span className="min-w-0 break-words">{module.installed_version || module.version || "-"}</span>
+                                    <span className="min-w-0 break-all font-mono text-xs tabular-nums">
+                                      {module.installed_version || module.version || "-"}
+                                    </span>
                                   </div>
                                   <div className="flex min-w-0 items-center justify-between gap-3 xl:block">
                                     <span className="text-xs font-medium text-muted-foreground xl:hidden">Origine</span>
@@ -3718,7 +3761,7 @@ export default function Home() {
                     <RefinedPanel>
                       <div className="flex flex-wrap items-start justify-between gap-3 border-b p-4">
                         <div className="min-w-[min(100%,18rem)] flex-1">
-                          <h3 className="break-words text-base font-medium">{displayedOutputTitle}</h3>
+                          <h3 className="break-words text-sm font-semibold">{displayedOutputTitle}</h3>
                           {outputTitleIsLong && (
                             <button
                               type="button"
@@ -3761,7 +3804,7 @@ export default function Home() {
                                 : "border-emerald-500/25 bg-emerald-500/[0.08]",
                             )}
                           >
-                            <div className="flex items-center gap-2 font-medium">
+                            <div className="flex items-center gap-2 text-sm font-semibold">
                               {finishedJobSummary.status === "error" ? (
                                 <AlertTriangle className="h-4 w-4 shrink-0 text-destructive" />
                               ) : (
@@ -3770,7 +3813,12 @@ export default function Home() {
                               {finishedJobSummary.status === "error" ? "Opération en erreur" : "Opération réussie"}
                             </div>
                             <p className="mt-1 break-words text-sm text-muted-foreground">
-                              {finishedJobSummary.error_message || `Terminée le ${finishedJobSummary.finished_at || finishedJobSummary.started_at}.`}
+                              {finishedJobSummary.error_message || (
+                                <>
+                                  Terminée le{" "}
+                                  <span className="tabular-nums">{finishedJobSummary.finished_at || finishedJobSummary.started_at}</span>.
+                                </>
+                              )}
                             </p>
                             <Button
                               className="mt-3"
