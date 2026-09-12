@@ -7,6 +7,7 @@ from odoo_manager_core.config import ManagerSettings
 from odoo_manager_core.platform import (
     execution_path,
     executable_search_path,
+    decode_wsl_distribution_output,
     find_wsl_executable_distribution,
     hidden_process_kwargs,
     open_terminal_command,
@@ -231,12 +232,20 @@ class WindowsProcessTests(unittest.TestCase):
     @mock.patch("odoo_manager_core.platform.platform.system", return_value="Windows")
     def test_finds_git_in_another_user_wsl_distribution(self, _system, _host, run, available):
         available.side_effect = lambda _executable, distribution, timeout=6: distribution == "Ubuntu-24.04"
-        run.return_value = SimpleNamespace(returncode=0, stdout="docker-desktop\nUbuntu-24.04\n")
+        run.return_value = SimpleNamespace(
+            returncode=0,
+            stdout="docker-desktop\r\nUbuntu-24.04\r\n".encode("utf-16"),
+        )
 
         distribution = find_wsl_executable_distribution("git")
 
         self.assertEqual(distribution, "Ubuntu-24.04")
         available.assert_any_call("git", "Ubuntu-24.04", timeout=6)
+
+    def test_decodes_wsl_utf16_distribution_names_without_bom(self):
+        output = "docker-desktop\r\nUbuntu\r\n".encode("utf-16-le")
+
+        self.assertEqual(decode_wsl_distribution_output(output).splitlines(), ["docker-desktop", "Ubuntu"])
 
     @mock.patch("odoo_manager_core.platform.wsl_executable_available", return_value=False)
     @mock.patch("odoo_manager_core.platform.subprocess.run")

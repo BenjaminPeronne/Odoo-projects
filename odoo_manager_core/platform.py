@@ -228,6 +228,19 @@ def wsl_executable_available(executable, distribution="", timeout=6):
     return result.returncode == 0
 
 
+def decode_wsl_distribution_output(output):
+    """Decode wsl.exe distribution output, which is commonly UTF-16 on Windows."""
+    if not output:
+        return ""
+    if isinstance(output, str):
+        return output.replace("\ufeff", "").replace("\x00", "")
+    if output.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return output.decode("utf-16", errors="replace").replace("\ufeff", "")
+    if b"\x00" in output:
+        return output.decode("utf-16-le", errors="replace").replace("\ufeff", "")
+    return output.decode("utf-8-sig", errors="replace")
+
+
 def find_wsl_executable_distribution(executable, preferred_distribution="", timeout=6):
     """Return the WSL distribution containing an executable, if any.
 
@@ -243,7 +256,6 @@ def find_wsl_executable_distribution(executable, preferred_distribution="", time
         result = subprocess.run(
             ["wsl.exe", "--list", "--quiet"],
             capture_output=True,
-            text=True,
             timeout=timeout,
             check=False,
             **hidden_process_kwargs(),
@@ -254,7 +266,7 @@ def find_wsl_executable_distribution(executable, preferred_distribution="", time
         return None
     preferred_key = preferred_distribution.casefold()
     distributions = []
-    for line in (result.stdout or "").replace("\x00", "").splitlines():
+    for line in decode_wsl_distribution_output(result.stdout).splitlines():
         distribution = line.strip().lstrip("*").strip()
         key = distribution.casefold()
         if not distribution or key == preferred_key or key.startswith("docker-desktop"):
