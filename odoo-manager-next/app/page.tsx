@@ -357,7 +357,9 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const text = await response.text();
   const payload = text ? JSON.parse(text) : {};
   if (!response.ok) {
-    throw new Error(payload.error || response.statusText);
+    // Sans message du serveur, on garde au moins la requête fautive : un « Bad Request » seul n'est pas diagnosticable.
+    const method = (init?.method || "GET").toUpperCase();
+    throw new Error(payload.error || `${method} ${path} : ${response.status} ${response.statusText}`);
   }
   return payload as T;
 }

@@ -2326,15 +2326,18 @@ def install_traefik_job(job):
     status = docker_status(SETTINGS)
     if not status["running"]:
         raise RuntimeError("Docker doit être installé et démarré avant l'installation de Traefik.")
-    git = (
-        resolve_host_executable("git")
-        if platform_id() == "windows" and SETTINGS.execution_mode == "wsl"
-        else resolve_executable("git", SETTINGS)
-    )
-    git_code, git_output = run_capture([git, "--version"], timeout=8)
+    # Même résolution que ProjectService.git : sous Windows, Git peut n'exister que dans WSL.
+    git_runtime = preferred_git_runtime()
+    git_probe_cwd = Path.home() if git_runtime["kind"] == "wsl" else (WORKSPACE if WORKSPACE.exists() else ROOT)
+    git_code, git_output = run_capture([*git_runtime["command"], "--version"], cwd=git_probe_cwd, timeout=8)
     if git_code != 0:
-        raise RuntimeError("Git doit être installé avant Traefik. Utilise le bouton Installer dans l'étape Git.")
+        raise RuntimeError(
+            "Git est introuvable, côté Windows comme dans WSL. Utilise le bouton Installer dans l'étape Git."
+            if platform_id() == "windows"
+            else "Git doit être installé avant Traefik. Utilise le bouton Installer dans l'étape Git."
+        )
     job.add(git_output.splitlines()[0] if git_output else "Git détecté.")
+    job.add(f"Git utilisé : {git_runtime['label']}.")
     project_service().install_traefik(TRAEFIK_REPO, log=job.add)
 
 

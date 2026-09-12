@@ -709,6 +709,60 @@ class TraefikPathTests(unittest.TestCase):
                 web.SETTINGS = previous_settings
 
 
+class TraefikInstallationTests(unittest.TestCase):
+    class LogJob:
+        def __init__(self):
+            self.lines = []
+
+        def add(self, line):
+            self.lines.append(line)
+
+    @patch("odoo_manager_web.project_service")
+    @patch("odoo_manager_web.run_capture")
+    @patch("odoo_manager_web.find_wsl_executable_distribution", return_value="Ubuntu-24.04")
+    @patch("odoo_manager_web.host_executable_available", return_value=False)
+    @patch("odoo_manager_web.platform_id", return_value="windows")
+    @patch("odoo_manager_web.docker_status", return_value={"running": True})
+    def test_windows_installs_traefik_with_git_available_only_in_wsl(
+        self,
+        _docker_status,
+        _platform,
+        _native_git,
+        _wsl_git,
+        run_capture,
+        project_service,
+    ):
+        run_capture.return_value = (0, "git version 2.51.0")
+        job = self.LogJob()
+
+        web.install_traefik_job(job)
+
+        git_command = run_capture.call_args.args[0]
+        self.assertEqual(git_command, ["wsl.exe", "-d", "Ubuntu-24.04", "--exec", "git", "--version"])
+        project_service.return_value.install_traefik.assert_called_once()
+        self.assertIn("Git utilisé : WSL (Ubuntu-24.04).", job.lines)
+
+    @patch("odoo_manager_web.project_service")
+    @patch("odoo_manager_web.run_capture", return_value=(127, "introuvable"))
+    @patch("odoo_manager_web.find_wsl_executable_distribution", return_value=None)
+    @patch("odoo_manager_web.host_executable_available", return_value=False)
+    @patch("odoo_manager_web.platform_id", return_value="windows")
+    @patch("odoo_manager_web.docker_status", return_value={"running": True})
+    def test_windows_reports_that_both_runtimes_were_checked(
+        self,
+        _docker_status,
+        _platform,
+        _native_git,
+        _wsl_git,
+        _run_capture,
+        project_service,
+    ):
+        with self.assertRaisesRegex(RuntimeError, "côté Windows comme dans WSL"):
+            web.install_traefik_job(self.LogJob())
+
+        project_service.return_value.install_traefik.assert_not_called()
+
+
 class ProjectCreationPrerequisitesTests(unittest.TestCase):
     @patch("odoo_manager_web.find_wsl_executable_distribution", return_value="Ubuntu-24.04")
     @patch("odoo_manager_web.host_executable_available", return_value=True)
