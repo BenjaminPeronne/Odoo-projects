@@ -9,6 +9,7 @@ from .platform import wsl_path_context
 
 CONFIG_VERSION = 1
 INTERFACE_ICONS = {"manager", "local"}
+INTERFACE_LAYOUTS = {"classic", "refined"}
 DEFAULT_API_PORT = 18765
 
 
@@ -66,6 +67,7 @@ class ManagerSettings:
     bases_layout: str = "classic"
     modules_layout: str = "classic"
     interface_icon: str = "manager"
+    interface_layout: str = "classic"
     onboarding_completed: bool = False
 
     @classmethod
@@ -89,6 +91,9 @@ class ManagerSettings:
         interface_icon = str(payload.get("interface_icon", "manager")).strip().lower()
         if interface_icon not in INTERFACE_ICONS:
             interface_icon = "manager"
+        interface_layout = str(payload.get("interface_layout", "classic")).strip().lower()
+        if interface_layout not in INTERFACE_LAYOUTS:
+            interface_layout = "classic"
 
         workspace = str(payload.get("workspace") or default_workspace).strip()
         return cls(
@@ -107,6 +112,7 @@ class ManagerSettings:
             bases_layout="compact" if payload.get("bases_layout") == "compact" else "classic",
             modules_layout="compact" if payload.get("modules_layout") == "compact" else "classic",
             interface_icon=interface_icon,
+            interface_layout=interface_layout,
             onboarding_completed=bool(payload.get("onboarding_completed", False)),
         )
 

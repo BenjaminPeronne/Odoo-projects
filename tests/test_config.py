@@ -44,6 +44,7 @@ class SettingsTests(unittest.TestCase):
                     "api_port": 19876,
                     "show_technical_details": True,
                     "interface_icon": "local",
+                    "interface_layout": "refined",
                     "bases_layout": "compact",
                     "modules_layout": "classic",
                     "onboarding_completed": True,
@@ -58,6 +59,7 @@ class SettingsTests(unittest.TestCase):
             self.assertFalse(loaded.start_project_before_open)
             self.assertTrue(loaded.show_technical_details)
             self.assertEqual(loaded.interface_icon, "local")
+            self.assertEqual(loaded.interface_layout, "refined")
             self.assertEqual(loaded.bases_layout, "compact")
             self.assertEqual(loaded.modules_layout, "classic")
             self.assertTrue(loaded.onboarding_completed)
@@ -78,6 +80,17 @@ class SettingsTests(unittest.TestCase):
         settings = ManagerSettings.from_dict({"interface_icon": "unknown"}, "/tmp/workspace")
 
         self.assertEqual(settings.interface_icon, "manager")
+
+    def test_interface_layout_defaults_to_classic_for_unknown_value(self):
+        self.assertEqual(ManagerSettings.from_dict({}, "/tmp/workspace").interface_layout, "classic")
+        self.assertEqual(
+            ManagerSettings.from_dict({"interface_layout": "unknown"}, "/tmp/workspace").interface_layout,
+            "classic",
+        )
+        self.assertEqual(
+            ManagerSettings.from_dict({"interface_layout": "REFINED"}, "/tmp/workspace").interface_layout,
+            "refined",
+        )
 
     def test_open_odoo_start_preference_round_trip(self):
         with tempfile.TemporaryDirectory() as temporary:
