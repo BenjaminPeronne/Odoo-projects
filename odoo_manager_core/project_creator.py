@@ -274,26 +274,39 @@ class ProjectCreator:
                 return None
         return False
 
-    def links_created_by_wsl(self):
-        """Mirror link_modules: on Windows, WSL creates the links whenever wsl.exe exists.
+    def wsl_link_paths(self, candidates, addons_dir):
+        """Mirror link_modules: on Windows, WSL creates the links whenever it can translate their paths.
 
         Those WSL symlinks are unreadable from Windows Python (WinError 1920) and
         look like foreign entries, so they must be inspected from WSL as well.
+        Returns None when the links were created natively, e.g. wsl.exe without
+        any installed distribution.
         """
         if platform_id() != "windows":
-            return False
-        return bool(self.wsl_context or self.settings.execution_mode == "wsl" or host_executable_available("wsl.exe"))
+            return None
+        wsl_required = bool(self.wsl_context or self.settings.execution_mode == "wsl")
+        if not wsl_required and not host_executable_available("wsl.exe"):
+            return None
+        distribution = self.wsl_context.distribution if self.wsl_context else self.settings.wsl_distribution
+        try:
+            addons_wsl = wsl_execution_path(addons_dir, distribution).rstrip("/")
+            source_parents = {}
+            for source in candidates.values():
+                if source.parent not in source_parents:
+                    source_parents[source.parent] = wsl_execution_path(source.parent, distribution).rstrip("/")
+        except (OSError, RuntimeError):
+            if wsl_required:
+                raise
+            return None
+        return distribution, addons_wsl, source_parents
 
     def module_link_states(self, candidates, addons_dir):
         """Inspect links in the filesystem that creates and consumes them."""
-        if self.links_created_by_wsl():
-            distribution = self.wsl_context.distribution if self.wsl_context else self.settings.wsl_distribution
-            addons_wsl = wsl_execution_path(addons_dir, distribution).rstrip("/")
-            source_parents = {}
+        wsl_paths = self.wsl_link_paths(candidates, addons_dir)
+        if wsl_paths is not None:
+            distribution, addons_wsl, source_parents = wsl_paths
             lines = ["set -eu"]
             for name, source in candidates.items():
-                if source.parent not in source_parents:
-                    source_parents[source.parent] = wsl_execution_path(source.parent, distribution).rstrip("/")
                 link = shlex.quote(f"{addons_wsl}/{name}")
                 target = shlex.quote(f"{source_parents[source.parent]}/{source.name}")
                 lines.extend([

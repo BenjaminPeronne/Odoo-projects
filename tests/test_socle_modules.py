@@ -57,6 +57,33 @@ class SocleModulesTests(ModuleLayoutTests):
         self.assertEqual({source.name: "correct"}, states)
         self.assertEqual(1, creator.project_service.capture.call_count)
 
+    def test_windows_without_wsl_distribution_checks_native_links_natively(self):
+        # wsl.exe can exist without any distribution (GitHub Windows runners):
+        # link_modules then creates native links, which must be checked natively.
+        source = self.create_enterprise_module("account_accountant")
+        creator = web.ProjectCreator(web.SETTINGS, web.WORKSPACE, mock.Mock())
+        creator.settings = mock.Mock(execution_mode="native", wsl_distribution="")
+        with mock.patch("odoo_manager_core.project_creator.platform_id", return_value="windows"), \
+                mock.patch("odoo_manager_core.project_creator.host_executable_available", return_value=True), \
+                mock.patch(
+                    "odoo_manager_core.project_creator.wsl_execution_path",
+                    side_effect=RuntimeError("Windows Subsystem for Linux has no installed distributions."),
+                ), \
+                mock.patch.object(creator, "path_entry_exists", return_value=False) as path_entry_exists:
+            states = creator.module_link_states({source.name: source}, source.parent)
+        self.assertEqual({source.name: "missing"}, states)
+        path_entry_exists.assert_called_once()
+        creator.project_service.capture.assert_not_called()
+
+    def test_wsl_mode_without_path_translation_is_an_error(self):
+        source = self.create_enterprise_module("account_accountant")
+        creator = web.ProjectCreator(web.SETTINGS, web.WORKSPACE, mock.Mock())
+        creator.settings = mock.Mock(execution_mode="wsl", wsl_distribution="Ubuntu")
+        with mock.patch("odoo_manager_core.project_creator.platform_id", return_value="windows"), \
+                mock.patch("odoo_manager_core.project_creator.wsl_execution_path", side_effect=RuntimeError("no distribution")):
+            with self.assertRaisesRegex(RuntimeError, "no distribution"):
+                creator.module_link_states({source.name: source}, source.parent)
+
     def test_wsl_incomplete_validation_is_an_error(self):
         source = self.create_enterprise_module("account_accountant")
         creator = web.ProjectCreator(web.SETTINGS, web.WORKSPACE, mock.Mock())
