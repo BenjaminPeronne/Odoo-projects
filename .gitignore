@@ -13,6 +13,7 @@
 !/archive/
 !/archive/bootstrap/
 !/archive/bootstrap/odoo_manager_bootstrap_legacy.html
+!/README.md
 !/README_next_odoo_manager.md
 !/README_odoo_manager.md
 !/odoo_gui.sh
