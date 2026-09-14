@@ -2876,15 +2876,46 @@ def link_module_candidates(job, project, candidates, replace_existing=False):
     install_module_candidates(job, project, candidates, replace_existing=replace_existing)
 
 
+def wsl_addon_link_targets(project, module_names):
+    """Resolve odoo/addons links from WSL, which Windows Python cannot read (WinError 1920)."""
+    context = active_workspace_wsl_context()
+    distribution = context.distribution if context else SETTINGS.wsl_distribution
+    link_parent = wsl_execution_path(project_addons_link_parent(project), distribution).rstrip("/")
+    script = (
+        'parent=$1; shift; for name do child="$parent/$name"; '
+        '[ -L "$child" ] || continue; '
+        'target=$(readlink -f -- "$child" 2>/dev/null) || continue; '
+        'printf "%s\\t%s\\n" "$name" "$(wslpath -w "$target" 2>/dev/null || printf "%s" "$target")"; '
+        'done'
+    )
+    code, output = run_capture(
+        [*wsl_command_prefix(distribution), "sh", "-c", script, "odoo-manager", link_parent, *module_names],
+        cwd=workspace_tool_cwd(),
+        timeout=30,
+    )
+    if code != 0:
+        raise RuntimeError(output.strip() or "Lecture des liens d'addons impossible depuis WSL.")
+    return {
+        name: Path(target)
+        for name, target in (line.split("\t", 1) for line in output.splitlines() if "\t" in line)
+    }
+
+
 def normalize_module_layout_for_action(job, project, module_names):
     link_parent = project_addons_link_parent(project)
     storage_parent = project_addons_storage_parent(project)
     legacy_storage_parent = project_legacy_addons_storage_parent(project)
+    unreadable = []
 
     for module_name in module_names:
         link_path = link_parent / module_name
         storage_path = storage_parent / module_name
-        if not link_path.exists() and not link_path.is_symlink():
+        try:
+            present = link_path.exists() or link_path.is_symlink()
+        except OSError:
+            unreadable.append(module_name)
+            continue
+        if not present:
             continue
 
         if link_path.is_symlink():
@@ -2919,6 +2950,23 @@ def normalize_module_layout_for_action(job, project, module_names):
             shutil.move(str(link_path), str(storage_path))
             job.add(f"Dossier addon déplacé vers addons-store: {link_path} -> {storage_path}")
             ensure_relative_module_link(job, project, module_name, storage_path, replace_existing=True)
+
+    if not unreadable:
+        return
+    # Links written by WSL work for Odoo in Docker; only their layout check needs
+    # WSL. Never move or replace what Windows cannot inspect.
+    targets = {}
+    if platform_id() == "windows":
+        try:
+            targets = wsl_addon_link_targets(project, unreadable)
+        except RuntimeError as exc:
+            job.add(f"Liens WSL non vérifiés : {exc}")
+    storage_prefix = os.path.normcase(str(storage_parent.resolve())) + os.sep
+    for module_name in unreadable:
+        target = targets.get(module_name)
+        if target is not None and os.path.normcase(str(target)).startswith(storage_prefix):
+            continue
+        job.add(f"Layout non normalisé pour {module_name}: entrée illisible depuis Windows, laissée inchangée.")
 
 
 def enterprise_addons_roots(project):
@@ -3908,7 +3956,10 @@ class Handler(BaseHTTPRequestHandler):
                 payload = self.read_json()
                 with JOBS_LOCK:
                     running = [job.title for job in JOBS.values() if job.status == "running"]
-                if running:
+                # Closing onboarding changes no path used by a running job; the
+                # first project creation sends it right after starting its job.
+                interface_only = set(payload) <= {"onboarding_completed", "create_workspace"}
+                if running and not interface_only:
                     raise ValueError(
                         "Traitement en cours : "
                         + ", ".join(running)

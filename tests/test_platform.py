@@ -15,6 +15,7 @@ from odoo_manager_core.platform import (
     workspace_command_prefix,
     workspace_execution_path,
     wsl_command_with_cwd,
+    wsl_execution_path,
     wsl_path_context,
     wsl_unc_path,
 )
@@ -103,6 +104,7 @@ class TerminalLaunchTests(unittest.TestCase):
         self.assertEqual(command[4], "--exec")
         self.assertEqual(command[-2:], ["sh", "/mnt/c/create_project.sh"])
 
+    @mock.patch.dict("odoo_manager_core.platform.WSL_DRIVE_MOUNTS", clear=True)
     @mock.patch("odoo_manager_core.platform.Path")
     @mock.patch("odoo_manager_core.platform.subprocess.run")
     def test_wslpath_receives_path_without_default_shell_reparsing(self, run, path_class):
@@ -121,6 +123,23 @@ class TerminalLaunchTests(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertEqual(command[:5], ["wsl.exe", "-d", "Ubuntu", "--exec", "wslpath"])
         self.assertEqual(command[-1], "C:/Users/Demo/Odoo-projects")
+
+    @mock.patch.dict("odoo_manager_core.platform.WSL_DRIVE_MOUNTS", clear=True)
+    @mock.patch("odoo_manager_core.platform.Path")
+    @mock.patch("odoo_manager_core.platform.subprocess.run")
+    def test_drive_paths_reuse_the_wsl_mount_without_starting_wsl_again(self, run, path_class):
+        run.return_value = mock.Mock(returncode=0, stdout="/mnt/c/Odoo/DEMO/odoo/addons\n", stderr="")
+        resolved = path_class.return_value.expanduser.return_value.resolve
+        resolved.return_value = r"C:\Odoo\DEMO\odoo\addons"
+        self.assertEqual(wsl_execution_path("ignored"), "/mnt/c/Odoo/DEMO/odoo/addons")
+
+        resolved.return_value = r"c:\Odoo\DEMO\odoo\addons-store\odoo_entreprise"
+        self.assertEqual(wsl_execution_path("ignored"), "/mnt/c/Odoo/DEMO/odoo/addons-store/odoo_entreprise")
+        resolved.return_value = r"D:\Odoo"
+        run.return_value = mock.Mock(returncode=0, stdout="/mnt/d/Odoo\n", stderr="")
+        self.assertEqual(wsl_execution_path("ignored"), "/mnt/d/Odoo")
+
+        self.assertEqual(run.call_count, 2)
 
     @mock.patch("odoo_manager_core.platform.shutil.which", return_value=None)
     @mock.patch("odoo_manager_core.platform.platform_id", return_value="linux")

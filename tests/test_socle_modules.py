@@ -42,6 +42,21 @@ class SocleModulesTests(ModuleLayoutTests):
         self.assertEqual({source.name: "correct"}, states)
         self.assertEqual(1, creator.project_service.capture.call_count)
 
+    def test_native_windows_checks_links_created_by_wsl_from_wsl(self):
+        # Windows forces the native mode, yet link_modules creates the links with
+        # WSL: Windows cannot read them (WinError 1920) and reported false conflicts.
+        source = self.create_enterprise_module("account_accountant")
+        creator = web.ProjectCreator(web.SETTINGS, web.WORKSPACE, mock.Mock())
+        creator.settings = mock.Mock(execution_mode="native", wsl_distribution="")
+        creator.project_service.capture.return_value = (0, "account_accountant\tcorrect\n")
+        with mock.patch("odoo_manager_core.project_creator.platform_id", return_value="windows"), \
+                mock.patch("odoo_manager_core.project_creator.host_executable_available", return_value=True), \
+                mock.patch("odoo_manager_core.project_creator.wsl_execution_path", side_effect=lambda path, distribution: str(path)), \
+                mock.patch.object(creator, "path_entry_exists", side_effect=AssertionError("Windows check")):
+            states = creator.module_link_states({source.name: source}, source.parent)
+        self.assertEqual({source.name: "correct"}, states)
+        self.assertEqual(1, creator.project_service.capture.call_count)
+
     def test_wsl_incomplete_validation_is_an_error(self):
         source = self.create_enterprise_module("account_accountant")
         creator = web.ProjectCreator(web.SETTINGS, web.WORKSPACE, mock.Mock())

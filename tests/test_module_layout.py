@@ -209,6 +209,32 @@ class ModuleLayoutTests(unittest.TestCase):
         self.assertTrue(link.is_symlink())
         self.assertEqual(Path("../addons-store/legacy_module"), Path(link.readlink()))
 
+    @mock.patch("odoo_manager_web.platform_id", return_value="windows")
+    @mock.patch("odoo_manager_web.wsl_addon_link_targets")
+    def test_normalize_leaves_wsl_links_unreadable_from_windows_untouched(self, link_targets, _platform):
+        addons = self.project_root / "odoo" / "addons"
+        storage = (self.project_root / "odoo" / "addons-store").resolve()
+        link_targets.return_value = {
+            "account_accountant": storage / "odoo_entreprise" / "account_accountant",
+            "foreign_module": self.external,
+        }
+        real_exists = Path.exists
+
+        def exists(path, *args, **kwargs):
+            if path.parent == addons:
+                raise OSError(1920, "Le système ne peut pas accéder au fichier")
+            return real_exists(path, *args, **kwargs)
+
+        job = DummyJob()
+        with mock.patch.object(Path, "exists", autospec=True, side_effect=exists):
+            web.normalize_module_layout_for_action(job, self.project, ["account_accountant", "foreign_module"])
+
+        link_targets.assert_called_once_with(self.project, ["account_accountant", "foreign_module"])
+        self.assertEqual(
+            job.lines,
+            ["Layout non normalisé pour foreign_module: entrée illisible depuis Windows, laissée inchangée."],
+        )
+
     def test_nested_addons_store_repository_link_is_protected_from_delete(self):
         job = DummyJob()
         repository_module = self.project_root / "odoo" / "addons-store" / "sodial-addons" / "repo_module"

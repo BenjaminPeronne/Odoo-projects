@@ -274,14 +274,28 @@ class ProjectCreator:
                 return None
         return False
 
+    def links_created_by_wsl(self):
+        """Mirror link_modules: on Windows, WSL creates the links whenever wsl.exe exists.
+
+        Those WSL symlinks are unreadable from Windows Python (WinError 1920) and
+        look like foreign entries, so they must be inspected from WSL as well.
+        """
+        if platform_id() != "windows":
+            return False
+        return bool(self.wsl_context or self.settings.execution_mode == "wsl" or host_executable_available("wsl.exe"))
+
     def module_link_states(self, candidates, addons_dir):
         """Inspect links in the filesystem that creates and consumes them."""
-        if platform_id() == "windows" and (self.wsl_context or self.settings.execution_mode == "wsl"):
+        if self.links_created_by_wsl():
             distribution = self.wsl_context.distribution if self.wsl_context else self.settings.wsl_distribution
+            addons_wsl = wsl_execution_path(addons_dir, distribution).rstrip("/")
+            source_parents = {}
             lines = ["set -eu"]
             for name, source in candidates.items():
-                link = shlex.quote(wsl_execution_path(addons_dir / name, distribution))
-                target = shlex.quote(wsl_execution_path(source, distribution))
+                if source.parent not in source_parents:
+                    source_parents[source.parent] = wsl_execution_path(source.parent, distribution).rstrip("/")
+                link = shlex.quote(f"{addons_wsl}/{name}")
+                target = shlex.quote(f"{source_parents[source.parent]}/{source.name}")
                 lines.extend([
                     f"if [ -L {link} ] && [ -d {link} ] && [ \"$(readlink -f -- {link})\" = \"$(readlink -f -- {target})\" ]; then",
                     f"printf '%s\\t%s\\n' {shlex.quote(name)} correct",
@@ -302,7 +316,7 @@ class ProjectCreator:
                     script_path = Path(script.name)
                     script.write("\n".join(lines) + "\n")
                 code, output = self.project_service.capture(
-                    [*wsl_command_prefix(distribution), "sh", wsl_execution_path(script_path, distribution)],
+                    [*wsl_command_prefix(distribution), "sh", f"{addons_wsl}/{script_path.name}"],
                     cwd=self.command_cwd, timeout=60,
                 )
             finally:

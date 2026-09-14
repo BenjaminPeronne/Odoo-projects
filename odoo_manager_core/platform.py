@@ -317,6 +317,12 @@ def wsl_command_with_cwd(command, cwd, settings, workspace=None):
     return [*command[:exec_index], "--cd", linux_cwd, *command[exec_index:]]
 
 
+# Linux mount point of each Windows drive, per distribution. Starting wsl.exe
+# costs up to several seconds while WSL is busy, so translating hundreds of
+# addon paths one process at a time stalled jobs and API requests.
+WSL_DRIVE_MOUNTS = {}
+
+
 def wsl_execution_path(path, distribution=""):
     context = wsl_path_context(path)
     if context:
@@ -328,6 +334,10 @@ def wsl_execution_path(path, distribution=""):
         return context.linux_path
     path = str(Path(path).expanduser().resolve())
     path_for_wsl = path.replace("\\", "/")
+    drive_match = re.match(r"^([A-Za-z]):(/.*)?$", path_for_wsl)
+    drive_key = (distribution.casefold(), drive_match.group(1).casefold()) if drive_match else None
+    if drive_key in WSL_DRIVE_MOUNTS:
+        return WSL_DRIVE_MOUNTS[drive_key] + (drive_match.group(2) or "/")
     command = [*wsl_command_prefix(distribution), "wslpath", "-a", "-u", path_for_wsl]
     try:
         result = subprocess.run(
@@ -344,6 +354,9 @@ def wsl_execution_path(path, distribution=""):
     if result.returncode != 0 or not translated:
         detail = (result.stderr or result.stdout or "wslpath a échoué").strip()
         raise RuntimeError(f"Impossible de traduire le chemin pour WSL: {detail}")
+    suffix = drive_match.group(2) if drive_match else ""
+    if suffix and translated.endswith(suffix) and len(translated) > len(suffix):
+        WSL_DRIVE_MOUNTS[drive_key] = translated[: -len(suffix)]
     return translated
 
 

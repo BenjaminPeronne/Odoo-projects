@@ -1771,7 +1771,7 @@ export default function Home() {
     setCreateProjectOpen(false);
     setOnboardingOpen(false);
     setActiveTab("logs");
-    await completeOnboarding();
+    if (!settings?.onboarding_completed) await completeOnboarding();
     schedule(refreshOverview, 2500);
   }
 
