@@ -38,7 +38,7 @@ import {
 } from "lucide-react";
 import { DropdownMenu } from "@radix-ui/themes";
 import { type HTMLAttributes, type ReactNode, type RefObject, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import { Badge } from "@/components/ui/badge";
+import { Badge, type BadgeProps } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, InteractiveCard } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -594,6 +594,27 @@ function normalizedModuleOrigin(origin?: string, sourcePath?: string): ModuleOri
 
 function moduleOriginLabel(origin: ModuleOrigin) {
   return origin === "enterprise" ? "Odoo Enterprise" : "Autre";
+}
+
+// La couleur porte l'état : vert installé, ambre opération Odoo en attente,
+// rouge suppression en attente, gris neutre pour ce qui ne demande rien.
+const MODULE_STATE_BADGES: Record<string, { label: string; variant: BadgeProps["variant"] }> = {
+  installed: { label: "Installé", variant: "success" },
+  "to install": { label: "À installer", variant: "warning" },
+  "to upgrade": { label: "À mettre à jour", variant: "warning" },
+  "to remove": { label: "À désinstaller", variant: "danger" },
+  uninstallable: { label: "Non installable", variant: "outline" },
+  uninstalled: { label: "Disponible", variant: "secondary" },
+  disponible: { label: "Disponible", variant: "secondary" },
+};
+
+function ModuleStateBadge({ state }: { state: string }) {
+  const badge = MODULE_STATE_BADGES[state] ?? { label: state || "-", variant: "secondary" };
+  return (
+    <Badge className="shrink-0" variant={badge.variant} title={`État Odoo : ${state || "inconnu"}`}>
+      {badge.label}
+    </Badge>
+  );
 }
 
 function firstOdooDatabase(project?: Project) {
@@ -2518,7 +2539,7 @@ export default function Home() {
           </div>
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
             <Button
-              variant="secondary"
+              variant="success"
               disabled={!selectedInstallableModuleList.length || !canUseDb || loading}
               onClick={() => createJob("install_module", { project: selectedProject?.name, db: selectedDb, modules: selectedInstallableModuleList.join(",") })}
             >
@@ -3430,7 +3451,7 @@ export default function Home() {
                                   </label>
                                   <div className="flex min-w-0 items-center justify-between gap-3 xl:block">
                                     <span className="text-xs font-medium text-muted-foreground xl:hidden">État</span>
-                                    <Badge className="shrink-0" variant={module.state === "installed" ? "success" : "secondary"}>{module.state}</Badge>
+                                    <ModuleStateBadge state={module.state} />
                                   </div>
                                   <div className="flex min-w-0 items-start justify-between gap-3 xl:block">
                                     <span className="text-xs font-medium text-muted-foreground xl:hidden">Version</span>
@@ -3447,7 +3468,7 @@ export default function Home() {
                                       <Button
                                         className="w-full"
                                         size="sm"
-                                        variant="outline"
+                                        variant="accent"
                                         disabled={!canUseDb}
                                         onClick={() => createJob("update_module", { project: selectedProject?.name, db: selectedDb, modules: module.name })}
                                       >
@@ -3458,7 +3479,7 @@ export default function Home() {
                                       <Button
                                         className="w-full"
                                         size="sm"
-                                        variant="outline"
+                                        variant="success"
                                         disabled={!canUseDb}
                                         onClick={() => createJob("install_module", { project: selectedProject?.name, db: selectedDb, modules: module.name })}
                                       >
@@ -3594,7 +3615,7 @@ export default function Home() {
                                   </label>
                                   <div className="flex min-w-0 items-center justify-between gap-3 xl:block">
                                     <span className="text-xs font-medium text-muted-foreground xl:hidden">État</span>
-                                    <Badge className="shrink-0" variant={module.state === "installed" ? "success" : "secondary"}>{module.state}</Badge>
+                                    <ModuleStateBadge state={module.state} />
                                   </div>
                                   <div className="flex min-w-0 items-start justify-between gap-3 text-sm xl:block">
                                     <span className="text-xs font-medium text-muted-foreground xl:hidden">Version</span>
@@ -3635,6 +3656,7 @@ export default function Home() {
                                       <Button
                                         className="w-full"
                                         size="sm"
+                                        variant="accent"
                                         disabled={!canUseDb}
                                         onClick={() => createJob("update_module", { project: selectedProject?.name, db: selectedDb, modules: module.name })}
                                       >
@@ -3645,7 +3667,7 @@ export default function Home() {
                                       <Button
                                         className="w-full"
                                         size="sm"
-                                        variant="secondary"
+                                        variant="success"
                                         disabled={!canUseDb}
                                         onClick={() => createJob("install_module", { project: selectedProject?.name, db: selectedDb, modules: module.name })}
                                       >

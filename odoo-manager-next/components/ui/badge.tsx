@@ -2,7 +2,7 @@ import { Badge as RadixBadge } from "@radix-ui/themes";
 import * as React from "react";
 import { cn } from "@/lib/utils";
 
-type BadgeVariant = "default" | "secondary" | "success" | "warning" | "destructive" | "outline";
+type BadgeVariant = "default" | "secondary" | "success" | "warning" | "danger" | "destructive" | "outline";
 
 export interface BadgeProps extends Omit<React.ComponentPropsWithoutRef<typeof RadixBadge>, "color" | "variant"> {
   variant?: BadgeVariant;
@@ -10,12 +10,16 @@ export interface BadgeProps extends Omit<React.ComponentPropsWithoutRef<typeof R
 
 export function Badge({ className, variant = "secondary", size = "2", ...props }: BadgeProps) {
   const color =
-    variant === "success" ? "green" : variant === "warning" ? "amber" : variant === "destructive" ? "red" : variant === "default" ? "orange" : "gray";
+    variant === "success" ? "green" : variant === "warning" ? "amber" : (variant === "destructive" || variant === "danger") ? "red" : variant === "default" ? "orange" : "gray";
   const radixVariant = variant === "outline" ? "outline" : variant === "default" || variant === "destructive" ? "solid" : "soft";
 
   return (
     <RadixBadge
-      className={cn("min-h-6 max-w-full items-center justify-center whitespace-nowrap px-2.5 text-xs font-semibold leading-none", className)}
+      className={cn(
+        "min-h-6 max-w-full items-center justify-center whitespace-nowrap px-2.5 text-xs font-semibold leading-none",
+        (variant === "success" || variant === "warning" || variant === "danger") && "app-tinted",
+        className,
+      )}
       color={color}
       size={size}
       variant={radixVariant}

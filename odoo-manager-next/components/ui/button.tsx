@@ -2,7 +2,9 @@ import { Button as RadixButton } from "@radix-ui/themes";
 import * as React from "react";
 import { cn } from "@/lib/utils";
 
-type ButtonVariant = "default" | "secondary" | "outline" | "ghost" | "destructive";
+// "success" et "accent" sont des boutons teintés : ils signalent le sens d'une action
+// de ligne (installer, mettre à jour) sans concurrencer l'action principale pleine.
+type ButtonVariant = "default" | "secondary" | "outline" | "ghost" | "destructive" | "success" | "accent";
 type ButtonSize = "default" | "sm" | "icon";
 
 const buttonVariants = ({ variant = "default", size = "default", className }: { variant?: ButtonVariant | null; size?: ButtonSize | null; className?: string } = {}) =>
@@ -13,6 +15,7 @@ const buttonVariants = ({ variant = "default", size = "default", className }: { 
     variant === "secondary" && "hover:bg-secondary/80 active:bg-secondary/70",
     variant === "outline" && "hover:border-primary/45 hover:bg-primary/[0.06] active:bg-primary/[0.10] dark:hover:bg-primary/[0.12]",
     variant === "ghost" && "m-0 hover:bg-muted active:bg-muted/80",
+    (variant === "success" || variant === "accent") && "app-tinted shadow-[inset_0_0_0_1px_var(--accent-a6)] hover:shadow-[inset_0_0_0_1px_var(--accent-a8)]",
     variant === "destructive" && "app-destructive-button",
     size === "default" && "h-auto min-h-10 px-4 py-2",
     size === "sm" && "h-auto min-h-9 px-3 py-1.5",
@@ -29,8 +32,21 @@ export interface ButtonProps
 const Button = React.forwardRef<React.ElementRef<typeof RadixButton>, ButtonProps>(
   ({ className, variant = "default", size = "default", ...props }, ref) => {
     const radixVariant =
-      variant === "secondary" ? "soft" : variant === "outline" ? "outline" : variant === "ghost" ? "ghost" : "solid";
-    const color = variant === "destructive" ? "red" : variant === "secondary" || variant === "outline" || variant === "ghost" ? "gray" : "orange";
+      variant === "secondary" || variant === "success" || variant === "accent"
+        ? "soft"
+        : variant === "outline"
+          ? "outline"
+          : variant === "ghost"
+            ? "ghost"
+            : "solid";
+    const color =
+      variant === "destructive"
+        ? "red"
+        : variant === "success"
+          ? "green"
+          : variant === "secondary" || variant === "outline" || variant === "ghost"
+            ? "gray"
+            : "orange";
     const radixSize = size === "sm" || size === "icon" ? "2" : "3";
 
     return (
