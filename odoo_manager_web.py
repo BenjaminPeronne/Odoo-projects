@@ -3649,10 +3649,97 @@ def validate_module_repository(url, branch, mode, modules):
     branch = validate_git_ref(branch)
     if mode not in {"add", "update"}:
         raise ValueError("Mode d’import invalide.")
+    # Sans noms : « add » importe tout le dépôt, « update » remplace tous les modules du
+    # dépôt déjà présents comme copies gérées dans le projet.
     names = module_name_list(modules) if modules else []
-    if mode == "update" and not names:
-        raise ValueError("Indique les noms techniques des modules à remplacer.")
     return url, branch, mode, names
+
+
+REPOSITORY_SKIPPED_DIRS = frozenset({".git", "__pycache__", "node_modules"})
+MANIFEST_FILENAMES = ("__manifest__.py", "__openerp__.py")
+
+
+def repository_modules_from_tree(tree_output, repository_name):
+    """Modules d'un `git ls-tree -r` selon la règle de find_module_candidates.
+
+    Un manifeste à la racine fait du dépôt un module unique ; sinon chaque dossier portant
+    un manifeste est un module, sans descendre dans ses sous-dossiers.
+    """
+    manifest_dirs = set()
+    has_symlinks = False
+    for line in str(tree_output or "").splitlines():
+        meta, _, path = line.partition("\t")
+        if not path:
+            continue
+        if meta.split(" ", 1)[0] == "120000":
+            has_symlinks = True
+        if posixpath.basename(path) in MANIFEST_FILENAMES:
+            manifest_dirs.add(posixpath.dirname(path))
+    modules = {}
+    for directory in sorted(manifest_dirs, key=lambda item: (item.count("/") if item else -1, item)):
+        parts = directory.split("/") if directory else []
+        if any(part in REPOSITORY_SKIPPED_DIRS for part in parts):
+            continue
+        if "" in modules:
+            break
+        if any("/".join(parts[:index]) in modules for index in range(1, len(parts))):
+            continue
+        modules[directory] = parts[-1] if parts else repository_name
+    return modules, has_symlinks
+
+
+def repository_module_status(project, name, states, project_names=frozenset()):
+    storage = project_addons_storage_parent(project) / name
+    link = project_addons_link_parent(project) / name
+    # Un module standard ou Enterprise du même nom serait masqué par une copie importée.
+    present = name in project_names or storage.exists() or storage.is_symlink() or link.exists() or link.is_symlink()
+    updatable = present and managed_module_copy_ready(project, name, storage) and managed_storage_link(project, name, storage)
+    return {
+        "present": present,
+        "updatable": updatable,
+        "state": states.get(name, {}).get("state", ""),
+    }
+
+
+def inspect_repository_modules(project, url, branch, db_name=""):
+    project = validate_project(project)
+    url = validate_gitlab_repository(url)
+    branch = validate_git_ref(branch)
+    creator = ProjectCreator(SETTINGS, WORKSPACE, project_service())
+    staging = project_staging_imports_root(project)
+    staging.mkdir(parents=True, exist_ok=True)
+    repository_name = url.rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1].removesuffix(".git")
+    with tempfile.TemporaryDirectory(prefix="repository-inspect-", dir=staging) as temporary:
+        checkout = Path(temporary) / (repository_name or "repository")
+        # Arborescence seule : aucun contenu de fichier n'est téléchargé ni extrait.
+        clone = creator.git(
+            "-c", "core.sshCommand=ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new",
+            "-c", "protocol.allow=never", "-c", "protocol.ssh.allow=always",
+            "clone", "--depth", "1", "--filter=blob:none", "--no-checkout",
+            "--single-branch", "--branch", branch, "--", url, creator.command_path(checkout),
+        )
+        code, output = creator.project_service.capture(clone, cwd=creator.command_cwd, timeout=180)
+        if code:
+            raise repository_clone_error(output)
+        tree = creator.git("-C", creator.command_path(checkout), "ls-tree", "-r", "--full-tree", "HEAD")
+        code, output = creator.project_service.capture(tree, cwd=creator.command_cwd, timeout=60)
+        if code:
+            raise RuntimeError("Lecture de l’arborescence du dépôt impossible.")
+    found, has_symlinks = repository_modules_from_tree(output, repository_name)
+    states = installed_modules(project, db_name) if db_name else {}
+    project_names = frozenset(module_dependency_graph(project))
+    seen = {}
+    modules = []
+    for path, name in sorted(found.items(), key=lambda item: item[1].lower()):
+        valid = bool(SAFE_MODULE_RE.fullmatch(name)) and "," not in name
+        entry = {"name": name, "path": path or ".", "valid": valid, "duplicate": name in seen}
+        if name in seen:
+            seen[name]["duplicate"] = True
+        seen[name] = entry
+        entry.update(repository_module_status(project, name, states, project_names) if valid else
+                     {"present": False, "updatable": False, "state": ""})
+        modules.append(entry)
+    return {"modules": modules, "has_symlinks": has_symlinks}
 
 
 def repository_clone_error(stderr):
@@ -3705,20 +3792,38 @@ def repository_modules_job(job, project, url, branch, mode, names):
             if candidate.name in by_name:
                 raise ValueError(f"Nom de module ambigu dans le dépôt : {candidate.name}")
             by_name[candidate.name] = candidate
+        storage = project_addons_storage_parent(project)
+        links = project_addons_link_parent(project)
         if names:
             missing = sorted(set(names) - by_name.keys())
             if missing:
                 raise ValueError("Modules absents du dépôt : " + ", ".join(missing))
             candidates = [by_name[name] for name in dict.fromkeys(names)]
+        elif mode == "update":
+            updatable = [
+                candidate for candidate in candidates
+                if managed_module_copy_ready(project, candidate.name, storage / candidate.name)
+                and managed_storage_link(project, candidate.name, storage / candidate.name)
+            ]
+            skipped = len(candidates) - len(updatable)
+            if skipped:
+                job.add(f"{skipped} module(s) du dépôt ignoré(s) : absents du projet ou non gérés dans addons-store.")
+            if not updatable:
+                raise ValueError("Aucun module du dépôt n’est déjà présent comme copie gérée dans ce projet.")
+            candidates = updatable
         if not candidates:
             raise ValueError("Aucun module Odoo trouvé dans le dépôt.")
-        storage = project_addons_storage_parent(project)
-        links = project_addons_link_parent(project)
+        project_names = {path.name for path in module_dirs(project)} if mode == "add" else set()
         for candidate in candidates:
             target, link = storage / candidate.name, links / candidate.name
             exists = target.exists() or target.is_symlink() or link.exists() or link.is_symlink()
             if mode == "add" and exists:
                 raise ValueError(f"Module déjà présent : {candidate.name}. Utilise la mise à jour.")
+            if mode == "add" and candidate.name in project_names:
+                raise ValueError(
+                    f"Module déjà fourni par le projet (Odoo standard, Enterprise ou autre dépôt) : {candidate.name}. "
+                    "Une copie importée le masquerait."
+                )
             if mode == "update" and not (managed_module_copy_ready(project, candidate.name, target)
                                           and managed_storage_link(project, candidate.name, target)):
                 raise ValueError(f"Mise à jour refusée : {candidate.name} doit être une copie gérée dans addons-store.")
@@ -4559,6 +4664,23 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 if destination is not None:
                     destination.unlink(missing_ok=True)
+                return json_response(self, {"error": str(exc)}, status=400)
+
+        repository_inspect_match = re.match(r"^/api/projects/([^/]+)/repository/inspect$", parsed.path)
+        if repository_inspect_match:
+            try:
+                payload = self.read_json()
+                db_name = str(payload.get("db") or "")
+                if db_name:
+                    validate_odoo_db(db_name)
+                result = inspect_repository_modules(
+                    urllib.parse.unquote(repository_inspect_match.group(1)),
+                    payload.get("url", ""),
+                    payload.get("branch", ""),
+                    db_name,
+                )
+                return json_response(self, result)
+            except Exception as exc:
                 return json_response(self, {"error": str(exc)}, status=400)
 
         zip_inspect_match = re.match(r"^/api/projects/([^/]+)/module-zip/inspect$", parsed.path)

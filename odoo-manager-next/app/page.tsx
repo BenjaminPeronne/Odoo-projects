@@ -252,6 +252,40 @@ function normalizeSearchText(value: string) {
   return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 }
 
+type RepositoryModule = {
+  name: string;
+  path: string;
+  valid: boolean;
+  duplicate: boolean;
+  present: boolean;
+  updatable: boolean;
+  state: string;
+};
+
+type RepositoryInspection =
+  | { status: "idle" }
+  | { status: "loading"; key: string }
+  | { status: "ready"; key: string; modules: RepositoryModule[]; hasSymlinks: boolean }
+  | { status: "error"; key: string; error: string };
+
+// Au-delà, le rendu des lignes ralentit la fenêtre (dépôts complets de 1 500 modules) : on filtre.
+const REPOSITORY_PICKER_MAX_ROWS = 200;
+
+function repositoryModuleEligible(module: RepositoryModule, mode: string) {
+  if (!module.valid || module.duplicate) return false;
+  return mode === "update" ? module.updatable : !module.present;
+}
+
+function repositoryModuleHint(module: RepositoryModule, mode: string) {
+  if (!module.valid) return "Nom invalide";
+  if (module.duplicate) return "En double dans le dépôt";
+  if (mode === "update") {
+    if (module.updatable) return "Remplaçable";
+    return module.present ? "Présent, non géré par le manager" : "Absent du projet";
+  }
+  return module.present ? "Déjà présent dans le projet" : "Nouveau";
+}
+
 function socleAppInstalled(app: SocleApp) {
   return app.missing.length === 0 && app.installed_modules.length === app.modules.length;
 }
@@ -350,7 +384,7 @@ const UPLOAD_TIMEOUT_MS = 120_000;
 const SLOW_READ_TIMEOUT_MS = 90_000;
 
 function apiTimeoutFor(path: string) {
-  if (path.includes("/module-zip")) return UPLOAD_TIMEOUT_MS;
+  if (path.includes("/module-zip") || path.endsWith("/repository/inspect")) return UPLOAD_TIMEOUT_MS;
   if (/\/api\/projects\/[^/]+\/(modules|socle)(\?|\/|$)/.test(path)) return SLOW_READ_TIMEOUT_MS;
   return API_TIMEOUT_MS;
 }
@@ -896,6 +930,12 @@ export default function Home() {
   const [repositoryBranch, setRepositoryBranch] = useState("");
   const [repositoryMode, setRepositoryMode] = useState("add");
   const [repositoryModules, setRepositoryModules] = useState("");
+  const [repositoryInspection, setRepositoryInspection] = useState<RepositoryInspection>({ status: "idle" });
+  const [repositorySelection, setRepositorySelection] = useState<Set<string>>(new Set());
+  const [repositoryPickerOpen, setRepositoryPickerOpen] = useState(false);
+  const [repositoryPickerSearch, setRepositoryPickerSearch] = useState("");
+  const [repositoryUpdateAll, setRepositoryUpdateAll] = useState(false);
+  const repositoryAutoOpenedKey = useRef("");
   const repositoryUrlError = moduleRepositoryUrlError(repositoryUrl);
   const [zipDialogOpen, setZipDialogOpen] = useState(false);
   const [createDbOpen, setCreateDbOpen] = useState(false);
@@ -1883,7 +1923,7 @@ export default function Home() {
         url: repositoryUrl.trim(),
         branch: repositoryBranch.trim(),
         mode: repositoryMode,
-        modules: repositoryModules.trim(),
+        modules: repositorySubmittedModules,
       });
       if (!job) return;
       setRepositoryOpen(false);
@@ -2429,6 +2469,67 @@ export default function Home() {
   const selectedProjectStarting = selectedProjectLifecycleJob?.title.startsWith("Démarrer ") ?? false;
   const selectedProjectStopping = selectedProjectLifecycleJob?.title.startsWith("Arrêter ") ?? false;
   const canUseDb = Boolean(selectedDb && odooDatabases.includes(selectedDb));
+  const repositoryInspectionKey = repositoryOpen && repositoryUrl.trim() && !repositoryUrlError && repositoryBranch.trim()
+    ? `${selectedProject?.name || ""}|${repositoryUrl.trim()}|${repositoryBranch.trim()}`
+    : "";
+  const repositoryReadyModules = repositoryInspection.status === "ready" ? repositoryInspection.modules : [];
+  const repositoryEligibleModules = repositoryReadyModules.filter((module) => repositoryModuleEligible(module, repositoryMode));
+  const repositoryUsesPicker = repositoryInspection.status === "ready";
+  const repositorySelectedList = repositoryEligibleModules.map((module) => module.name).filter((name) => repositorySelection.has(name));
+  const repositorySubmittedModules = repositoryMode === "update" && repositoryUpdateAll
+    ? ""
+    : repositoryUsesPicker ? repositorySelectedList.join(",") : repositoryModules.trim();
+  const repositoryHasTarget = repositoryMode === "update" && repositoryUpdateAll
+    ? !repositoryUsesPicker || repositoryEligibleModules.length > 0
+    : repositoryUsesPicker ? repositorySelectedList.length > 0 : repositoryMode === "add" || Boolean(repositoryModules.trim());
+
+  useEffect(() => {
+    if (!repositoryOpen) {
+      setRepositoryInspection({ status: "idle" });
+      setRepositoryPickerOpen(false);
+      repositoryAutoOpenedKey.current = "";
+      return;
+    }
+    if (!repositoryInspectionKey || !selectedProject) {
+      setRepositoryInspection({ status: "idle" });
+      return;
+    }
+    let cancelled = false;
+    // Attend la fin de la saisie : une branche tapée lettre par lettre n'existe pas encore.
+    const timer = window.setTimeout(() => {
+      setRepositoryInspection({ status: "loading", key: repositoryInspectionKey });
+      api<{ modules: RepositoryModule[]; has_symlinks: boolean }>(
+        `/api/projects/${encodeURIComponent(selectedProject.name)}/repository/inspect`,
+        {
+          method: "POST",
+          body: JSON.stringify({ url: repositoryUrl.trim(), branch: repositoryBranch.trim(), db: canUseDb ? selectedDb : "" }),
+        },
+      )
+        .then((result) => {
+          if (cancelled) return;
+          setRepositoryInspection({ status: "ready", key: repositoryInspectionKey, modules: result.modules, hasSymlinks: result.has_symlinks });
+          setRepositorySelection(new Set());
+          if (repositoryAutoOpenedKey.current !== repositoryInspectionKey) {
+            repositoryAutoOpenedKey.current = repositoryInspectionKey;
+            setRepositoryPickerSearch("");
+            setRepositoryPickerOpen(true);
+          }
+        })
+        .catch((err) => {
+          if (!cancelled) {
+            setRepositoryInspection({
+              status: "error",
+              key: repositoryInspectionKey,
+              error: err instanceof Error ? err.message : "Lecture du dépôt impossible.",
+            });
+          }
+        });
+    }, 900);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [repositoryInspectionKey, repositoryOpen]);
   const soclePlanKey = socleDialogOpen && canUseDb ? soclePresetsToInstall.join(",") : "";
 
   useEffect(() => {
@@ -5092,7 +5193,7 @@ export default function Home() {
       </Dialog>
 
       <Dialog open={repositoryOpen} onOpenChange={setRepositoryOpen}>
-        <DialogContent>
+        <DialogContent className="max-w-2xl">
           <DialogHeader>
             <DialogTitle>Modules depuis un dépôt SSH</DialogTitle>
             <DialogDescription>Copie le code dans le projet {selectedProject?.name}. Choisis une branche compatible avec sa version Odoo.</DialogDescription>
@@ -5110,12 +5211,73 @@ export default function Home() {
               {repositoryUrlError ? <span id="repository-url-error" className="block text-sm text-destructive">{repositoryUrlError}</span> : null}
             </label>
             <label className="block space-y-2"><span>Branche ou tag</span><Input value={repositoryBranch} onChange={(e) => setRepositoryBranch(e.target.value)} placeholder="18.0" /></label>
-            <Select value={repositoryMode} onValueChange={setRepositoryMode}>
+            <Select
+              value={repositoryMode}
+              onValueChange={(mode) => {
+                setRepositoryMode(mode);
+                setRepositorySelection(new Set());
+              }}
+            >
               <SelectTrigger aria-label="Opération"><SelectValue /></SelectTrigger>
               <SelectContent><SelectItem value="add">Ajouter des modules</SelectItem><SelectItem value="update">Mettre à jour le code existant</SelectItem></SelectContent>
             </Select>
-            <label className="block space-y-2"><span>Noms techniques, séparés par des virgules</span><Input value={repositoryModules} onChange={(e) => setRepositoryModules(e.target.value)} placeholder="sale_exception, sale_order_type" /></label>
-            <p className="text-sm text-muted-foreground">{repositoryMode === "add" ? "Laisse les noms vides pour ajouter tous les modules du dépôt. Tout doublon bloque l’import." : "Les noms sont obligatoires. Seules les copies gérées dans addons-store sont remplacées, avec sauvegarde et restauration en cas d’échec."}</p>
+            {repositoryMode === "update" && (
+              <label className="flex items-start gap-2 rounded-md border bg-muted/35 p-3 text-sm">
+                <Checkbox className="mt-0.5" checked={repositoryUpdateAll} onCheckedChange={(checked) => setRepositoryUpdateAll(checked === true)} />
+                <span>
+                  <span className="block font-medium">
+                    Mettre à jour tous les modules du dépôt déjà présents
+                    {repositoryUsesPicker ? ` (${repositoryEligibleModules.length})` : ""}
+                  </span>
+                  <span className="mt-0.5 block text-xs text-muted-foreground">
+                    Seules les copies gérées dans addons-store sont remplacées, avec sauvegarde et restauration en cas d’échec.
+                  </span>
+                  {repositoryUpdateAll && repositoryUsesPicker && repositoryEligibleModules.length === 0 && (
+                    <span className="mt-1 block text-xs text-amber-700 dark:text-amber-300">
+                      Aucun module de ce dépôt n’est présent comme copie gérée dans ce projet : utilise « Ajouter des modules ».
+                    </span>
+                  )}
+                </span>
+              </label>
+            )}
+            {!(repositoryMode === "update" && repositoryUpdateAll) && (
+              <div className="space-y-2 text-sm">
+                {repositoryInspection.status === "idle" && (
+                  <p className="text-muted-foreground">Renseigne l’URL et la branche : les modules du dépôt s’afficheront pour être sélectionnés.</p>
+                )}
+                {repositoryInspection.status === "loading" && (
+                  <p className="flex items-center gap-2 text-muted-foreground">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Lecture des modules du dépôt…
+                  </p>
+                )}
+                {repositoryInspection.status === "ready" && (
+                  <div className="flex flex-col gap-2 rounded-md border p-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-w-0">
+                      <div className="font-medium">
+                        {repositorySelectedList.length} module(s) sélectionné(s) sur {repositoryEligibleModules.length} disponible(s)
+                      </div>
+                      <div className="mt-0.5 truncate font-mono text-xs text-muted-foreground" title={repositorySelectedList.join(", ")}>
+                        {repositorySelectedList.length ? repositorySelectedList.join(", ") : `${repositoryReadyModules.length} module(s) trouvé(s) dans le dépôt`}
+                      </div>
+                    </div>
+                    <Button type="button" size="sm" variant="outline" onClick={() => { setRepositoryPickerSearch(""); setRepositoryPickerOpen(true); }}>
+                      <Boxes className="h-4 w-4" />
+                      Choisir les modules
+                    </Button>
+                  </div>
+                )}
+                {repositoryInspection.status === "error" && (
+                  <>
+                    <p className="text-destructive">{repositoryInspection.error}</p>
+                    <label className="block space-y-2">
+                      <span>Noms techniques, séparés par des virgules</span>
+                      <Input value={repositoryModules} onChange={(e) => setRepositoryModules(e.target.value)} placeholder="sale_exception, sale_order_type" />
+                    </label>
+                  </>
+                )}
+              </div>
+            )}
             <div className="flex flex-col gap-2 rounded-md border p-3 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
               <span>Le manager utilise la clé SSH de cette machine. Aucun jeton GitLab n’est demandé ni stocké.</span>
               <Button type="button" size="sm" variant="outline" onClick={openSshAssistant}>
@@ -5125,13 +5287,130 @@ export default function Home() {
             </div>
             <p className="text-sm text-muted-foreground">Après l’import, lance l’installation ou la mise à jour dans la base Odoo.</p>
             <Button
-              disabled={repositorySubmitting || !selectedProjectReady || !repositoryUrl.trim() || Boolean(repositoryUrlError) || !repositoryBranch.trim() || (repositoryMode === "update" && !repositoryModules.trim())}
+              disabled={repositorySubmitting || !selectedProjectReady || !repositoryUrl.trim() || Boolean(repositoryUrlError) || !repositoryBranch.trim() || repositoryInspection.status === "loading" || !repositoryHasTarget}
               onClick={submitRepositoryModules}
             >
               {repositorySubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <CloudDownload className="h-4 w-4" />}
               {repositorySubmitting
                 ? "Lancement de l’import…"
-                : repositoryMode === "add" ? "Ajouter depuis le dépôt" : "Sauvegarder et remplacer le code"}
+                : repositoryMode === "add"
+                  ? repositoryUsesPicker ? `Ajouter ${repositorySelectedList.length} module(s)` : "Ajouter depuis le dépôt"
+                  : repositoryUpdateAll
+                    ? "Sauvegarder et remplacer tous les modules présents"
+                    : repositoryUsesPicker ? `Sauvegarder et remplacer ${repositorySelectedList.length} module(s)` : "Sauvegarder et remplacer le code"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={repositoryPickerOpen} onOpenChange={setRepositoryPickerOpen}>
+        <DialogContent className="flex max-w-2xl flex-col gap-4 overflow-hidden">
+          <DialogHeader>
+            <DialogTitle>Modules du dépôt</DialogTitle>
+            <DialogDescription>
+              Branche {repositoryBranch.trim() || "?"} · {repositoryMode === "update" ? "remplacement du code existant" : "ajout au projet"}
+              {selectedProject ? ` ${selectedProject.name}` : ""}.
+            </DialogDescription>
+          </DialogHeader>
+          {repositoryInspection.status === "ready" && repositoryInspection.hasSymlinks && (
+            <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/45 dark:text-amber-100">
+              Ce dépôt contient des liens symboliques : le manager refusera l’import.
+            </div>
+          )}
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              className="pl-9"
+              value={repositoryPickerSearch}
+              onChange={(event) => setRepositoryPickerSearch(event.target.value)}
+              placeholder="Filtrer les modules"
+              aria-label="Filtrer les modules du dépôt"
+            />
+          </div>
+          {(() => {
+            const query = normalizeSearchText(repositoryPickerSearch.trim());
+            const visible = repositoryReadyModules.filter((module) => !query || normalizeSearchText(`${module.name} ${module.path}`).includes(query));
+            const visibleEligible = visible.filter((module) => repositoryModuleEligible(module, repositoryMode));
+            const allVisibleSelected = visibleEligible.length > 0 && visibleEligible.every((module) => repositorySelection.has(module.name));
+            return (
+              <>
+                <label className="flex items-center justify-between gap-3 rounded-md border bg-muted/35 px-3 py-2 text-sm">
+                  <span className="flex items-center gap-2">
+                    <Checkbox
+                      checked={allVisibleSelected ? true : visibleEligible.some((module) => repositorySelection.has(module.name)) ? "indeterminate" : false}
+                      disabled={!visibleEligible.length}
+                      onCheckedChange={(checked) =>
+                        setRepositorySelection((current) => {
+                          const next = new Set(current);
+                          for (const module of visibleEligible) {
+                            if (checked === true) next.add(module.name);
+                            else next.delete(module.name);
+                          }
+                          return next;
+                        })
+                      }
+                    />
+                    <span className="font-medium">Tout sélectionner</span>
+                  </span>
+                  <span className="text-xs text-muted-foreground">{visibleEligible.length} sélectionnable(s) sur {visible.length}</span>
+                </label>
+                <div className="-mx-1 min-h-0 flex-1 overflow-y-auto px-1">
+                  {visible.length ? (
+                    <div className="divide-y rounded-md border">
+                      {visible.slice(0, REPOSITORY_PICKER_MAX_ROWS).map((module) => {
+                        const eligible = repositoryModuleEligible(module, repositoryMode);
+                        return (
+                          <label
+                            key={`${module.path}:${module.name}`}
+                            className={cn(
+                              "flex min-w-0 items-center gap-3 px-3 py-2 text-sm",
+                              eligible ? "cursor-pointer hover:bg-muted/45" : "cursor-not-allowed opacity-60",
+                            )}
+                          >
+                            <Checkbox
+                              checked={eligible && repositorySelection.has(module.name)}
+                              disabled={!eligible}
+                              onCheckedChange={(checked) =>
+                                setRepositorySelection((current) => {
+                                  const next = new Set(current);
+                                  if (checked === true) next.add(module.name);
+                                  else next.delete(module.name);
+                                  return next;
+                                })
+                              }
+                            />
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate font-mono text-[13px]">{module.name}</span>
+                              {module.path !== module.name && module.path !== "." && (
+                                <span className="block truncate text-xs text-muted-foreground">{module.path}</span>
+                              )}
+                            </span>
+                            {module.state === "installed" && <Badge variant="success" className="shrink-0">Installé</Badge>}
+                            <span className="shrink-0 text-xs text-muted-foreground">{repositoryModuleHint(module, repositoryMode)}</span>
+                          </label>
+                        );
+                      })}
+                      {visible.length > REPOSITORY_PICKER_MAX_ROWS && (
+                        <p className="px-3 py-2 text-xs text-muted-foreground">
+                          {REPOSITORY_PICKER_MAX_ROWS} modules affichés sur {visible.length} : affine le filtre pour voir les autres.
+                          « Tout sélectionner » s’applique à tous les modules filtrés.
+                        </p>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="py-6 text-center text-sm text-muted-foreground">
+                      {repositoryReadyModules.length ? "Aucun module ne correspond au filtre." : "Aucun module Odoo trouvé dans ce dépôt."}
+                    </p>
+                  )}
+                </div>
+              </>
+            );
+          })()}
+          <div className="flex flex-col-reverse gap-2 border-t pt-3 sm:flex-row sm:justify-end">
+            <Button variant="outline" onClick={() => setRepositoryPickerOpen(false)}>Fermer</Button>
+            <Button disabled={!repositorySelectedList.length} onClick={() => setRepositoryPickerOpen(false)}>
+              <CheckCircle2 className="h-4 w-4" />
+              Valider la sélection ({repositorySelectedList.length})
             </Button>
           </div>
         </DialogContent>
