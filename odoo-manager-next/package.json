@@ -11,7 +11,8 @@
     "desktop": "electron .",
     "desktop:pack": "electron-builder --dir --publish never",
     "desktop:dist": "electron-builder --publish never",
-    "test:desktop": "node --test electron/tests/*.test.cjs"
+    "test:desktop": "node --test electron/tests/*.test.cjs",
+    "test:lib": "node --test lib/*.test.ts"
   },
   "dependencies": {
     "@radix-ui/themes": "^3.3.0",

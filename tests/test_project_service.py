@@ -308,6 +308,42 @@ class ProjectServiceTests(unittest.TestCase):
         )
         self.assertEqual(launch[-1].count("--max-cron-threads=0"), 2)
 
+    def make_traefik_service(self, compose_text):
+        traefik = self.root / "docker-local-tools" / "traefik"
+        traefik.mkdir(parents=True)
+        (traefik / "docker-compose.yml").write_text(compose_text, encoding="utf-8")
+        return ProjectService(self.settings, self.root, traefik_dir=traefik, runner=self.runner), traefik
+
+    def test_traefik_is_started_bound_to_loopback_without_touching_its_repository(self):
+        service, traefik = self.make_traefik_service("services:\n  traefik:\n    ports:\n      - 80:80\n")
+
+        with patch.object(service, "compose_version", return_value=(2, 29, 1)):
+            service.start_traefik(log=lambda _line: None)
+
+        command = next(command for command, _cwd in self.runner.streams if "up" in command)
+        override = self.root / ".odoo_manager_runtime" / "traefik-loopback.compose.yml"
+        self.assertEqual(command[-2:], ["up", "-d"])
+        self.assertIn(str(override), command)
+        self.assertIn(str(traefik / "docker-compose.yml"), command)
+        self.assertIn('ports: !override\n      - "127.0.0.1:80:80"', override.read_text(encoding="utf-8"))
+        self.assertEqual(["docker-compose.yml"], sorted(path.name for path in traefik.iterdir()))
+
+    def test_traefik_ports_are_left_unchanged_when_override_is_unsupported(self):
+        for version, compose_text in (((2, 20, 0), "services:\n  traefik:\n    image: traefik\n"),
+                                      ((2, 29, 1), "services:\n  proxy:\n    image: traefik\n")):
+            with self.subTest(version=version):
+                self.runner.streams.clear()
+                service, traefik = self.make_traefik_service(compose_text)
+                logs = []
+                with patch.object(service, "compose_version", return_value=version):
+                    service.start_traefik(log=logs.append)
+                command = next(command for command, _cwd in self.runner.streams if "up" in command)
+                self.assertNotIn("-f", command)
+                self.assertTrue(any("laissés tels quels" in line or "trop ancien" in line for line in logs))
+                (traefik / "docker-compose.yml").unlink()
+                traefik.rmdir()
+                traefik.parent.rmdir()
+
     def test_module_update_runs_explicit_odoo_command_and_restarts_server(self):
         self.runner.statuses = {
             "odoo-DEMO": "running",

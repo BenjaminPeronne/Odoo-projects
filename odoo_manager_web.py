@@ -117,6 +117,8 @@ MAX_DB_NAME_BYTES = 63
 MAX_JSON_BODY_BYTES = 1024 * 1024
 MAX_RETAINED_JOBS = 60
 MAX_RUNNING_JOBS = 4
+JOB_LINES_LIMIT = 700
+JOB_OUTPUT_LIMIT = 120_000
 MAX_ZIP_ENTRIES = 100_000
 MAX_ZIP_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
 MAX_DATABASE_BACKUP_BYTES = int(os.environ.get("ODOO_MANAGER_MAX_BACKUP_BYTES", 100 * 1024 * 1024 * 1024))
@@ -204,6 +206,11 @@ ACTIVE_PROCESSES_LOCK = threading.Lock()
 EVENT_SUBSCRIBERS = set()
 EVENT_SUBSCRIBERS_LOCK = threading.Lock()
 EVENT_WATCH_INTERVAL_SECONDS = 2
+# La liste des bases coûte un `docker exec psql` par projet démarré : inutile toutes les 2 s.
+EVENT_DATABASES_MAX_AGE_SECONDS = 30
+OVERVIEW_DATABASES_CACHE = {}
+OVERVIEW_DATABASES_CACHE_LOCK = threading.Lock()
+EVENT_DOCKER_REFRESH = threading.Event()
 _EVENT_WATCH_THREAD_STARTED = False
 _EVENT_WATCH_THREAD_LOCK = threading.Lock()
 LOCAL_MODULE_OVERRIDES_LOCK = threading.Lock()
@@ -388,17 +395,47 @@ def settings_snapshot():
     return payload
 
 
+BROWSER_ORIGINS = frozenset({
+    "http://127.0.0.1:3000",
+    "http://localhost:3000",
+    "http://tauri.localhost",
+    "tauri://localhost",
+    "https://tauri.localhost",
+    "app://sdk",
+})
+LOOPBACK_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def allowed_browser_origins():
+    return BROWSER_ORIGINS | {f"http://127.0.0.1:{PORT}", f"http://localhost:{PORT}"}
+
+
+def request_hostname(host_header):
+    host = str(host_header or "").strip().lower()
+    if host.startswith("["):
+        return host[1:host.index("]")] if "]" in host else ""
+    return host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+
+
+def untrusted_request_reason(headers):
+    """Protège l'API locale, sans authentification, des pages web du navigateur.
+
+    Un Host hors loopback trahit un DNS rebinding. Un Origin étranger trahit une
+    requête CSRF : les requêtes « simples » (text/plain, multipart) partent sans
+    preflight et la CORS n'empêche que la lecture de la réponse, pas l'action.
+    Les clients locaux sans navigateur (Electron main, scripts) n'envoient pas d'Origin.
+    """
+    if request_hostname(headers.get("Host")) not in LOOPBACK_HOSTNAMES:
+        return "Hôte non autorisé."
+    origin = headers.get("Origin")
+    if origin is not None and origin not in allowed_browser_origins():
+        return "Origine non autorisée."
+    return ""
+
+
 def add_cors_headers(handler):
     origin = handler.headers.get("Origin", "")
-    allowed = {
-        "http://127.0.0.1:3000",
-        "http://localhost:3000",
-        "http://tauri.localhost",
-        "tauri://localhost",
-        "https://tauri.localhost",
-        "app://sdk",
-    }
-    if origin in allowed:
+    if origin in allowed_browser_origins():
         handler.send_header("Access-Control-Allow-Origin", origin)
         handler.send_header("Vary", "Origin")
 
@@ -1152,6 +1189,33 @@ def linux_path_is_relative_to(path, parent):
     return path == parent or path.startswith(parent.rstrip("/") + "/")
 
 
+def wsl_module_roots(project, distribution):
+    # Traduits une fois par liste : les retraduire pour chacun des ~1 300 modules
+    # multipliait les résolutions de chemins Windows.
+    translate = lambda path: wsl_execution_path(path, distribution)
+    return (
+        translate(project_addons_link_parent(project)),
+        translate(project_addons_storage_parent(project)),
+        translate(project_legacy_addons_storage_parent(project)),
+        [translate(root) for root in module_import_roots(project)],
+    )
+
+
+WSL_SHELL_AVAILABILITY = {}
+WSL_SHELL_AVAILABILITY_TTL_SECONDS = 60
+
+
+def wsl_shell_available(distribution):
+    """`wsl.exe` coûte de 0,3 à plusieurs secondes : on ne le relance pas à chaque liste."""
+    now = time.monotonic()
+    cached = WSL_SHELL_AVAILABILITY.get(distribution)
+    if cached and now - cached[0] < WSL_SHELL_AVAILABILITY_TTL_SECONDS:
+        return cached[1]
+    available = wsl_executable_available("sh", distribution)
+    WSL_SHELL_AVAILABILITY[distribution] = (now, available)
+    return available
+
+
 def wsl_module_metadata(
     project,
     linux_path,
@@ -1160,12 +1224,9 @@ def wsl_module_metadata(
     distribution,
     host_path="",
     host_source_path="",
+    roots=None,
 ):
-    translate = lambda path: wsl_execution_path(path, distribution)
-    link_parent = translate(project_addons_link_parent(project))
-    storage_parent = translate(project_addons_storage_parent(project))
-    legacy_parent = translate(project_legacy_addons_storage_parent(project))
-    imports_roots = [translate(root) for root in module_import_roots(project)]
+    link_parent, storage_parent, legacy_parent, imports_roots = roots or wsl_module_roots(project, distribution)
     parent = posixpath.dirname(linux_path)
     source_parent = posixpath.dirname(source_path)
     name = posixpath.basename(linux_path)
@@ -1282,6 +1343,7 @@ def wsl_module_dirs(project):
 
     seen = set()
     paths = []
+    roots = wsl_module_roots(project, distribution)
     for line in output.splitlines():
         parts = line.split("\t", 4)
         if len(parts) < 3:
@@ -1301,6 +1363,7 @@ def wsl_module_dirs(project):
             distribution,
             windows_path,
             windows_source_path,
+            roots=roots,
         )
         WSL_MODULE_METADATA[host_path.casefold()] = metadata
         paths.append(Path(host_path))
@@ -1311,7 +1374,7 @@ def module_dirs(project):
     if active_workspace_wsl_context():
         yield from wsl_module_dirs(project)
         return
-    if platform_id() == "windows" and wsl_executable_available("sh", SETTINGS.wsl_distribution):
+    if platform_id() == "windows" and wsl_shell_available(SETTINGS.wsl_distribution):
         try:
             yield from wsl_module_dirs(project)
             return
@@ -2000,7 +2063,38 @@ def project_diagnostics(project):
     return diagnostics
 
 
-def overview(docker=None):
+def invalidate_overview_databases(project=None):
+    with OVERVIEW_DATABASES_CACHE_LOCK:
+        if project is None:
+            OVERVIEW_DATABASES_CACHE.clear()
+        else:
+            OVERVIEW_DATABASES_CACHE.pop(project, None)
+
+
+def overview_databases(project, max_age=None):
+    if max_age is None:
+        return list_databases_for(project, check_container=False)
+    now = time.monotonic()
+    with OVERVIEW_DATABASES_CACHE_LOCK:
+        cached = OVERVIEW_DATABASES_CACHE.get(project)
+    if cached and now - cached[0] < max_age:
+        return list(cached[1])
+    databases = list_databases_for(project, check_container=False)
+    # Une liste vide peut venir d'un PostgreSQL encore en démarrage : on ne la garde pas.
+    if databases:
+        with OVERVIEW_DATABASES_CACHE_LOCK:
+            OVERVIEW_DATABASES_CACHE[project] = (now, list(databases))
+    return databases
+
+
+def docker_poll_seconds():
+    try:
+        return max(3, int(SETTINGS.docker_poll_interval))
+    except (TypeError, ValueError):
+        return 10
+
+
+def overview(docker=None, databases_max_age=None):
     docker = docker or docker_status(SETTINGS)
     docker_ok = docker["running"]
     docker_message = docker["message"]
@@ -2011,7 +2105,11 @@ def overview(docker=None):
     for project in project_names:
         odoo_status = statuses.get(f"odoo-{project}", "absent") if docker_ok else "docker off"
         pg_status = statuses.get(f"postgresql-{project}", "absent") if docker_ok else "docker off"
-        databases = list_databases_for(project, check_container=False) if pg_status == "running" else []
+        if pg_status == "running":
+            databases = overview_databases(project, databases_max_age)
+        else:
+            databases = []
+            invalidate_overview_databases(project)
         url = project_url(project)
         projects.append(
             {
@@ -2055,6 +2153,8 @@ class Job:
         self.error_message = ""
         self.lines = []
         self.output = ""
+        # Nombre cumulé de caractères écrits : permet à l'interface de ne demander que la suite.
+        self.output_total = 0
         self.result = {}
         self.progress = None
         self.target = target
@@ -2084,18 +2184,28 @@ class Job:
     def add(self, line):
         with JOBS_LOCK:
             self.lines.append(line.rstrip("\n"))
-            self.lines = self.lines[-700:]
-            self.output += line.rstrip("\n") + "\n"
-            self.output = self.output[-120000:]
+            self._append_output(line.rstrip("\n") + "\n")
+
+    def _trim_lines(self):
+        # Troncature amortie : recopier 700 lignes et 120 Ko à chaque ligne coûtait
+        # cher pendant les longues sorties Odoo, verrou global tenu.
+        if len(self.lines) > JOB_LINES_LIMIT * 2:
+            del self.lines[:-JOB_LINES_LIMIT]
+
+    def _append_output(self, text):
+        self.output += text
+        self.output_total += len(text)
+        if len(self.output) > JOB_OUTPUT_LIMIT * 2:
+            self.output = self.output[-JOB_OUTPUT_LIMIT:]
+        self._trim_lines()
 
     def add_text(self, text):
         with JOBS_LOCK:
-            self.output += text
-            self.output = self.output[-120000:]
+            self._append_output(text)
             for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
                 if line:
                     self.lines.append(line)
-            self.lines = self.lines[-700:]
+            self._trim_lines()
 
     def set_progress(self, label, current=None, total=None):
         with JOBS_LOCK:
@@ -2126,6 +2236,8 @@ class Job:
                 self.args = ()
                 self.target = None
                 self.thread = None
+            invalidate_overview_databases()
+            EVENT_DOCKER_REFRESH.set()
             publish_event(
                 "job_completed",
                 {
@@ -3779,7 +3891,21 @@ def import_zip_modules_job(job, project, filename, data, replace_existing=False,
             job.add(f"Archive temporaire nettoyée: {import_dir}")
 
 
-def jobs_snapshot(detail_job_id=None, compact=False):
+def job_output_payload(job, compact, detail_job_id, output_from):
+    if compact and job.id != detail_job_id:
+        return {"lines": [], "output": ""}
+    output = job.output[-JOB_OUTPUT_LIMIT:]
+    window_start = job.output_total - len(output)
+    if compact and output_from and window_start <= output_from <= job.output_total:
+        # Suite seulement : l'interface possède déjà les caractères précédents.
+        return {"lines": [], "output": output[len(output) - (job.output_total - output_from):], "output_from": output_from}
+    payload = {"lines": job.lines[-JOB_LINES_LIMIT:], "output": output}
+    if compact:
+        payload["output_from"] = 0
+    return payload
+
+
+def jobs_snapshot(detail_job_id=None, compact=False, output_from=None):
     with JOBS_LOCK:
         values = list(JOBS.values())[-30:]
         if compact and detail_job_id is None and values:
@@ -3793,8 +3919,9 @@ def jobs_snapshot(detail_job_id=None, compact=False):
                 "started_at": job.started_at,
                 "finished_at": job.finished_at,
                 "error_message": job.error_message,
-                "lines": list(job.lines) if not compact or job.id == detail_job_id else [],
-                "output": job.output if not compact or job.id == detail_job_id else "",
+                "last_line": job.lines[-1] if job.lines else "",
+                "output_total": job.output_total,
+                **job_output_payload(job, compact, detail_job_id, output_from),
                 "result": dict(job.result),
                 "progress": dict(job.progress) if job.progress else None,
             }
@@ -3847,26 +3974,41 @@ def publish_event(event_type, payload):
 def event_watch_loop():
     last_overview_json = None
     last_system_json = None
+    docker = None
+    docker_checked_at = 0.0
     while True:
         try:
             with EVENT_SUBSCRIBERS_LOCK:
                 has_subscribers = bool(EVENT_SUBSCRIBERS)
             if has_subscribers:
-                docker = docker_status(SETTINGS)
-                overview_payload = overview(docker)
+                # `docker info` et l'état système suivent l'intervalle configuré ; seul
+                # `docker ps`, peu coûteux, garde le rythme court des voyants ON/OFF.
+                now = time.monotonic()
+                refresh_docker = (
+                    docker is None
+                    or now - docker_checked_at >= docker_poll_seconds()
+                    or EVENT_DOCKER_REFRESH.is_set()
+                )
+                if refresh_docker:
+                    EVENT_DOCKER_REFRESH.clear()
+                    docker = docker_status(SETTINGS)
+                    docker_checked_at = now
+                overview_payload = overview(docker, databases_max_age=EVENT_DATABASES_MAX_AGE_SECONDS)
                 overview_json = json.dumps(overview_payload, sort_keys=True, ensure_ascii=False)
                 if overview_json != last_overview_json:
                     last_overview_json = overview_json
                     publish_event("overview", overview_payload)
 
-                system_payload = system_status_snapshot(docker)
-                system_json = json.dumps(system_payload, sort_keys=True, ensure_ascii=False)
-                if system_json != last_system_json:
-                    last_system_json = system_json
-                    publish_event("system_status", system_payload)
+                if refresh_docker:
+                    system_payload = system_status_snapshot(docker)
+                    system_json = json.dumps(system_payload, sort_keys=True, ensure_ascii=False)
+                    if system_json != last_system_json:
+                        last_system_json = system_json
+                        publish_event("system_status", system_payload)
             else:
                 last_overview_json = None
                 last_system_json = None
+                docker = None
         except Exception:
             traceback.print_exc()
         time.sleep(EVENT_WATCH_INTERVAL_SECONDS)
@@ -4023,15 +4165,37 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         return
 
+    def reject_untrusted_request(self):
+        reason = untrusted_request_reason(self.headers)
+        if not reason:
+            return False
+        body = json.dumps({"error": reason}, ensure_ascii=False).encode("utf-8")
+        try:
+            self.send_response(403)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
+        self.close_connection = True
+        return True
+
     def read_json(self):
         length = int(self.headers.get("Content-Length", "0"))
         if not length:
             return {}
         if length > MAX_JSON_BODY_BYTES:
             raise ValueError("Requête JSON trop volumineuse.")
+        content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if content_type != "application/json":
+            raise ValueError("Content-Type application/json requis.")
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
     def do_OPTIONS(self):
+        if self.reject_untrusted_request():
+            return
         self.send_response(204)
         add_cors_headers(self)
         self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
@@ -4044,6 +4208,8 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        if self.reject_untrusted_request():
+            return
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         try:
@@ -4078,7 +4244,12 @@ class Handler(BaseHTTPRequestHandler):
                 params = urllib.parse.parse_qs(parsed.query)
                 detail_value = params.get("detail", [""])[0]
                 detail_job_id = int(detail_value) if detail_value.isdigit() else None
-                return json_response(self, {"jobs": jobs_snapshot(detail_job_id=detail_job_id, compact=True)})
+                output_value = params.get("output_from", [""])[0]
+                output_from = int(output_value) if detail_job_id and output_value.isdigit() else None
+                return json_response(
+                    self,
+                    {"jobs": jobs_snapshot(detail_job_id=detail_job_id, compact=True, output_from=output_from)},
+                )
             if path == "/api/stream":
                 return self.stream_events()
 
@@ -4252,6 +4423,8 @@ class Handler(BaseHTTPRequestHandler):
                         pass
 
     def do_POST(self):
+        if self.reject_untrusted_request():
+            return
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/api/system/shutdown":
             json_response(self, {"ok": True})
@@ -4370,7 +4543,7 @@ class Handler(BaseHTTPRequestHandler):
                             "title": job.title,
                             "status": job.status,
                             "started_at": job.started_at,
-                            "lines": job.lines,
+                            "lines": job.lines[-JOB_LINES_LIMIT:],
                         },
                         "backup": details,
                     },
@@ -4434,7 +4607,7 @@ class Handler(BaseHTTPRequestHandler):
                             "title": job.title,
                             "status": job.status,
                             "started_at": job.started_at,
-                            "lines": job.lines,
+                            "lines": job.lines[-JOB_LINES_LIMIT:],
                         }
                     },
                     status=201,
@@ -4707,7 +4880,7 @@ class Handler(BaseHTTPRequestHandler):
                         "project": job.project,
                         "status": job.status,
                         "started_at": job.started_at,
-                        "lines": job.lines,
+                        "lines": job.lines[-JOB_LINES_LIMIT:],
                     }
                 },
                 status=201,
@@ -4716,6 +4889,8 @@ class Handler(BaseHTTPRequestHandler):
             return json_response(self, {"error": str(exc)}, status=400)
 
     def do_DELETE(self):
+        if self.reject_untrusted_request():
+            return
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/api/errors":
             clear_manager_errors()

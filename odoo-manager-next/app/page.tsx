@@ -53,6 +53,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { cn } from "@/lib/utils";
+import { mergeIncrementalJobOutput, type JobOutputCache } from "@/lib/job-output";
 import appIcon from "./icon.png";
 import localIcon from "./local-icon.png";
 import packageMetadata from "../package.json";
@@ -173,6 +174,10 @@ type Job = {
   error_message?: string;
   lines: string[];
   output?: string;
+  // Présents sur le job détaillé : output_from > 0 signifie que `output` n'est que la suite.
+  output_from?: number;
+  output_total?: number;
+  last_line?: string;
   progress?: {
     label: string;
     current?: number | null;
@@ -437,7 +442,7 @@ function delay(milliseconds: number) {
 
 function jobsFingerprint(items: Job[]) {
   return items
-    .map((job) => `${job.id}:${job.status}:${job.finished_at || ""}:${job.error_message || ""}:${job.lines.length}:${job.lines.at(-1) || ""}:${job.output?.length || 0}:${job.progress?.label || ""}:${job.progress?.current ?? ""}:${job.progress?.total ?? ""}`)
+    .map((job) => `${job.id}:${job.status}:${job.finished_at || ""}:${job.error_message || ""}:${job.lines.length}:${job.last_line ?? job.lines.at(-1) ?? ""}:${job.output_total ?? job.output?.length ?? 0}:${job.progress?.label || ""}:${job.progress?.current ?? ""}:${job.progress?.total ?? ""}`)
     .join("|");
 }
 
@@ -859,6 +864,7 @@ export default function Home() {
   const [loadingSoclePlan, setLoadingSoclePlan] = useState(false);
   const [soclePlanError, setSoclePlanError] = useState("");
   const [jobs, setJobs] = useState<Job[]>([]);
+  const jobOutputCache = useRef<JobOutputCache>(new Map());
   const [selectedJobId, setSelectedJobId] = useState<number | null>(null);
   const [logDescriptionExpanded, setLogDescriptionExpanded] = useState(false);
   const [externalLogView, setExternalLogView] = useState<{ title: string; content: string; project: string } | null>(null);
@@ -1141,7 +1147,8 @@ export default function Home() {
     });
   }, [pushToast]);
 
-  const applyJobs = useCallback((nextJobs: Job[], notify = true) => {
+  const applyJobs = useCallback((receivedJobs: Job[], notify = true) => {
+    const nextJobs = mergeIncrementalJobOutput(receivedJobs, jobOutputCache.current);
     const previousStatuses = jobStatuses.current;
     if (notify && jobNotificationsInitialized.current) {
       for (const job of nextJobs) {
@@ -1374,7 +1381,11 @@ export default function Home() {
     jobsRefreshInFlight.current = true;
     try {
       const requestedJobId = detailJobId ?? selectedJobIdRef.current;
-      const query = requestedJobId ? `?detail=${encodeURIComponent(requestedJobId)}` : "";
+      const knownOutput = requestedJobId ? jobOutputCache.current.get(requestedJobId) : undefined;
+      const params = new URLSearchParams();
+      if (requestedJobId) params.set("detail", String(requestedJobId));
+      if (requestedJobId && knownOutput?.total) params.set("output_from", String(knownOutput.total));
+      const query = params.size ? `?${params}` : "";
       const payload = await api<{ jobs: Job[] }>(`/api/jobs${query}`);
       applyJobs(payload.jobs);
       markApiSuccess();
@@ -4055,7 +4066,7 @@ export default function Home() {
                       <div className="min-w-0 p-4">
                         {!scopedExternalLogView && selectedJob?.status === "running" && (
                           <JobProgressPanel
-                            label={outputProgress?.label || selectedJob.lines.at(-1) || "Traitement en cours"}
+                            label={outputProgress?.label || selectedJob.last_line || selectedJob.lines.at(-1) || "Traitement en cours"}
                             percent={outputProgressPercent}
                           />
                         )}
@@ -4204,7 +4215,7 @@ export default function Home() {
                       <CardContent className="min-w-0">
                         {!scopedExternalLogView && selectedJob?.status === "running" && (
                           <JobProgressPanel
-                            label={outputProgress?.label || selectedJob.lines.at(-1) || "Traitement en cours"}
+                            label={outputProgress?.label || selectedJob.last_line || selectedJob.lines.at(-1) || "Traitement en cours"}
                             percent={outputProgressPercent}
                           />
                         )}

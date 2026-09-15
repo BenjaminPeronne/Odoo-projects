@@ -1,3 +1,6 @@
+import http.client
+import json
+import threading
 import time
 import tempfile
 import unittest
@@ -32,6 +35,62 @@ class CorsTests(unittest.TestCase):
         web.add_cors_headers(handler)
 
         handler.send_header.assert_not_called()
+
+
+class LocalApiRequestGuardTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.error_log = Path(self.temporary.name) / "errors.jsonl"
+        self.error_patch = patch.object(web, "ERROR_LOG_PATH", self.error_log)
+        self.error_patch.start()
+        self.server = web.ManagerHTTPServer(("127.0.0.1", 0), web.Handler)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.error_patch.stop()
+        self.temporary.cleanup()
+
+    def post_report(self, message, headers):
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        body = json.dumps({"message": message})
+        connection.request("POST", "/api/errors/report", body=body, headers={"Host": f"127.0.0.1:{self.port}", **headers})
+        status = connection.getresponse().status
+        connection.close()
+        return status
+
+    def logged(self, message):
+        return self.error_log.exists() and message in self.error_log.read_text(encoding="utf-8")
+
+    def test_browser_csrf_and_dns_rebinding_requests_are_rejected_before_any_action(self):
+        attacks = {
+            "csrf-text-plain": {"Origin": "https://evil.example", "Content-Type": "text/plain"},
+            "csrf-null-origin": {"Origin": "null", "Content-Type": "application/json"},
+            "rebinding": {"Host": "attacker.example:%d" % self.port, "Content-Type": "application/json"},
+        }
+        for message, headers in attacks.items():
+            with self.subTest(message=message):
+                self.assertEqual(403, self.post_report(message, headers))
+                self.assertFalse(self.logged(message))
+
+    def test_trusted_clients_and_json_content_type_are_required(self):
+        self.assertEqual(201, self.post_report("electron", {"Origin": "app://sdk", "Content-Type": "application/json"}))
+        self.assertEqual(201, self.post_report("next-dev", {"Origin": "http://localhost:3000", "Content-Type": "application/json"}))
+        self.assertEqual(201, self.post_report("local-client", {"Content-Type": "application/json"}))
+        self.assertEqual(400, self.post_report("no-json", {"Origin": "app://sdk", "Content-Type": "text/plain"}))
+        self.assertTrue(self.logged("electron") and self.logged("next-dev") and self.logged("local-client"))
+        self.assertFalse(self.logged("no-json"))
+
+    def test_hostname_parsing_accepts_only_loopback_names(self):
+        self.assertEqual("127.0.0.1", web.request_hostname("127.0.0.1:18765"))
+        self.assertEqual("::1", web.request_hostname("[::1]:18765"))
+        self.assertEqual("localhost", web.request_hostname("LOCALHOST"))
+        self.assertEqual("", web.untrusted_request_reason({"Host": "localhost:18765"}))
+        for host in ("192.168.1.16:18765", "127.0.0.1.evil.example", "", "[::1"):
+            self.assertTrue(web.untrusted_request_reason({"Host": host}), host)
 
 
 class ManagerErrorLogTests(unittest.TestCase):
@@ -339,6 +398,37 @@ class JobResourceTests(unittest.TestCase):
         self.assertEqual(by_id[second.id]["lines"], ["second output"])
         self.assertIn("second output", by_id[second.id]["output"])
 
+    def test_detail_job_output_can_be_fetched_incrementally(self):
+        job = web.Job("Stream", lambda current: [current.add(f"ligne {index}") for index in range(3)])
+        self.wait_for(job)
+        full = web.jobs_snapshot(detail_job_id=job.id, compact=True)[0]
+        self.assertEqual(0, full["output_from"])
+        self.assertEqual(len(full["output"]), full["output_total"])
+
+        job.add("ligne 3")
+        delta = web.jobs_snapshot(detail_job_id=job.id, compact=True, output_from=full["output_total"])[0]
+
+        self.assertEqual("ligne 3\n", delta["output"])
+        self.assertEqual(full["output_total"], delta["output_from"])
+        self.assertEqual([], delta["lines"])
+        self.assertEqual("ligne 3", delta["last_line"])
+        self.assertEqual(full["output"] + delta["output"], job.output)
+
+    def test_incremental_request_outside_retained_window_returns_full_output(self):
+        job = web.Job("Long", lambda current: None)
+        self.wait_for(job)
+        for index in range(30_000):
+            job.add(f"2026-09-15 INFO odoo.modules.loading: ligne {index}")
+
+        self.assertLessEqual(len(job.lines), web.JOB_LINES_LIMIT * 2)
+        self.assertLessEqual(len(job.output), web.JOB_OUTPUT_LIMIT * 2)
+        snapshot = web.jobs_snapshot(detail_job_id=job.id, compact=True, output_from=10)[0]
+
+        self.assertEqual(0, snapshot["output_from"])
+        self.assertEqual(web.JOB_OUTPUT_LIMIT, len(snapshot["output"]))
+        self.assertEqual(web.JOB_LINES_LIMIT, len(snapshot["lines"]))
+        self.assertTrue(snapshot["output"].endswith("ligne 29999\n"))
+
     def test_job_snapshot_exposes_structured_progress(self):
         job = web.Job("Progress", lambda current_job: current_job.set_progress("Initialisation", 30, 120))
         self.wait_for(job)
@@ -365,6 +455,46 @@ class JobResourceTests(unittest.TestCase):
             "RIKA a refusé l'authentification. Vérifie tes identifiants.",
         )
         self.assertNotIn("Traceback", snapshot["error_message"])
+
+
+class EventWatchCostTests(unittest.TestCase):
+    def setUp(self):
+        web.invalidate_overview_databases()
+        self.addCleanup(web.invalidate_overview_databases)
+
+    @patch("odoo_manager_web.list_databases_for")
+    def test_event_database_list_is_cached_but_empty_results_are_retried(self, list_databases):
+        list_databases.side_effect = [[], ["demo"], ["demo", "other"], ["demo", "other"]]
+
+        self.assertEqual([], web.overview_databases("DEMO", max_age=30))
+        self.assertEqual(["demo"], web.overview_databases("DEMO", max_age=30))
+        self.assertEqual(["demo"], web.overview_databases("DEMO", max_age=30))
+        self.assertEqual(2, list_databases.call_count)
+
+        web.invalidate_overview_databases("DEMO")
+        self.assertEqual(["demo", "other"], web.overview_databases("DEMO", max_age=30))
+        self.assertEqual(["demo", "other"], web.overview_databases("DEMO"), "sans max_age, lecture directe")
+
+    @patch("odoo_manager_web.wsl_executable_available", return_value=True)
+    def test_wsl_shell_detection_is_not_relaunched_for_every_module_listing(self, detect):
+        web.WSL_SHELL_AVAILABILITY.clear()
+        self.addCleanup(web.WSL_SHELL_AVAILABILITY.clear)
+
+        for _ in range(5):
+            self.assertTrue(web.wsl_shell_available("Ubuntu"))
+
+        detect.assert_called_once_with("sh", "Ubuntu")
+
+    @patch("odoo_manager_web.module_import_roots", return_value=[])
+    @patch("odoo_manager_web.wsl_execution_path", side_effect=lambda path, _distribution: str(path).replace("\\", "/"))
+    def test_wsl_metadata_reuses_precomputed_project_roots(self, translate, _imports):
+        roots = web.wsl_module_roots("DEMO", "Ubuntu")
+        calls = translate.call_count
+
+        for name in ("sale", "stock", "mrp"):
+            web.wsl_module_metadata("DEMO", f"{roots[0]}/{name}", f"{roots[1]}/{name}", True, "Ubuntu", roots=roots)
+
+        self.assertEqual(calls, translate.call_count)
 
 
 class ContainerStatusBatchTests(unittest.TestCase):

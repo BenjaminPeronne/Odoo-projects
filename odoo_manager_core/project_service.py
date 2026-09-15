@@ -31,6 +31,16 @@ ODOO_STARTUP_LOG = "/home/odoo/srv/data/odoo-manager-startup.log"
 ODOO_STARTUP_STATUS = "/home/odoo/srv/data/odoo-manager-startup.status"
 ACTIVE_PROCESSES = set()
 ACTIVE_PROCESSES_LOCK = threading.Lock()
+# `ports: !override` remplace la liste au lieu de la fusionner (Compose >= 2.24.4).
+COMPOSE_OVERRIDE_TAG_MIN_VERSION = (2, 24, 4)
+TRAEFIK_LOOPBACK_OVERRIDE = """# Généré par Odoo Manager.
+# Traefik publie 80:80 sur toutes les interfaces : les instances Odoo locales et leur
+# gestionnaire de bases (sauvegarde incluse) seraient joignables depuis le réseau.
+services:
+  traefik:
+    ports: !override
+      - "127.0.0.1:80:80"
+"""
 
 
 def terminate_active_processes(wait_seconds=0.5):
@@ -399,9 +409,47 @@ class ProjectService:
             return
 
         self.log(log, "Démarrage de Traefik...")
-        code = self.stream(self.docker("compose", "up", "-d"), cwd=self.traefik_dir, log=log)
+        compose_files = self.traefik_loopback_compose_files(log=log)
+        code = self.stream(self.docker("compose", *compose_files, "up", "-d"), cwd=self.traefik_dir, log=log)
         if code != 0:
             raise RuntimeError("Impossible de démarrer Traefik.")
+
+    def compose_version(self):
+        code, output = self.capture(self.docker("compose", "version", "--short"), timeout=15)
+        match = re.search(r"(\d+)\.(\d+)\.(\d+)", output or "") if code == 0 else None
+        return tuple(int(part) for part in match.groups()) if match else None
+
+    def traefik_loopback_compose_files(self, log=None):
+        """Restreint Traefik à 127.0.0.1 sans modifier le dépôt docker-local-tools."""
+        base = next((self.traefik_dir / name for name in COMPOSE_FILENAMES if (self.traefik_dir / name).is_file()), None)
+        try:
+            base_text = base.read_text(encoding="utf-8", errors="ignore") if base else ""
+        except OSError:
+            base_text = ""
+        if not re.search(r"(?m)^\s{2}traefik:\s*$", base_text):
+            self.log(log, "Service traefik introuvable dans le compose : ports laissés tels quels.")
+            return []
+        version = self.compose_version()
+        if not version or version < COMPOSE_OVERRIDE_TAG_MIN_VERSION:
+            self.log(
+                log,
+                "Docker Compose trop ancien pour restreindre Traefik à cette machine "
+                "(2.24.4 requis) : Traefik reste joignable depuis le réseau.",
+            )
+            return []
+        override = self.workspace / ".odoo_manager_runtime" / "traefik-loopback.compose.yml"
+        try:
+            override.parent.mkdir(parents=True, exist_ok=True)
+            if not override.is_file() or override.read_text(encoding="utf-8") != TRAEFIK_LOOPBACK_OVERRIDE:
+                override.write_text(TRAEFIK_LOOPBACK_OVERRIDE, encoding="utf-8")
+        except OSError as exc:
+            self.log(log, f"Surcharge Traefik impossible à écrire ({exc}) : ports laissés tels quels.")
+            return []
+        docker_prefix = self.docker()
+        return [
+            "-f", self.command_path(docker_prefix, base),
+            "-f", self.command_path(docker_prefix, override),
+        ]
 
     def install_traefik(self, repository, log=None):
         if not self.traefik_dir:
