@@ -199,7 +199,11 @@ if [ "$tag_version" != "$version" ]; then
   die "version incohérente: l'app est en $version mais le tag demandé est $TAG. Utilise app-v${version} pour une version stable."
 fi
 
-if ! git diff --quiet -- . ':!dist' || ! git diff --cached --quiet -- . ':!dist' || [ -n "$(git ls-files --others --exclude-standard)" ]; then
+# next-env.d.ts est réécrit par `next dev` (chemin .next/dev/types) : ce n'est pas un vrai
+# changement, la CI régénère sa propre version au build.
+if ! git diff --quiet -- . ':!dist' ':!odoo-manager-next/next-env.d.ts' \
+  || ! git diff --cached --quiet -- . ':!dist' ':!odoo-manager-next/next-env.d.ts' \
+  || [ -n "$(git ls-files --others --exclude-standard)" ]; then
   printf 'Erreur: le dépôt contient des changements non commités.\n' >&2
   printf '\nFichiers concernés:\n' >&2
   git status --short >&2
