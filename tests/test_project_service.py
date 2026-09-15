@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import ANY, patch
 
 from odoo_manager_core.config import ManagerSettings
-from odoo_manager_core.project_service import ODOO_STARTUP_LOG, ODOO_STARTUP_STATUS, ProjectService
+from odoo_manager_core.project_service import ODOO_STARTUP_LOG, ODOO_STARTUP_STATUS, ProjectService, add_postgres_healthcheck_start_period
 
 
 def has_command_tail(commands, tail):
@@ -206,6 +206,115 @@ class ProjectServiceTests(unittest.TestCase):
 
         self.assertTrue(any("HTTP 502" in line for line in logs))
         self.assertTrue(any("HTTP 303" in line for line in logs))
+
+    @patch("odoo_manager_core.project_service.http.client.HTTPConnection")
+    def test_http_probe_distinguishes_refused_port_from_slow_response(self, connection_class):
+        connection_class.return_value.request.side_effect = ConnectionRefusedError()
+        self.assertEqual((0, "refused"), ProjectService.http_probe_result("http://dev.demo.localhost/web/login"))
+
+        connection_class.return_value.request.side_effect = TimeoutError()
+        self.assertEqual((0, "timeout"), ProjectService.http_probe_result("http://dev.demo.localhost/web/login"))
+
+    def test_traefik_failures_name_the_real_cause(self):
+        cases = (
+            ((0, "refused"), ["port 80", "Odoo, lui, fonctionne"]),
+            ((404, ""), ["ne connaît pas la route", "réseau traefik-local"]),
+            ((502, ""), ["n'arrive pas à joindre odoo-DEMO:8069"]),
+            ((0, "timeout"), ["dépassent le délai"]),
+        )
+        for probe_result, expected in cases:
+            with self.subTest(probe_result=probe_result):
+                service = ProjectService(self.settings, self.root, runner=self.runner, http_probe=lambda _url, result=probe_result: result)
+                with self.assertRaises(RuntimeError) as raised:
+                    service.wait_project_http("DEMO", max_wait=4, log=lambda _line: None, sleep=lambda _seconds: None)
+                for fragment in expected:
+                    self.assertIn(fragment, str(raised.exception))
+                self.assertNotIn("Traefik ne fournit pas encore", str(raised.exception))
+
+    def test_postgres_healthcheck_gets_start_period_once_with_backup(self):
+        compose = self.project_path / "compose.yml"
+        compose.write_text(
+            "services:\n"
+            "  postgresql-DEMO:\n"
+            "    healthcheck:\n"
+            "      test: [\"CMD-SHELL\", \"pg_isready -U postgres\"]\n"
+            "      interval: 3s\n"
+            "      retries: 5\n"
+            "    environment:\n"
+            "      - POSTGRES_PASSWORD=postgres\n"
+            "  odoo-DEMO:\n"
+            "    healthcheck:\n"
+            "      test: [\"CMD\", \"curl\", \"-f\", \"http://localhost:8069\"]\n",
+            encoding="utf-8",
+        )
+        logs = []
+
+        self.service.fix_postgres_healthcheck_start_period(compose, log=logs.append)
+        self.service.fix_postgres_healthcheck_start_period(compose, log=logs.append)
+
+        content = compose.read_text(encoding="utf-8")
+        self.assertEqual(1, content.count("start_period: 120s"))
+        self.assertIn("      retries: 5\n      start_period: 120s\n    environment:", content)
+        self.assertEqual(1, len(list(self.project_path.glob("compose.yml.healthcheck.bak.*"))))
+        self.assertEqual(1, sum("start_period" in line for line in logs))
+
+    def test_postgres_healthcheck_patch_keeps_existing_start_period_and_crlf(self):
+        existing = "  db:\n    healthcheck:\n      test: pg_isready\n      start_period: 30s\n"
+        self.assertEqual((existing, False), add_postgres_healthcheck_start_period(existing))
+
+        windows = "  db:\r\n    healthcheck:\r\n      test: pg_isready\r\n      retries: 5\r\n"
+        updated, changed = add_postgres_healthcheck_start_period(windows)
+        self.assertTrue(changed)
+        self.assertTrue(updated.endswith("      retries: 5\r\n      start_period: 120s\r\n"))
+
+    def test_broken_docker_port_forwarding_is_repaired_by_restarting_traefik(self):
+        self.runner.statuses = {"traefik": "running"}
+        results = iter([(0, "reset"), (0, "reset"), (0, "reset"), (0, "reset"), (404, ""), (303, "")])
+        service = ProjectService(self.settings, self.root, runner=self.runner, http_probe=lambda _url: next(results))
+        logs = []
+
+        service.wait_project_http("DEMO", log=logs.append, sleep=lambda _seconds: None)
+
+        commands = [command for command, _cwd in self.runner.streams]
+        self.assertEqual(1, sum(command[-2:] == ["restart", "traefik"] for command in commands))
+        self.assertTrue(any("Redirection du port 80 rétablie" in line for line in logs))
+
+    def test_traefik_is_not_restarted_when_port_answers(self):
+        self.runner.statuses = {"traefik": "running"}
+        service = ProjectService(self.settings, self.root, runner=self.runner, http_probe=lambda _url: (404, ""))
+
+        self.assertTrue(service.ensure_traefik_port_reachable(log=lambda _line: None, sleep=lambda _seconds: None))
+        self.assertFalse(any("restart" in command for command, _cwd in self.runner.streams))
+
+    def test_odoo_http_readiness_waits_for_first_page_instead_of_open_port(self):
+        answers = iter([(2, "sans réponse : TimeoutError"), (1, "HTTP 500"), (0, "HTTP 303")])
+        calls = []
+        original_capture = self.runner.capture
+
+        def capture(command, cwd=None, timeout=10):
+            if "python3" in command and "/web/login" in command[-2]:
+                calls.append(timeout)
+                return next(answers)
+            return original_capture(command, cwd, timeout)
+
+        self.runner.capture = capture
+        logs = []
+        self.service.wait_odoo_http("odoo-DEMO", log=logs.append, sleep=lambda _seconds: None)
+
+        self.assertEqual([60, 60, 60], calls)
+        self.assertTrue(any("TimeoutError" in line for line in logs))
+        self.assertTrue(any("Odoo répond dans son conteneur" in line for line in logs))
+
+    def test_odoo_http_readiness_stops_when_process_dies(self):
+        self.runner.odoo_server_running = False
+        original_capture = self.runner.capture
+        self.runner.capture = lambda command, cwd=None, timeout=10: (
+            (2, "sans réponse : ConnectionRefusedError") if "python3" in command and "/web/login" in command[-2]
+            else original_capture(command, cwd, timeout)
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "arrêté pendant son chargement"):
+            self.service.wait_odoo_http("odoo-DEMO", log=lambda _line: None, sleep=lambda _seconds: None)
 
     def test_wait_odoo_port_allows_slow_running_process(self):
         self.runner.odoo_port_states = [False, False, False, True]
@@ -624,7 +733,7 @@ class ProjectServiceTests(unittest.TestCase):
         status = ProjectService.http_status("http://dev.Caritel_v18.localhost/web/login")
 
         self.assertEqual(status, 303)
-        connection_class.assert_called_once_with("127.0.0.1", None, timeout=3)
+        connection_class.assert_called_once_with("127.0.0.1", None, timeout=10)
         connection.request.assert_called_once_with(
             "GET",
             "/web/login",

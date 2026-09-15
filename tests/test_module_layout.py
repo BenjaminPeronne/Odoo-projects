@@ -154,13 +154,14 @@ class ModuleLayoutTests(unittest.TestCase):
         run_capture.return_value = (
             0,
             f"{linux_root}/odoo/addons/account_3way_match\t"
-            f"{linux_root}/odoo/addons-store/account_3way_match\t1\t"
-            r"C:\Users\demo\Odoo-projects\TEST_PROJECT\odoo\addons\account_3way_match"
-            "\t"
-            r"C:\Users\demo\Odoo-projects\TEST_PROJECT\odoo\addons-store\account_3way_match",
+            f"{linux_root}/odoo/addons-store/account_3way_match\t1",
         )
+        # Un résultat négatif mis en cache par un test précédent ne doit pas masquer WSL.
+        web.WSL_SHELL_AVAILABILITY.clear()
 
         modules = web.modules_for(self.project)
+        script = run_capture.call_args.args[0][run_capture.call_args.args[0].index("-c") + 1]
+        self.assertNotIn("wslpath", script)
 
         self.assertEqual([module["name"] for module in modules], ["account_3way_match"])
         self.assertEqual(modules[0]["path_kind"], "lien vers addons-store")

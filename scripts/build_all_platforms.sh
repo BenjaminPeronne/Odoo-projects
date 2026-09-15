@@ -227,6 +227,8 @@ fi
 
 if [ "$LOCAL_BUILD" -eq 1 ]; then
   log "Build local de la plateforme courante"
+  # Le tag n'existe pas encore : l'interface en tire son numéro de build.
+  export ODOO_MANAGER_BUILD_TAG="$TAG"
   run sh "$ROOT/scripts/build_local_desktop.sh"
 fi
 

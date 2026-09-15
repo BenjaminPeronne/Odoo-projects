@@ -50,6 +50,7 @@ from odoo_manager_core.platform import (
     wsl_command_with_cwd,
     find_wsl_executable_distribution,
     wsl_execution_path,
+    wsl_windows_path,
     wsl_path_context,
     wsl_unc_path,
 )
@@ -1212,7 +1213,12 @@ def wsl_shell_available(distribution):
     if cached and now - cached[0] < WSL_SHELL_AVAILABILITY_TTL_SECONDS:
         return cached[1]
     available = wsl_executable_available("sh", distribution)
-    WSL_SHELL_AVAILABILITY[distribution] = (now, available)
+    # Seul le succès est mémorisé : sans distribution, l'échec de wsl.exe est immédiat, et
+    # un WSL installé entre-temps doit être pris en compte sans attendre l'expiration.
+    if available:
+        WSL_SHELL_AVAILABILITY[distribution] = (now, available)
+    else:
+        WSL_SHELL_AVAILABILITY.pop(distribution, None)
     return available
 
 
@@ -1325,11 +1331,11 @@ def wsl_module_dirs(project):
         'find "$parent" -mindepth 1 -maxdepth 1 \\( -type d -o -type l \\) -print 2>/dev/null | '
         'while IFS= read -r child; do '
         '[ -f "$child/__manifest__.py" ] || [ -f "$child/__openerp__.py" ] || continue; '
-        'target=$(readlink -f -- "$child" 2>/dev/null || printf "%s" "$child"); '
-        'if [ -L "$child" ]; then linked=1; else linked=0; fi; '
-        'child_windows=$(wslpath -w "$child" 2>/dev/null || printf "%s" "$child"); '
-        'target_windows=$(wslpath -w "$target" 2>/dev/null || printf "%s" "$target"); '
-        'printf "%s\\t%s\\t%s\\t%s\\t%s\\n" "$child" "$target" "$linked" "$child_windows" "$target_windows"; '
+        # Aucun sous-processus pour un dossier ordinaire : readlink seulement pour les liens,
+        # les chemins Windows sont calculés côté Python (wsl_windows_path).
+        'target="$child"; linked=0; '
+        'if [ -L "$child" ]; then linked=1; target=$(readlink -f -- "$child" 2>/dev/null || printf "%s" "$child"); fi; '
+        'printf "%s\\t%s\\t%s\\n" "$child" "$target" "$linked"; '
         'done; done'
     )
     code, output = run_capture(
@@ -1349,8 +1355,8 @@ def wsl_module_dirs(project):
         if len(parts) < 3:
             continue
         linux_path, source_path, linked = parts[:3]
-        windows_path = parts[3] if len(parts) >= 4 else ""
-        windows_source_path = parts[4] if len(parts) >= 5 else ""
+        windows_path = wsl_windows_path(posixpath.normpath(linux_path), distribution)
+        windows_source_path = wsl_windows_path(posixpath.normpath(source_path or linux_path), distribution)
         name = posixpath.basename(linux_path)
         if not SAFE_MODULE_RE.fullmatch(name) or name in seen:
             continue
@@ -1549,6 +1555,7 @@ def clear_project_module_cache(project):
         MODULE_CACHE.pop(project, None)
         MODULE_GRAPH_CACHE.pop(project, None)
         WSL_MODULE_METADATA.clear()
+    WSL_SHELL_AVAILABILITY.clear()
 
 
 def manifest_value(text, key):

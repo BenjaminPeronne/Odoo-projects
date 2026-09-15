@@ -3,6 +3,7 @@ import os
 import platform
 import re
 import shutil
+import socket
 import subprocess
 import threading
 import time
@@ -27,6 +28,66 @@ from .platform import (
 
 
 COMPOSE_FILENAMES = ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml")
+# Première page Odoo servie dans le conteneur : 2xx/3xx/4xx = serveur prêt, 5xx ou exception = pas encore.
+ODOO_HTTP_READY_SCRIPT = """import http.client, sys
+connection = http.client.HTTPConnection("127.0.0.1", 8069, timeout=float(sys.argv[1]))
+try:
+    connection.request("GET", "/web/login", headers={"User-Agent": "Odoo-Manager/readiness"})
+    status = connection.getresponse().status
+except Exception as exc:
+    print("sans réponse : " + type(exc).__name__)
+    sys.exit(2)
+print("HTTP %s" % status)
+sys.exit(0 if status < 500 else 1)
+"""
+POSTGRES_HEALTHCHECK_START_PERIOD = "120s"
+
+
+def add_postgres_healthcheck_start_period(content):
+    """Ajoute un start_period aux healthchecks pg_isready qui n'en ont pas.
+
+    Sans lui, un PostgreSQL lent à démarrer (récupération après arrêt brutal, fichiers
+    sur NTFS) est « unhealthy » après interval × retries (15 s dans le modèle) et Compose
+    abandonne le démarrage d'Odoo : « dependency failed to start ».
+    """
+    lines = content.splitlines(keepends=True)
+    result = []
+    index = 0
+    changed = False
+    while index < len(lines):
+        line = lines[index]
+        result.append(line)
+        if line.strip() != "healthcheck:":
+            index += 1
+            continue
+        indent = len(line) - len(line.lstrip())
+        block = []
+        index += 1
+        while index < len(lines):
+            candidate = lines[index]
+            if candidate.strip() and len(candidate) - len(candidate.lstrip()) <= indent:
+                break
+            block.append(candidate)
+            index += 1
+        keys = [item for item in block if item.strip() and not item.lstrip().startswith("#")]
+        if keys and any("pg_isready" in item for item in keys) and not any(item.lstrip().startswith("start_period:") for item in keys):
+            child_indent = min(len(item) - len(item.lstrip()) for item in keys)
+            last = max(position for position, item in enumerate(block) if item.strip() and not item.lstrip().startswith("#"))
+            newline = "\r\n" if block[last].endswith("\r\n") else "\n"
+            if not block[last].endswith(("\n", "\r")):
+                block[last] += newline
+            block.insert(last + 1, " " * child_indent + f"start_period: {POSTGRES_HEALTHCHECK_START_PERIOD}{newline}")
+            changed = True
+        result.extend(block)
+    return "".join(result), changed
+
+
+HTTP_FAILURE_LABELS = {
+    "refused": "connexion refusée sur le port 80",
+    "reset": "connexion coupée sur le port 80",
+    "timeout": "délai dépassé",
+    "error": "connexion interrompue",
+}
 ODOO_STARTUP_LOG = "/home/odoo/srv/data/odoo-manager-startup.log"
 ODOO_STARTUP_STATUS = "/home/odoo/srv/data/odoo-manager-startup.status"
 ACTIVE_PROCESSES = set()
@@ -360,6 +421,28 @@ class ProjectService:
         self.log(log, "PostgreSQL macOS repris; le rôle Odoo est disponible.")
         return 0
 
+    def fix_postgres_healthcheck_start_period(self, compose_file, log=None):
+        try:
+            content = compose_file.read_text(encoding="utf-8")
+        except OSError:
+            return
+        updated, changed = add_postgres_healthcheck_start_period(content)
+        if not changed:
+            return
+        backup = compose_file.with_name(f"{compose_file.name}.healthcheck.bak.{time.strftime('%Y%m%d_%H%M%S')}")
+        try:
+            shutil.copy2(compose_file, backup)
+            compose_file.write_text(updated, encoding="utf-8")
+        except OSError as exc:
+            self.log(log, f"Healthcheck PostgreSQL non adapté ({exc}).")
+            return
+        self.log(
+            log,
+            f"Healthcheck PostgreSQL : start_period {POSTGRES_HEALTHCHECK_START_PERIOD} ajouté dans {compose_file.name} "
+            "(pris en compte à la prochaine recréation du conteneur).",
+        )
+        self.log(log, f"Sauvegarde: {backup}")
+
     def fix_macos_localtime_mount(self, compose_file, log=None):
         if platform.system() != "Darwin":
             return
@@ -413,6 +496,42 @@ class ProjectService:
         code = self.stream(self.docker("compose", *compose_files, "up", "-d"), cwd=self.traefik_dir, log=log)
         if code != 0:
             raise RuntimeError("Impossible de démarrer Traefik.")
+        self.ensure_traefik_port_reachable(log=log)
+
+    def traefik_port_probe(self):
+        # Toute réponse HTTP (même 404) prouve que la redirection du port 80 vers Traefik fonctionne.
+        if self.http_probe:
+            result = self.http_probe("http://traefik.localhost/api/overview")
+            return result if isinstance(result, tuple) else (result, "")
+        return self.http_probe_result("http://traefik.localhost/api/overview", timeout=5)
+
+    def ensure_traefik_port_reachable(self, log=None, sleep=None):
+        """Répare la redirection de port de Docker Desktop quand Traefik tourne sans répondre.
+
+        Docker Desktop perd la redirection du port 80 quand Traefik est recréé avec une autre
+        adresse de publication, ou après une veille Windows : le conteneur est running mais
+        chaque connexion est refusée ou coupée. Un redémarrage du conteneur la rétablit.
+        """
+        if self.runner is not None and self.http_probe is None:
+            return True
+        sleep = sleep or time.sleep
+        status, reason = self.traefik_port_probe()
+        if status or reason not in {"refused", "reset"} or self.container_status("traefik") != "running":
+            return bool(status)
+        self.log(
+            log,
+            f"Traefik tourne mais le port 80 ne répond pas depuis cette machine ({HTTP_FAILURE_LABELS[reason]}). "
+            "Redémarrage du conteneur traefik pour rétablir la redirection de port de Docker...",
+        )
+        if self.stream(self.docker("restart", "traefik"), log=log) != 0:
+            return False
+        for _ in range(15):
+            sleep(1)
+            status, reason = self.traefik_port_probe()
+            if status:
+                self.log(log, "Redirection du port 80 rétablie.")
+                return True
+        return False
 
     def compose_version(self):
         code, output = self.capture(self.docker("compose", "version", "--short"), timeout=15)
@@ -775,12 +894,51 @@ class ProjectService:
             "Consulte les logs Odoo affichés ci-dessus."
         )
 
+    def wait_odoo_http(self, container, max_wait=600, request_timeout=45, log=None, sleep=None):
+        """Attend une vraie réponse HTTP d'Odoo, sans passer par Traefik.
+
+        Le port 8069 s'ouvre avant le chargement des modules : la première page peut
+        ensuite prendre plusieurs minutes (Windows, fichiers sur NTFS, gros projets).
+        Tester seulement le port faisait accuser Traefik d'une lenteur d'Odoo.
+        """
+        sleep = sleep or time.sleep
+        started = time.monotonic()
+        attempt = 0
+        while True:
+            waited = int(time.monotonic() - started)
+            code, output = self.capture(
+                self.docker("exec", container, "python3", "-c", ODOO_HTTP_READY_SCRIPT, str(request_timeout)),
+                timeout=request_timeout + 15,
+            )
+            if code == 0:
+                if attempt:
+                    self.log(log, f"Odoo répond dans son conteneur ({waited}s).")
+                return
+            detail = (output or "").strip().splitlines()[-1:] or ["sans réponse"]
+            if attempt == 0:
+                self.log(log, "Chargement d'Odoo : attente de la première réponse HTTP dans le conteneur...")
+            self.log(log, f"Chargement d'Odoo... {waited}s/{max_wait}s ({detail[0]})")
+            attempt += 1
+            if not self.odoo_server_running(container):
+                self.odoo_startup_diagnostics(container, log=log)
+                raise RuntimeError(
+                    "Le processus Odoo s'est arrêté pendant son chargement. Consulte les logs Odoo affichés ci-dessus."
+                )
+            if waited >= max_wait:
+                self.odoo_startup_diagnostics(container, log=log)
+                raise RuntimeError(
+                    f"Odoo ne répond pas en HTTP dans son conteneur après {max_wait}s : le serveur tourne mais "
+                    "le chargement des modules n'aboutit pas. Consulte les logs Odoo affichés ci-dessus."
+                )
+            sleep(3)
+
     @staticmethod
-    def http_status(url, timeout=3):
+    def http_probe_result(url, timeout=10):
+        """Retourne (statut HTTP, cause) ; la cause distingue les échecs de connexion."""
         parsed = urllib.parse.urlsplit(url)
         host = parsed.hostname
         if not host:
-            return 0
+            return 0, "url"
         connect_host = host if host in {"127.0.0.1", "localhost", "::1"} else "127.0.0.1"
         connection_class = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
         connection = connection_class(connect_host, parsed.port, timeout=timeout)
@@ -794,35 +952,87 @@ class ProjectService:
                 path,
                 headers={"Host": host_header, "User-Agent": "Odoo-Manager/readiness"},
             )
-            response = connection.getresponse()
-            return response.status
+            return connection.getresponse().status, ""
+        except ConnectionRefusedError:
+            return 0, "refused"
+        except (ConnectionResetError, http.client.RemoteDisconnected):
+            return 0, "reset"
+        except (TimeoutError, socket.timeout):
+            return 0, "timeout"
         except (OSError, http.client.HTTPException):
-            return 0
+            return 0, "error"
         finally:
             connection.close()
 
-    def wait_project_http(self, project, max_wait=30, log=None, sleep=None):
+    @classmethod
+    def http_status(cls, url, timeout=10):
+        return cls.http_probe_result(url, timeout=timeout)[0]
+
+    def traefik_route_failure(self, project, status, reason):
+        host = urllib.parse.urlsplit(self.project_url(project)).hostname or "l'URL locale"
+        container = f"odoo-{project}"
+        if reason in {"refused", "reset"}:
+            traefik = self.container_status("traefik")
+            return (
+                f"Rien n'écoute sur le port 80 de cette machine (conteneur traefik : {traefik}). "
+                "Traefik est arrêté, ou le port 80 est occupé par un autre service "
+                "(sous Windows : IIS, service HTTP « System », Skype...). Odoo, lui, fonctionne."
+            )
+        if status == 404:
+            networks = self.container_network_names(container)
+            network_hint = (
+                f" Le conteneur n'est pas relié au réseau traefik-local (réseaux : {', '.join(networks) or 'aucun'})."
+                if "traefik-local" not in networks else " Vérifie les labels traefik du docker-compose.yml."
+            )
+            return f"Traefik répond mais ne connaît pas la route {host} pour {container}.{network_hint}"
+        if status in {502, 503, 504}:
+            return (
+                f"Traefik connaît la route {host} mais n'arrive pas à joindre {container}:8069 (HTTP {status}). "
+                "Vérifie que Traefik et le projet partagent le réseau traefik-local."
+            )
+        if reason == "timeout":
+            return (
+                f"Odoo répond dans son conteneur, mais les requêtes vers {host} via Traefik dépassent le délai. "
+                "Réessaie d'ouvrir le projet dans quelques secondes."
+            )
+        return f"Odoo répond dans son conteneur, mais {host} reste inaccessible via Traefik ({reason or status})."
+
+    def container_network_names(self, container):
+        code, output = self.capture(
+            self.docker("inspect", "-f", "{{range $name, $network := .NetworkSettings.Networks}}{{$name}}|{{$network.NetworkID}};{{end}}", container),
+            timeout=5,
+        )
+        if code != 0:
+            return []
+        return [item.split("|", 1)[0] for item in output.split(";") if item.strip()]
+
+    def wait_project_http(self, project, max_wait=90, log=None, sleep=None):
         sleep = sleep or time.sleep
         url = urllib.parse.urljoin(self.project_url(project), "web/login")
-        probe = self.http_probe or self.http_status
         if self.runner is not None and self.http_probe is None:
             return
 
         waited = 0
-        last_status = None
+        last_display = None
+        status, reason = 0, ""
+        port_repair_attempted = False
         while waited <= max_wait:
-            status = probe(url)
-            if status != last_status or waited % 10 == 0:
-                displayed = status or "indisponible"
-                self.log(log, f"Vérification de l'accès Odoo... {waited}s/{max_wait}s (HTTP {displayed})")
-                last_status = status
+            result = self.http_probe(url) if self.http_probe else self.http_probe_result(url)
+            status, reason = result if isinstance(result, tuple) else (result, "")
+            display = f"HTTP {status}" if status else HTTP_FAILURE_LABELS.get(reason, "HTTP indisponible")
+            if display != last_display or waited % 10 == 0:
+                self.log(log, f"Vérification de l'accès Odoo via Traefik... {waited}s/{max_wait}s ({display})")
+                last_display = display
             if 200 <= status < 500 and status != 404:
                 return
+            if reason in {"refused", "reset"} and waited >= 4 and not port_repair_attempted:
+                port_repair_attempted = True
+                self.ensure_traefik_port_reachable(log=log, sleep=sleep)
             sleep(2)
             waited += 2
         raise RuntimeError(
-            "Odoo répond dans son conteneur, mais Traefik ne fournit pas encore l'URL locale. "
-            "Le navigateur n'a pas été ouvert afin d'éviter une page Bad Gateway."
+            self.traefik_route_failure(project, status, reason)
+            + " Le navigateur n'a pas été ouvert afin d'éviter une page Bad Gateway."
         )
 
     def start_odoo_server(self, project, log=None, disable_cron=False):
@@ -866,6 +1076,7 @@ class ProjectService:
             if code != 0:
                 raise RuntimeError("Impossible de démarrer le serveur Odoo dans le conteneur.")
         self.wait_odoo_port(container, log=log)
+        self.wait_odoo_http(container, log=log)
 
     def stop_odoo_server(self, project, log=None, max_wait=30, sleep=None):
         sleep = sleep or time.sleep
@@ -1367,6 +1578,7 @@ print("ODOO_MANAGER_NEUTRALIZATION_DONE")
         if not compose:
             raise RuntimeError(f"Projet introuvable ou sans fichier compose: {project}")
         self.fix_macos_localtime_mount(compose, log=log)
+        self.fix_postgres_healthcheck_start_period(compose, log=log)
         self.start_traefik(log=log)
         self.log(log, f"Démarrage du projet {project}...")
         self.compose_up_project(project, path, log=log)

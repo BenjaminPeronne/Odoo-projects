@@ -11,6 +11,7 @@ import zipfile
 from http.cookiejar import CookieJar
 from pathlib import Path
 
+from .project_service import add_postgres_healthcheck_start_period
 from .platform import (
     execution_path,
     host_executable_available,
@@ -527,8 +528,10 @@ class ProjectCreator:
         for candidate in candidates:
             if not candidate.exists():
                 continue
-            content = candidate.read_text(encoding="utf-8")
-            candidate.write_text(content.replace("XXXXXX", project_name), encoding="utf-8")
+            content = candidate.read_text(encoding="utf-8").replace("XXXXXX", project_name)
+            if candidate.name != "odoo.conf":
+                content = add_postgres_healthcheck_start_period(content)[0]
+            candidate.write_text(content, encoding="utf-8")
 
     @staticmethod
     def extract_rika_archive(archive, destination):

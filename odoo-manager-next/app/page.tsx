@@ -338,11 +338,22 @@ type ProjectDiagnostics = {
 
 let API_BASE = process.env.NEXT_PUBLIC_ODOO_MANAGER_API?.replace(/\/$/, "") || "";
 const FALLBACK_APP_VERSION = packageMetadata.version;
+const APP_BUILD = process.env.NEXT_PUBLIC_APP_BUILD || "";
+const APP_COMMIT = process.env.NEXT_PUBLIC_APP_COMMIT || "";
 const DESKTOP_API_RETRY_DELAYS_MS = [0, 250, 750, 1500, 2500];
 const BOOTSTRAP_RETRY_DELAYS_MS = [0, 500, 1000, 2000];
 const DOCKER_CONFIRM_DELAY_MS = 700;
 const API_TIMEOUT_MS = 20_000;
 const UPLOAD_TIMEOUT_MS = 120_000;
+// Lectures qui parcourent tous les addons du projet : sous Windows avec WSL, elles peuvent
+// dépasser 20 s sans que le service local soit en panne.
+const SLOW_READ_TIMEOUT_MS = 90_000;
+
+function apiTimeoutFor(path: string) {
+  if (path.includes("/module-zip")) return UPLOAD_TIMEOUT_MS;
+  if (/\/api\/projects\/[^/]+\/(modules|socle)(\?|\/|$)/.test(path)) return SLOW_READ_TIMEOUT_MS;
+  return API_TIMEOUT_MS;
+}
 const LOG_DESCRIPTION_MAX_LENGTH = 240;
 
 class ApiUnavailableError extends Error {
@@ -363,7 +374,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
       const timeout = window.setTimeout(() => {
         timedOut = true;
         controller.abort();
-      }, path.includes("/module-zip") ? UPLOAD_TIMEOUT_MS : API_TIMEOUT_MS);
+      }, apiTimeoutFor(path));
       try {
         response = await fetch(`${API_BASE}${path}`, {
           ...init,
@@ -4886,7 +4897,13 @@ export default function Home() {
                   <div className="mt-1 text-sm text-muted-foreground">Application desktop multi-plateforme</div>
                 </div>
               </div>
-              <Badge className="shrink-0" variant="outline">Version {appVersion}</Badge>
+              <div className="flex shrink-0 flex-col items-start gap-1 sm:items-end">
+                <Badge variant="outline">Version {appVersion}</Badge>
+                <span className="font-mono text-xs text-muted-foreground" title={APP_COMMIT ? `Commit ${APP_COMMIT}` : undefined}>
+                  {APP_BUILD ? `Build ${APP_BUILD}` : "Build local"}
+                  {APP_COMMIT ? ` · ${APP_COMMIT}` : ""}
+                </span>
+              </div>
             </div>
             <div className="rounded-md border p-4">
               <div className="text-sm font-semibold">À propos du créateur</div>

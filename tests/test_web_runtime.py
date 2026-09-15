@@ -485,6 +485,16 @@ class EventWatchCostTests(unittest.TestCase):
 
         detect.assert_called_once_with("sh", "Ubuntu")
 
+    @patch("odoo_manager_web.wsl_executable_available", side_effect=[False, True, True])
+    def test_missing_wsl_is_not_cached_so_a_later_install_or_mock_is_seen(self, detect):
+        web.WSL_SHELL_AVAILABILITY.clear()
+        self.addCleanup(web.WSL_SHELL_AVAILABILITY.clear)
+
+        self.assertFalse(web.wsl_shell_available(""))
+        self.assertTrue(web.wsl_shell_available(""))
+        self.assertTrue(web.wsl_shell_available(""))
+        self.assertEqual(2, detect.call_count)
+
     @patch("odoo_manager_web.module_import_roots", return_value=[])
     @patch("odoo_manager_web.wsl_execution_path", side_effect=lambda path, _distribution: str(path).replace("\\", "/"))
     def test_wsl_metadata_reuses_precomputed_project_roots(self, translate, _imports):

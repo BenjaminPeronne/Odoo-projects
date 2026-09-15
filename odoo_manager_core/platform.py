@@ -360,6 +360,27 @@ def wsl_execution_path(path, distribution=""):
     return translated
 
 
+def wsl_windows_path(linux_path, distribution=""):
+    """Chemin Windows d'un chemin Linux de WSL, sans lancer `wslpath -w`.
+
+    Le scan des addons appelait wslpath deux fois par module : environ 2 600 processus
+    dans WSL pour un projet Enterprise, soit plus que le délai de l'interface.
+    """
+    linux_path = posixpath.normpath(str(linux_path or ""))
+    if not linux_path.startswith("/"):
+        return ""
+    for (mount_distribution, drive), mount in WSL_DRIVE_MOUNTS.items():
+        if mount_distribution != distribution.casefold():
+            continue
+        mount = mount.rstrip("/")
+        if linux_path == mount or linux_path.startswith(mount + "/"):
+            return f"{drive.upper()}:\\" + linux_path[len(mount):].lstrip("/").replace("/", "\\")
+    match = re.match(r"^/mnt/([A-Za-z])(?:/(.*))?$", linux_path)
+    if match:
+        return f"{match.group(1).upper()}:\\" + (match.group(2) or "").replace("/", "\\")
+    return wsl_unc_path(distribution, linux_path) if distribution else ""
+
+
 def execution_path(path, settings):
     resolved = str(Path(path).expanduser().resolve())
     if settings.execution_mode != "wsl":

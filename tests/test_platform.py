@@ -104,6 +104,16 @@ class TerminalLaunchTests(unittest.TestCase):
         self.assertEqual(command[4], "--exec")
         self.assertEqual(command[-2:], ["sh", "/mnt/c/create_project.sh"])
 
+    @mock.patch.dict("odoo_manager_core.platform.WSL_DRIVE_MOUNTS", {("ubuntu", "d"): "/data/d"}, clear=True)
+    def test_windows_path_is_computed_without_wslpath(self):
+        from odoo_manager_core.platform import wsl_windows_path
+
+        self.assertEqual(r"C:\Users\demo\addons", wsl_windows_path("/mnt/c/Users/demo/addons", "Ubuntu"))
+        self.assertEqual(r"D:\odoo\sale", wsl_windows_path("/data/d/odoo/sale", "Ubuntu"))
+        self.assertEqual(r"\\wsl.localhost\Ubuntu\home\demo", wsl_windows_path("/home/demo", "Ubuntu"))
+        self.assertEqual("", wsl_windows_path("/home/demo", ""))
+        self.assertEqual("", wsl_windows_path("relative/path", "Ubuntu"))
+
     @mock.patch.dict("odoo_manager_core.platform.WSL_DRIVE_MOUNTS", clear=True)
     @mock.patch("odoo_manager_core.platform.Path")
     @mock.patch("odoo_manager_core.platform.subprocess.run")
