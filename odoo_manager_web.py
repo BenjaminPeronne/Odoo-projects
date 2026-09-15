@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import ast
 import errno
 import html
 import http.client
@@ -121,27 +122,78 @@ MAX_ZIP_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
 MAX_DATABASE_BACKUP_BYTES = int(os.environ.get("ODOO_MANAGER_MAX_BACKUP_BYTES", 100 * 1024 * 1024 * 1024))
 MAX_DATABASE_BACKUP_ENTRIES = 2_000_000
 
-SOCLE_PRESETS = {
-    "sales": ("Ventes", ("sale_management",)),
-    "crm": ("CRM", ("crm",)),
-    "purchase": ("Achats", ("purchase",)),
-    "inventory": ("Inventaire", ("stock",)),
-    "accounting_fr": ("Comptabilité française", ("account_accountant", "l10n_fr")),
-    "manufacturing": ("Fabrication", ("mrp",)),
-    "project": ("Projet", ("project",)),
-    "timesheets": ("Feuilles de temps", ("hr_timesheet",)),
-    "employees": ("Employés", ("hr",)),
-    "time_off": ("Congés", ("hr_holidays",)),
-    "expenses": ("Notes de frais", ("hr_expense",)),
-    "helpdesk": ("Assistance", ("helpdesk",)),
-    "field_service": ("Services sur site", ("industry_fsm",)),
-    "planning": ("Planification", ("planning",)),
-    "documents": ("Documents", ("documents",)),
-    "sign": ("Signature", ("sign",)),
-    "subscriptions": ("Abonnements", ("sale_subscription",)),
-    "point_of_sale": ("Point de Vente", ("point_of_sale",)),
-    "ecommerce": ("eCommerce", ("website_sale",)),
-}
+# Catalogue aligné sur https://www.odoo.com/fr_FR/page/all-apps : ordre et
+# catégories de la page. Les modules absents d'une version sont signalés par l'UI.
+SOCLE_SECTIONS = (
+    ("website", "Site internet"),
+    ("sales", "Ventes"),
+    ("finance", "Finance"),
+    ("inventory-manufacturing", "Inventaire & Fabrication"),
+    ("human-resources", "Ressources humaines"),
+    ("marketing", "Marketing"),
+    ("services", "Services"),
+    ("productivity", "Productivité"),
+    ("customization", "Personnalisation"),
+)
+
+SOCLE_APPS = (
+    ("website", "Site Web", "website", ("website",)),
+    ("ecommerce", "eCommerce", "website", ("website_sale",)),
+    ("blog", "Blog", "website", ("website_blog",)),
+    ("forum", "Forum", "website", ("website_forum",)),
+    ("elearning", "eLearning", "website", ("website_slides",)),
+    ("live_chat", "Live Chat", "website", ("im_livechat",)),
+    ("crm", "CRM", "sales", ("crm",)),
+    ("sales", "Ventes", "sales", ("sale_management",)),
+    ("point_of_sale", "Point de Vente", "sales", ("point_of_sale",)),
+    ("subscriptions", "Abonnements", "sales", ("sale_subscription",)),
+    ("rental", "Location", "sales", ("sale_renting",)),
+    ("accounting_fr", "Comptabilité française", "finance", ("account_accountant", "l10n_fr")),
+    ("invoicing", "Facturation", "finance", ("account",)),
+    ("expenses", "Notes de frais", "finance", ("hr_expense",)),
+    ("documents", "Documents", "finance", ("documents",)),
+    ("spreadsheet", "Feuilles de calcul", "finance", ("documents_spreadsheet",)),
+    ("sign", "Signature", "finance", ("sign",)),
+    ("esg", "ESG", "finance", ("esg",)),
+    ("inventory", "Inventaire", "inventory-manufacturing", ("stock",)),
+    ("manufacturing", "Fabrication", "inventory-manufacturing", ("mrp",)),
+    ("plm", "PLM", "inventory-manufacturing", ("mrp_plm",)),
+    ("purchase", "Achats", "inventory-manufacturing", ("purchase",)),
+    ("maintenance", "Maintenance", "inventory-manufacturing", ("maintenance",)),
+    ("quality", "Qualité", "inventory-manufacturing", ("quality_control",)),
+    ("employees", "Employés", "human-resources", ("hr",)),
+    ("recruitment", "Recrutement", "human-resources", ("hr_recruitment",)),
+    ("time_off", "Congés", "human-resources", ("hr_holidays",)),
+    ("appraisals", "Évaluations", "human-resources", ("hr_appraisal",)),
+    ("referrals", "Recommandation", "human-resources", ("hr_referral",)),
+    ("fleet", "Parc automobile", "human-resources", ("fleet",)),
+    ("marketing_automation", "Automatisation Marketing", "marketing", ("marketing_automation",)),
+    ("email_marketing", "E-mail Marketing", "marketing", ("mass_mailing",)),
+    ("sms_marketing", "Marketing par SMS", "marketing", ("mass_mailing_sms",)),
+    ("social_marketing", "Social Marketing", "marketing", ("social",)),
+    ("events", "Événements", "marketing", ("event",)),
+    ("surveys", "Sondage", "marketing", ("survey",)),
+    ("project", "Projet", "services", ("project",)),
+    ("timesheets", "Feuilles de temps", "services", ("hr_timesheet",)),
+    ("field_service", "Services sur site", "services", ("industry_fsm",)),
+    ("helpdesk", "Assistance", "services", ("helpdesk",)),
+    ("planning", "Planification", "services", ("planning",)),
+    ("appointments", "Rendez-vous", "services", ("appointment",)),
+    ("discuss", "Discussion", "productivity", ("mail",)),
+    ("approvals", "Validations", "productivity", ("approvals",)),
+    ("iot", "Internet des Objets", "productivity", ("iot",)),
+    ("voip", "VoIP", "productivity", ("voip",)),
+    ("knowledge", "Connaissances", "productivity", ("knowledge",)),
+    ("ai", "IA", "productivity", ("ai_app",)),
+    ("studio", "Studio", "customization", ("web_studio",)),
+)
+
+SOCLE_PRESETS = {app_id: (label, modules) for app_id, label, _section, modules in SOCLE_APPS}
+
+# États pour lesquels Odoo considère une dépendance comme satisfaite.
+INSTALLED_MODULE_STATES = frozenset(("installed", "to install", "to upgrade"))
+MODULE_GRAPH_CACHE = {}
+MODULE_GRAPH_TTL_SECONDS = 45
 
 JOBS = {}
 JOBS_LOCK = threading.Lock()
@@ -1432,6 +1484,7 @@ def modules_missing_from_code(states, available_names, accepted_states):
 def clear_project_module_cache(project):
     with MODULE_CACHE_LOCK:
         MODULE_CACHE.pop(project, None)
+        MODULE_GRAPH_CACHE.pop(project, None)
         WSL_MODULE_METADATA.clear()
 
 
@@ -3065,19 +3118,191 @@ def repair_enterprise_links_job(job, project):
     job.add("Vérification des liens symboliques Enterprise terminée.")
 
 
-def install_socle_job(job, project, db_name, presets):
-    project = validate_project(project)
-    db_name = validate_odoo_db(db_name)
-    preset_ids = validate_socle_presets(presets)
-    requested_modules = list(dict.fromkeys(
+def read_manifest_dict(path):
+    # Odoo lit lui-même le manifeste avec ast.literal_eval : même règle ici.
+    for filename in ("__manifest__.py", "__openerp__.py"):
+        try:
+            text = (Path(path) / filename).read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        try:
+            manifest = ast.literal_eval(text)
+        except (ValueError, SyntaxError, MemoryError, RecursionError):
+            return {}
+        return manifest if isinstance(manifest, dict) else {}
+    return {}
+
+
+def manifest_graph_entry(manifest):
+    depends = sorted({name for name in manifest.get("depends") or () if isinstance(name, str)})
+    auto_install = manifest.get("auto_install", False)
+    if isinstance(auto_install, (list, tuple, set)):
+        # Odoo 16+ : seules ces dépendances déclenchent l'installation automatique.
+        triggers = sorted({name for name in auto_install if isinstance(name, str)})
+        auto_install = True
+    else:
+        triggers = depends
+        auto_install = bool(auto_install)
+    return {
+        "title": str(manifest.get("name") or ""),
+        "depends": depends,
+        "auto_install": auto_install,
+        "auto_install_triggers": triggers,
+        "installable": bool(manifest.get("installable", True)),
+        "application": bool(manifest.get("application", False)),
+        # L'installation auto dépend alors du pays des sociétés : non prévisible ici.
+        "country_restricted": bool(manifest.get("countries")),
+    }
+
+
+def module_graph_from_paths(paths):
+    graph = {}
+    for path in paths:
+        name = posixpath.basename(str(path).replace("\\", "/"))
+        if name not in graph:
+            graph[name] = manifest_graph_entry(read_manifest_dict(path))
+    return graph
+
+
+def module_dependency_graph(project):
+    now = time.time()
+    with MODULE_CACHE_LOCK:
+        cached = MODULE_GRAPH_CACHE.get(project)
+        if cached and now - cached["created_at"] < MODULE_GRAPH_TTL_SECONDS:
+            return cached["graph"]
+    graph = module_graph_from_paths(module_dirs(project))
+    with MODULE_CACHE_LOCK:
+        MODULE_GRAPH_CACHE[project] = {"created_at": now, "graph": graph}
+    return graph
+
+
+def module_install_plan(graph, states, requested):
+    """Reproduit la résolution d'Odoo pour `-i` : dépendances récursives puis
+    modules auto_install dont un déclencheur passe à l'état « to install »."""
+    installed = {name for name, info in states.items() if info.get("state") in INSTALLED_MODULE_STATES}
+    installed.add("base")
+    requested = list(dict.fromkeys(requested))
+    to_install = {}
+    missing = {}
+    uninstallable = {}
+    auto_installed = set()
+
+    def add(name, required_by):
+        stack = [(name, required_by)]
+        while stack:
+            current, parent = stack.pop()
+            if current in installed or current in to_install:
+                continue
+            entry = graph.get(current)
+            if entry is None:
+                missing.setdefault(current, parent)
+                continue
+            if not entry["installable"]:
+                uninstallable.setdefault(current, parent)
+                continue
+            to_install[current] = parent
+            stack.extend((dependency, current) for dependency in entry["depends"])
+
+    for name in requested:
+        add(name, "")
+
+    candidates = sorted(
+        name
+        for name, entry in graph.items()
+        if entry["auto_install"] and entry["installable"] and entry["auto_install_triggers"]
+        and not entry["country_restricted"]
+    )
+    changed = True
+    while changed:
+        changed = False
+        for name in candidates:
+            if name in installed or name in to_install:
+                continue
+            triggers = graph[name]["auto_install_triggers"]
+            satisfied = all(trigger in installed or trigger in to_install for trigger in triggers)
+            if satisfied and any(trigger in to_install for trigger in triggers):
+                auto_installed.add(name)
+                add(name, "")
+                changed = True
+
+    requested_set = set(requested)
+    new_modules = [name for name in to_install if name not in requested_set]
+
+    def described(names):
+        return [{"name": name, "title": graph.get(name, {}).get("title") or name} for name in sorted(names)]
+
+    return {
+        "requested": [name for name in requested if name in to_install],
+        "already_installed": [name for name in requested if name in installed],
+        "dependencies": described(name for name in new_modules if name not in auto_installed),
+        "auto_installed": described(name for name in new_modules if name in auto_installed),
+        "applications": described(name for name in new_modules if graph[name]["application"]),
+        "missing": [{"name": name, "required_by": parent} for name, parent in sorted(missing.items())],
+        "uninstallable": [{"name": name, "required_by": parent} for name, parent in sorted(uninstallable.items())],
+        "total": len(to_install),
+    }
+
+
+def socle_preset_modules(preset_ids):
+    return list(dict.fromkeys(
         module_name
         for preset_id in preset_ids
         for module_name in SOCLE_PRESETS[preset_id][1]
     ))
 
+
+def socle_catalog(project, db_name):
+    graph = module_dependency_graph(project)
+    states = installed_modules(project, db_name) if db_name else {}
+    apps = []
+    for app_id, label, section, modules in SOCLE_APPS:
+        missing = [name for name in modules if name not in graph]
+        installed = [name for name in modules if states.get(name, {}).get("state") == "installed"]
+        extra = 0
+        if not missing and len(installed) < len(modules):
+            plan = module_install_plan(graph, states, modules)
+            extra = len(plan["dependencies"]) + len(plan["auto_installed"])
+        apps.append({
+            "id": app_id,
+            "label": label,
+            "section": section,
+            "modules": list(modules),
+            "missing": missing,
+            "installed_modules": installed,
+            "extra_count": extra,
+        })
+    return {
+        "sections": [{"id": section_id, "label": label} for section_id, label in SOCLE_SECTIONS],
+        "apps": apps,
+        "states_available": bool(states),
+    }
+
+
+def socle_install_plan(project, db_name, presets):
+    graph = module_dependency_graph(project)
+    states = installed_modules(project, db_name)
+    return module_install_plan(graph, states, socle_preset_modules(validate_socle_presets(presets)))
+
+
+def log_module_install_plan(job, plan):
+    if plan["dependencies"]:
+        job.add(f"Dépendances installées en plus ({len(plan['dependencies'])}) : "
+                + ", ".join(item["name"] for item in plan["dependencies"]))
+    if plan["auto_installed"]:
+        job.add(f"Modules installés automatiquement par Odoo ({len(plan['auto_installed'])}) : "
+                + ", ".join(item["name"] for item in plan["auto_installed"]))
+
+
+def install_socle_job(job, project, db_name, presets):
+    project = validate_project(project)
+    db_name = validate_odoo_db(db_name)
+    preset_ids = validate_socle_presets(presets)
+    requested_modules = socle_preset_modules(preset_ids)
+
     job.add("Vérification et création des liens symboliques Odoo Enterprise...")
     ensure_enterprise_module_links(job, project)
-    available = {path.name for path in module_dirs(project)}
+    paths = list(module_dirs(project))
+    available = {path.name for path in paths}
     missing = [name for name in requested_modules if name not in available]
     if missing:
         raise RuntimeError("Modules requis absents du projet : " + ", ".join(missing))
@@ -3090,7 +3315,15 @@ def install_socle_job(job, project, db_name, presets):
     if not pending:
         job.add("Le socle sélectionné est déjà entièrement installé.")
         return
+    plan = module_install_plan(module_graph_from_paths(paths), states, pending)
+    blocking = plan["missing"] + plan["uninstallable"]
+    if blocking:
+        raise RuntimeError(
+            "Dépendances introuvables ou non installables dans le projet : "
+            + ", ".join(f"{item['name']} (requis par {item['required_by']})" for item in blocking)
+        )
     job.add("Installation du socle: " + ", ".join(pending))
+    log_module_install_plan(job, plan)
     module_command_job(job, "--install-module", project, db_name, ",".join(pending))
 
 
@@ -3840,6 +4073,21 @@ class Handler(BaseHTTPRequestHandler):
                 if db_name:
                     validate_db(db_name)
                 return json_response(self, {"modules": modules_for(project, db_name)})
+
+            match = re.match(r"^/api/projects/([^/]+)/socle$", path)
+            if match:
+                project = validate_project(urllib.parse.unquote(match.group(1)))
+                db_name = urllib.parse.parse_qs(parsed.query).get("db", [""])[0]
+                if db_name:
+                    validate_odoo_db(db_name)
+                return json_response(self, socle_catalog(project, db_name))
+
+            match = re.match(r"^/api/projects/([^/]+)/socle/plan$", path)
+            if match:
+                project = validate_project(urllib.parse.unquote(match.group(1)))
+                params = urllib.parse.parse_qs(parsed.query)
+                db_name = validate_odoo_db(params.get("db", [""])[0])
+                return json_response(self, socle_install_plan(project, db_name, params.get("presets", [""])[0]))
 
             match = re.match(r"^/api/projects/([^/]+)/databases$", path)
             if match:

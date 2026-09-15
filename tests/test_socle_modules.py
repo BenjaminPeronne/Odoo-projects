@@ -1,6 +1,8 @@
 import os
 import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from test_module_layout import DummyJob, ModuleLayoutTests
@@ -197,3 +199,117 @@ class SocleModulesTests(ModuleLayoutTests):
 
         self.assertEqual(calls, [("--install-module", "beta"), ("--update-module", "alpha")])
         self.assertEqual(job.result, {"kind": "module_update", "scope": "imported", "modules": ["alpha", "beta"]})
+
+    def test_socle_job_logs_dependencies_and_rejects_missing_ones(self):
+        mrp = self.create_enterprise_module("mrp")
+        (mrp / "__manifest__.py").write_text("{'name': 'MRP', 'depends': ['stock']}\n", encoding="utf-8")
+        stock = self.create_enterprise_module("stock")
+        (stock / "__manifest__.py").write_text("{'name': 'Inventory', 'depends': ['product'], 'application': True}\n", encoding="utf-8")
+        product = self.create_enterprise_module("product")
+        calls = []
+
+        with mock.patch.object(web, "ensure_enterprise_module_links", return_value=set()), \
+                mock.patch.object(web, "module_dirs", return_value=iter([mrp, stock, product])), \
+                mock.patch.object(web, "installed_modules", return_value={}), \
+                mock.patch.object(web, "module_command_job", side_effect=lambda *args: calls.append(args[1:])):
+            job = DummyJob()
+            web.install_socle_job(job, self.project, "test_db", "manufacturing")
+
+        self.assertEqual([("--install-module", self.project, "test_db", "mrp")], calls)
+        self.assertTrue(any("Dépendances installées en plus (2) : product, stock" in line for line in job.lines))
+
+        with mock.patch.object(web, "ensure_enterprise_module_links", return_value=set()), \
+                mock.patch.object(web, "module_dirs", return_value=iter([mrp])), \
+                mock.patch.object(web, "installed_modules", return_value={}), \
+                mock.patch.object(web, "module_command_job") as command:
+            with self.assertRaisesRegex(RuntimeError, r"stock \(requis par mrp\)"):
+                web.install_socle_job(DummyJob(), self.project, "test_db", "manufacturing")
+        command.assert_not_called()
+
+
+def graph_entry(depends=(), auto_install=False, **extra):
+    manifest = {"name": extra.pop("title", ""), "depends": list(depends), "auto_install": auto_install, **extra}
+    return web.manifest_graph_entry(manifest)
+
+
+class ModuleInstallPlanTests(unittest.TestCase):
+    def test_plan_resolves_recursive_dependencies_and_skips_installed_modules(self):
+        graph = {
+            "mrp": graph_entry(["stock", "resource"]),
+            "stock": graph_entry(["product"], application=True, title="Inventaire"),
+            "product": graph_entry(["mail"]),
+            "resource": graph_entry(["base"]),
+            "mail": graph_entry(["base"]),
+        }
+
+        plan = web.module_install_plan(graph, {"mail": {"state": "installed"}}, ["mrp"])
+
+        self.assertEqual(["mrp"], plan["requested"])
+        self.assertEqual(["product", "resource", "stock"], [item["name"] for item in plan["dependencies"]])
+        self.assertEqual([{"name": "stock", "title": "Inventaire"}], plan["applications"])
+        self.assertEqual(4, plan["total"])
+        self.assertEqual([], plan["missing"])
+
+    def test_plan_follows_odoo_auto_install_rules(self):
+        graph = {
+            "sale": graph_entry(),
+            "stock": graph_entry(),
+            "account": graph_entry(),
+            # Toutes les dépendances requises, dont une nouvelle : installé.
+            "sale_stock": graph_entry(["sale", "stock"], auto_install=True),
+            # Liste explicite de déclencheurs : les autres dépendances suivent.
+            "sale_pdf": graph_entry(["sale", "account"], auto_install=["sale"]),
+            # Déclencheurs déjà tous installés, aucun nouveau : ignoré, comme dans Odoo.
+            "account_extra": graph_entry(["account"], auto_install=True),
+            # Dépend du pays des sociétés : non prévisible, donc ignoré.
+            "l10n_extra": graph_entry(["sale"], auto_install=True, countries=["fr"]),
+            "stock_only": graph_entry(["stock", "purchase"], auto_install=True),
+        }
+
+        plan = web.module_install_plan(graph, {"account": {"state": "installed"}, "stock": {"state": "installed"}}, ["sale"])
+
+        self.assertEqual(["sale_pdf", "sale_stock"], [item["name"] for item in plan["auto_installed"]])
+        self.assertEqual([], plan["dependencies"])
+        self.assertEqual(3, plan["total"])
+
+    def test_plan_reports_missing_and_uninstallable_dependencies(self):
+        graph = {
+            "helpdesk": graph_entry(["mail", "legacy"]),
+            "legacy": graph_entry(installable=False),
+        }
+
+        plan = web.module_install_plan(graph, {}, ["helpdesk", "base"])
+
+        self.assertEqual([{"name": "mail", "required_by": "helpdesk"}], plan["missing"])
+        self.assertEqual([{"name": "legacy", "required_by": "helpdesk"}], plan["uninstallable"])
+        self.assertEqual(["base"], plan["already_installed"])
+
+    def test_manifest_is_read_like_odoo_and_ignores_invalid_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            module = Path(directory) / "demo"
+            module.mkdir()
+            (module / "__manifest__.py").write_text(
+                "# -*- coding: utf-8 -*-\n{\n    'name': 'Demo',\n    'depends': ['sale'],  # comment\n}\n",
+                encoding="utf-8",
+            )
+            broken = Path(directory) / "broken"
+            broken.mkdir()
+            (broken / "__manifest__.py").write_text("{'name': open('x')}\n", encoding="utf-8")
+
+            graph = web.module_graph_from_paths([module, broken])
+
+        self.assertEqual(["sale"], graph["demo"]["depends"])
+        self.assertEqual("Demo", graph["demo"]["title"])
+        self.assertEqual([], graph["broken"]["depends"])
+
+    def test_socle_catalog_matches_odoo_app_page_and_ships_icons(self):
+        icons = Path(web.__file__).resolve().parent / "odoo-manager-next" / "public" / "odoo-apps"
+        section_ids = {section_id for section_id, _label in web.SOCLE_SECTIONS}
+        app_ids = [app_id for app_id, _label, _section, _modules in web.SOCLE_APPS]
+
+        self.assertEqual(49, len(app_ids))
+        self.assertEqual(len(app_ids), len(set(app_ids)))
+        for app_id, _label, section, modules in web.SOCLE_APPS:
+            self.assertIn(section, section_ids)
+            self.assertTrue(modules)
+            self.assertTrue((icons / f"{app_id}.svg").is_file(), app_id)

@@ -215,36 +215,59 @@ type ModuleInfo = {
   removal_note?: string;
 };
 
-const SOCLE_SECTIONS = [
-  { id: "website", label: "Site internet" },
-  { id: "sales", label: "Ventes" },
-  { id: "finance", label: "Finance" },
-  { id: "inventory-manufacturing", label: "Inventaire & Fabrication" },
-  { id: "human-resources", label: "Ressources humaines" },
-  { id: "services", label: "Services" },
-] as const;
+type SocleApp = {
+  id: string;
+  label: string;
+  section: string;
+  modules: string[];
+  missing: string[];
+  installed_modules: string[];
+  extra_count: number;
+};
 
-const SOCLE_PRESETS = [
-  { id: "ecommerce", label: "eCommerce", section: "website", modules: ["website_sale"] },
-  { id: "crm", label: "CRM", section: "sales", modules: ["crm"] },
-  { id: "sales", label: "Ventes", section: "sales", modules: ["sale_management"] },
-  { id: "point_of_sale", label: "Point de Vente", section: "sales", modules: ["point_of_sale"] },
-  { id: "subscriptions", label: "Abonnements", section: "sales", modules: ["sale_subscription"] },
-  { id: "accounting_fr", label: "Comptabilité française", section: "finance", modules: ["account_accountant", "l10n_fr"] },
-  { id: "expenses", label: "Notes de frais", section: "finance", modules: ["hr_expense"] },
-  { id: "documents", label: "Documents", section: "finance", modules: ["documents"] },
-  { id: "sign", label: "Signature", section: "finance", modules: ["sign"] },
-  { id: "inventory", label: "Inventaire", section: "inventory-manufacturing", modules: ["stock"] },
-  { id: "manufacturing", label: "Fabrication", section: "inventory-manufacturing", modules: ["mrp"] },
-  { id: "purchase", label: "Achats", section: "inventory-manufacturing", modules: ["purchase"] },
-  { id: "employees", label: "Employés", section: "human-resources", modules: ["hr"] },
-  { id: "time_off", label: "Congés", section: "human-resources", modules: ["hr_holidays"] },
-  { id: "project", label: "Projet", section: "services", modules: ["project"] },
-  { id: "timesheets", label: "Feuilles de temps", section: "services", modules: ["hr_timesheet"] },
-  { id: "field_service", label: "Services sur site", section: "services", modules: ["industry_fsm"] },
-  { id: "helpdesk", label: "Assistance", section: "services", modules: ["helpdesk"] },
-  { id: "planning", label: "Planification", section: "services", modules: ["planning"] },
-] as const;
+type SocleCatalog = {
+  sections: { id: string; label: string }[];
+  apps: SocleApp[];
+  states_available: boolean;
+};
+
+type PlanModule = { name: string; title: string };
+type PlanBlocker = { name: string; required_by: string };
+
+type SocleInstallPlan = {
+  requested: string[];
+  already_installed: string[];
+  dependencies: PlanModule[];
+  auto_installed: PlanModule[];
+  applications: PlanModule[];
+  missing: PlanBlocker[];
+  uninstallable: PlanBlocker[];
+  total: number;
+};
+
+function normalizeSearchText(value: string) {
+  return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+
+function socleAppInstalled(app: SocleApp) {
+  return app.missing.length === 0 && app.installed_modules.length === app.modules.length;
+}
+
+function PlanModuleChips({ items }: { items: PlanModule[] }) {
+  return (
+    <div className="mt-1.5 flex flex-wrap gap-1">
+      {items.map((item) => (
+        <span
+          key={item.name}
+          className="rounded border bg-background px-1.5 py-0.5 font-mono text-[11px] leading-4"
+          title={item.title !== item.name ? item.title : undefined}
+        >
+          {item.name}
+        </span>
+      ))}
+    </div>
+  );
+}
 
 type Toast = {
   id: number;
@@ -833,6 +856,12 @@ export default function Home() {
   const [selectedModules, setSelectedModules] = useState<Set<string>>(new Set());
   const [socleDialogOpen, setSocleDialogOpen] = useState(false);
   const [selectedSoclePresets, setSelectedSoclePresets] = useState<Set<string>>(new Set());
+  const [socleCatalog, setSocleCatalog] = useState<SocleCatalog | null>(null);
+  const [loadingSocleCatalog, setLoadingSocleCatalog] = useState(false);
+  const [socleSearch, setSocleSearch] = useState("");
+  const [soclePlan, setSoclePlan] = useState<SocleInstallPlan | null>(null);
+  const [loadingSoclePlan, setLoadingSoclePlan] = useState(false);
+  const [soclePlanError, setSoclePlanError] = useState("");
   const [jobs, setJobs] = useState<Job[]>([]);
   const [selectedJobId, setSelectedJobId] = useState<number | null>(null);
   const [logDescriptionExpanded, setLogDescriptionExpanded] = useState(false);
@@ -1033,13 +1062,20 @@ export default function Home() {
 
   const moduleByName = useMemo(() => new Map(modules.map((module) => [module.name, module])), [modules]);
   const installedSoclePresetIds = useMemo<Set<string>>(
-    () => new Set<string>(
-      SOCLE_PRESETS
-        .filter((preset) => preset.modules.every((moduleName) => moduleByName.get(moduleName)?.state === "installed"))
-        .map((preset) => preset.id),
-    ),
-    [moduleByName],
+    () => new Set<string>((socleCatalog?.apps ?? []).filter(socleAppInstalled).map((app) => app.id)),
+    [socleCatalog],
   );
+  const soclePresetsToInstall = useMemo(
+    () => Array.from(selectedSoclePresets).filter((presetId) => !installedSoclePresetIds.has(presetId)).sort(),
+    [selectedSoclePresets, installedSoclePresetIds],
+  );
+  const visibleSocleApps = useMemo(() => {
+    const query = normalizeSearchText(socleSearch.trim());
+    const apps = socleCatalog?.apps ?? [];
+    if (!query) return apps;
+    return apps.filter((app) => normalizeSearchText(`${app.label} ${app.modules.join(" ")}`).includes(query));
+  }, [socleCatalog, socleSearch]);
+  const soclePlanBlocked = Boolean(soclePlan && (soclePlan.missing.length || soclePlan.uninstallable.length));
   const pendingModulesWithMissingCode = useMemo(
     () => updatePendingModules.filter((module) => !module.code_available),
     [updatePendingModules],
@@ -1570,20 +1606,33 @@ export default function Home() {
     });
   }
 
+  async function loadSocleCatalog() {
+    if (!selectedProject) return;
+    setLoadingSocleCatalog(true);
+    try {
+      const params = new URLSearchParams(canUseDb ? { db: selectedDb } : {});
+      setSocleCatalog(await api<SocleCatalog>(`/api/projects/${encodeURIComponent(selectedProject.name)}/socle?${params}`));
+    } catch (err) {
+      pushToast("error", err instanceof Error ? err.message : "Impossible de charger le catalogue d’applications.");
+    } finally {
+      setLoadingSocleCatalog(false);
+    }
+  }
+
   function openSocleDialog() {
-    setSelectedSoclePresets(new Set(installedSoclePresetIds));
+    setSelectedSoclePresets(new Set());
+    setSocleSearch("");
+    setSoclePlan(null);
     setSocleDialogOpen(true);
-    void refreshModules();
+    void loadSocleCatalog();
   }
 
   async function installSelectedSocle() {
-    if (!selectedProject || !selectedDb || !selectedSoclePresets.size) return;
-    const presetsToInstall = Array.from(selectedSoclePresets).filter((presetId) => !installedSoclePresetIds.has(presetId));
-    if (!presetsToInstall.length) return;
+    if (!selectedProject || !selectedDb || !soclePresetsToInstall.length || soclePlanBlocked) return;
     const job = await createJob("install_socle", {
       project: selectedProject.name,
       db: selectedDb,
-      presets: presetsToInstall.join(","),
+      presets: soclePresetsToInstall.join(","),
     });
     if (job) {
       setSocleDialogOpen(false);
@@ -2326,6 +2375,39 @@ export default function Home() {
   const selectedProjectStarting = selectedProjectLifecycleJob?.title.startsWith("Démarrer ") ?? false;
   const selectedProjectStopping = selectedProjectLifecycleJob?.title.startsWith("Arrêter ") ?? false;
   const canUseDb = Boolean(selectedDb && odooDatabases.includes(selectedDb));
+  const soclePlanKey = socleDialogOpen && canUseDb ? soclePresetsToInstall.join(",") : "";
+
+  useEffect(() => {
+    if (!soclePlanKey || !selectedProject) {
+      setSoclePlan(null);
+      setSoclePlanError("");
+      setLoadingSoclePlan(false);
+      return;
+    }
+    let cancelled = false;
+    setLoadingSoclePlan(true);
+    const timer = window.setTimeout(() => {
+      const params = new URLSearchParams({ db: selectedDb, presets: soclePlanKey });
+      api<SocleInstallPlan>(`/api/projects/${encodeURIComponent(selectedProject.name)}/socle/plan?${params}`)
+        .then((plan) => {
+          if (cancelled) return;
+          setSoclePlan(plan);
+          setSoclePlanError("");
+        })
+        .catch((err) => {
+          if (cancelled) return;
+          setSoclePlan(null);
+          setSoclePlanError(err instanceof Error ? err.message : "Calcul des dépendances impossible.");
+        })
+        .finally(() => {
+          if (!cancelled) setLoadingSoclePlan(false);
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [soclePlanKey, selectedProject, selectedDb]);
   const selectedOdooUrl = odooAccessUrl(selectedProject, selectedDb);
   const scopedExternalLogView = externalLogView?.project === selectedProject?.name ? externalLogView : null;
   const outputTitle = scopedExternalLogView?.title || selectedJob?.title || "Aucune action sélectionnée";
@@ -4761,71 +4843,146 @@ export default function Home() {
       </Dialog>
 
       <Dialog open={socleDialogOpen} onOpenChange={setSocleDialogOpen}>
-        <DialogContent className="max-h-[90vh] max-w-3xl space-y-5 overflow-y-auto">
+        <DialogContent className="flex max-w-5xl flex-col gap-4 overflow-hidden">
           <DialogHeader>
             <DialogTitle>Installer un socle Odoo</DialogTitle>
             <DialogDescription>
-              Sélectionne les applications à installer dans {selectedDb || "la base choisie"}. Le manager vérifie et crée d’abord les liens symboliques Enterprise manquants.
+              Sélectionne les applications à installer dans {selectedDb || "la base choisie"}. Les dépendances et les modules
+              qu’Odoo installe automatiquement sont calculés à partir des manifestes du projet.
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-6">
-            {SOCLE_SECTIONS.map((section) => (
-              <section key={section.id} aria-labelledby={`socle-section-${section.id}`}>
-                <h3 id={`socle-section-${section.id}`} className="mb-3 text-base font-semibold">{section.label}</h3>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  {SOCLE_PRESETS.filter((preset) => preset.section === section.id).map((preset) => {
-                    const missing = preset.modules.filter((moduleName) => !moduleByName.has(moduleName));
-                    const installed = preset.modules.filter((moduleName) => moduleByName.get(moduleName)?.state === "installed");
-                    const unavailable = missing.length > 0;
-                    const alreadyInstalled = !unavailable && installed.length === preset.modules.length;
-                    return (
-                      <label
-                        key={preset.id}
-                        className={cn(
-                          "flex items-start gap-3 rounded-md border p-3 text-sm",
-                          unavailable || alreadyInstalled ? "cursor-not-allowed bg-muted/35 opacity-60" : "cursor-pointer hover:bg-muted/45",
-                        )}
-                      >
-                        <Checkbox
-                          className="mt-0.5"
-                          checked={alreadyInstalled || selectedSoclePresets.has(preset.id)}
-                          disabled={unavailable || alreadyInstalled || loading}
-                          onCheckedChange={(checked) => toggleSoclePreset(preset.id, checked === true)}
-                        />
-                        <img src={`/odoo-apps/${preset.id}.svg`} alt="" aria-hidden="true" className="h-12 w-12 shrink-0 object-contain" />
-                        <span className="min-w-0">
-                          <span className="block font-medium">{preset.label}</span>
-                          <span className="mt-1 block break-all text-xs text-muted-foreground">{preset.modules.join(" + ")}</span>
-                          {unavailable && <span className="mt-1 block text-xs text-destructive">Absent : {missing.join(", ")}</span>}
-                          {!unavailable && installed.length > 0 && (
-                            <span className="mt-1 block text-xs text-muted-foreground">Déjà installé : {installed.join(", ")}</span>
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              className="pl-9"
+              value={socleSearch}
+              onChange={(event) => setSocleSearch(event.target.value)}
+              placeholder="Rechercher une application ou un module technique"
+              aria-label="Rechercher une application"
+            />
+          </div>
+          <div className="-mx-1 min-h-0 flex-1 space-y-5 overflow-y-auto px-1">
+            {!socleCatalog && loadingSocleCatalog && (
+              <div className="flex items-center gap-2 py-10 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Lecture des manifestes du projet…
+              </div>
+            )}
+            {socleCatalog && !socleCatalog.states_available && (
+              <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/45 dark:text-amber-100">
+                État des modules de la base indisponible : les modules déjà installés ne peuvent pas être détectés.
+              </div>
+            )}
+            {socleCatalog?.sections.map((section) => {
+              const apps = visibleSocleApps.filter((app) => app.section === section.id);
+              if (!apps.length) return null;
+              return (
+                <section key={section.id} aria-labelledby={`socle-section-${section.id}`}>
+                  <h3 id={`socle-section-${section.id}`} className="mb-2 text-sm font-semibold">{section.label}</h3>
+                  <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                    {apps.map((app) => {
+                      const unavailable = app.missing.length > 0;
+                      const alreadyInstalled = socleAppInstalled(app);
+                      return (
+                        <label
+                          key={app.id}
+                          className={cn(
+                            "flex min-w-0 items-start gap-3 rounded-md border p-2.5 text-sm transition-colors",
+                            unavailable || alreadyInstalled ? "cursor-not-allowed bg-muted/35 opacity-60" : "cursor-pointer hover:bg-muted/45",
+                            selectedSoclePresets.has(app.id) && !alreadyInstalled && "border-primary/50 bg-primary/[0.06]",
                           )}
-                        </span>
-                      </label>
-                    );
-                  })}
+                        >
+                          <Checkbox
+                            className="mt-0.5"
+                            checked={alreadyInstalled || selectedSoclePresets.has(app.id)}
+                            disabled={unavailable || alreadyInstalled || loading}
+                            onCheckedChange={(checked) => toggleSoclePreset(app.id, checked === true)}
+                          />
+                          <img src={`/odoo-apps/${app.id}.svg`} alt="" aria-hidden="true" className="h-9 w-9 shrink-0 object-contain" />
+                          <span className="min-w-0">
+                            <span className="block font-medium">{app.label}</span>
+                            <span className="mt-0.5 block break-all font-mono text-[11px] text-muted-foreground">{app.modules.join(" + ")}</span>
+                            {unavailable ? (
+                              <span className="mt-0.5 block text-xs text-destructive">Absent de cette version : {app.missing.join(", ")}</span>
+                            ) : alreadyInstalled ? (
+                              <span className="mt-0.5 block text-xs text-muted-foreground">Déjà installé</span>
+                            ) : app.extra_count > 0 ? (
+                              <span className="mt-0.5 block text-xs text-muted-foreground">+ {app.extra_count} module(s) installé(s) avec</span>
+                            ) : null}
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </section>
+              );
+            })}
+            {socleCatalog && !visibleSocleApps.length && (
+              <p className="py-6 text-center text-sm text-muted-foreground">Aucune application ne correspond à la recherche.</p>
+            )}
+          </div>
+          <div className="space-y-3 border-t pt-3">
+            <div className="max-h-[20dvh] overflow-y-auto rounded-md border bg-muted/35 p-3 text-sm sm:max-h-[30dvh]" aria-live="polite">
+              {!soclePresetsToInstall.length ? (
+                <p className="text-muted-foreground">Sélectionne des applications pour voir tout ce qui sera installé.</p>
+              ) : loadingSoclePlan && !soclePlan ? (
+                <p className="flex items-center gap-2 text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Calcul des dépendances…
+                </p>
+              ) : soclePlanError ? (
+                <p className="text-destructive">{soclePlanError}</p>
+              ) : soclePlan ? (
+                <div className={cn("space-y-2", loadingSoclePlan && "opacity-60")}>
+                  <div className="font-medium">
+                    {soclePlan.total} module(s) seront installés
+                    <span className="font-normal text-muted-foreground">
+                      {" "}· {soclePlan.requested.length} demandé(s), {soclePlan.dependencies.length} dépendance(s),
+                      {" "}{soclePlan.auto_installed.length} automatique(s)
+                    </span>
+                  </div>
+                  {soclePlan.applications.length > 0 && (
+                    <div className="text-xs">
+                      <span className="font-medium">Applications ajoutées en plus :</span>{" "}
+                      {soclePlan.applications.map((item) => item.title).join(", ")}
+                    </div>
+                  )}
+                  {(soclePlan.missing.length > 0 || soclePlan.uninstallable.length > 0) && (
+                    <div className="text-xs text-destructive">
+                      Installation impossible, dépendances introuvables ou non installables :{" "}
+                      {[...soclePlan.missing, ...soclePlan.uninstallable].map((item) => `${item.name} (requis par ${item.required_by})`).join(", ")}
+                    </div>
+                  )}
+                  {soclePlan.dependencies.length > 0 && (
+                    <details>
+                      <summary className="cursor-pointer text-xs font-medium">Dépendances ({soclePlan.dependencies.length})</summary>
+                      <PlanModuleChips items={soclePlan.dependencies} />
+                    </details>
+                  )}
+                  {soclePlan.auto_installed.length > 0 && (
+                    <details>
+                      <summary className="cursor-pointer text-xs font-medium">
+                        Installés automatiquement par Odoo ({soclePlan.auto_installed.length})
+                      </summary>
+                      <PlanModuleChips items={soclePlan.auto_installed} />
+                    </details>
+                  )}
                 </div>
-              </section>
-            ))}
-          </div>
-          <div className="rounded-md border bg-muted/35 p-3 text-sm">
-            <div className="font-medium">Comptabilité</div>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Le socle comptable installe uniquement Comptabilité et la localisation française (`account_accountant` + `l10n_fr`).
-            </p>
-          </div>
-          <div className="grid gap-2 sm:grid-cols-2">
-            <Button variant="outline" disabled={!selectedProject || loading} onClick={repairEnterpriseLinks}>
-              <RefreshCcw className="h-4 w-4" />
-              Vérifier / créer les liens uniquement
-            </Button>
-            <Button
-              disabled={!selectedDb || loading || !Array.from(selectedSoclePresets).some((presetId) => !installedSoclePresetIds.has(presetId))}
-              onClick={installSelectedSocle}
-            >
-              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Boxes className="h-4 w-4" />}
-              Installer la sélection
-            </Button>
+              ) : null}
+            </div>
+            <div className="grid gap-2 sm:grid-cols-2">
+              <Button variant="outline" disabled={!selectedProject || loading} onClick={repairEnterpriseLinks}>
+                <RefreshCcw className="h-4 w-4" />
+                Vérifier / créer les liens uniquement
+              </Button>
+              <Button
+                disabled={!selectedDb || loading || !soclePresetsToInstall.length || loadingSoclePlan || soclePlanBlocked}
+                onClick={installSelectedSocle}
+              >
+                {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Boxes className="h-4 w-4" />}
+                Installer la sélection{soclePlan && soclePresetsToInstall.length ? ` (${soclePlan.total} modules)` : ""}
+              </Button>
+            </div>
           </div>
         </DialogContent>
       </Dialog>
