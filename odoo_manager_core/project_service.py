@@ -875,24 +875,31 @@ class ProjectService:
         if code != 0:
             raise RuntimeError("L'installation des dépendances Python du projet a échoué.")
 
-    def run_odoo_module_command(self, project, db_name, modules, option="-u", log=None):
-        if option not in {"-i", "-u"}:
-            raise ValueError("Option module Odoo invalide.")
+    def ensure_odoo_containers_ready(self, project, log=None):
         container = f"odoo-{project}"
         postgres = f"postgresql-{project}"
         if not self.is_running(container) or not self.is_running(postgres):
             self.start_project(project, log=log)
         else:
             self.wait_for_odoo_container_initialization(container, log=log)
+
+    def run_odoo_module_command(self, project, db_name, modules, option="-u", log=None, overwrite_translations=False):
+        if option not in {"-i", "-u"}:
+            raise ValueError("Option module Odoo invalide.")
+        container = f"odoo-{project}"
+        self.ensure_odoo_containers_ready(project, log=log)
         self.install_project_pip_requirements(project, log=log)
 
         action = "installation" if option == "-i" else "mise à jour"
+        extra_args = ["--i18n-overwrite"] if overwrite_translations else []
+        if overwrite_translations:
+            action += " avec réinitialisation des traductions"
         self.log(log, "")
         self.log(log, f"Commande Odoo ({action})")
         self.log(log, f"Projet: {project}")
         self.log(log, f"Base: {db_name}")
         self.log(log, f"Module(s): {modules}")
-        self.log(log, f"Équivalent: odoo -d {db_name} {option} {modules} --stop-after-init")
+        self.log(log, f"Équivalent: odoo -d {db_name} {option} {modules} {' '.join([*extra_args, '--stop-after-init'])}")
         was_neutralized = self.database_is_neutralized(project, db_name)
 
         self.stop_odoo_server(project, log=log)
@@ -908,6 +915,7 @@ class ProjectService:
             db_name,
             option,
             modules,
+            *extra_args,
             "--stop-after-init",
         )
         command_output = deque(maxlen=200)
@@ -946,13 +954,110 @@ class ProjectService:
                     return f"Dernière erreur Odoo : {line[:350]}"
         return "Cause non présente dans la sortie reçue. Consultez les Logs de cette tâche."
 
-    def run_odoo_uninstall_command(self, project, db_name, modules, log=None):
+    def run_odoo_shell_script(self, project, db_name, script, failure_message, env=None, secrets=(), log=None):
+        """Exécute un script `odoo shell` serveur arrêté, puis redémarre Odoo.
+
+        Les valeurs de `secrets` sont masquées dans tout ce qui part vers le log,
+        y compris la ligne de commande docker qui transporte les variables.
+        """
         container = f"odoo-{project}"
-        postgres = f"postgresql-{project}"
-        if not self.is_running(container) or not self.is_running(postgres):
-            self.start_project(project, log=log)
-        else:
-            self.wait_for_odoo_container_initialization(container, log=log)
+        secrets = [value for value in secrets if value]
+
+        def safe_log(line):
+            text = str(line)
+            for value in secrets:
+                text = text.replace(value, "********")
+            self.log(log, text)
+
+        environment = ["-e", "LOG_ATTACHMENTS=False", "-e", f"ODOO_DB_NAME={db_name}"]
+        for key, value in (env or {}).items():
+            environment.extend(["-e", f"{key}={value}"])
+        shell_command = (
+            "odoo shell -c /home/odoo/srv/conf/odoo.conf "
+            "-d \"$ODOO_DB_NAME\" --no-http <<'ODOO_MANAGER_PY'\n"
+            f"{script}ODOO_MANAGER_PY"
+        )
+
+        self.stop_odoo_server(project, log=log)
+        command = self.docker("exec", *environment, container, "sh", "-lc", shell_command)
+        try:
+            code = self.stream(command, log=safe_log)
+            if code != 0:
+                self.odoo_startup_diagnostics(container, log=log)
+                raise RuntimeError(f"{failure_message} (code {code}).")
+        finally:
+            self.log(log, "Redémarrage du serveur Odoo...")
+            self.start_odoo_server(project, log=log)
+        self.wait_project_http(project, log=log)
+
+    def run_odoo_update_module_list(self, project, db_name, log=None):
+        self.ensure_odoo_containers_ready(project, log=log)
+        self.log(log, "")
+        self.log(log, "Actualisation de la liste des modules Odoo")
+        self.log(log, f"Projet: {project}")
+        self.log(log, f"Base: {db_name}")
+        script = """updated, added = env["ir.module.module"].update_list()
+env.cr.commit()
+print(f"Liste des modules actualisée : {added} ajouté(s), {updated} mis à jour.")
+"""
+        self.run_odoo_shell_script(
+            project, db_name, script, "L'actualisation de la liste des modules a échoué", log=log,
+        )
+        self.log(log, "Liste des modules actualisée.")
+
+    def run_odoo_regenerate_assets(self, project, db_name, log=None):
+        self.ensure_odoo_containers_ready(project, log=log)
+        self.log(log, "")
+        self.log(log, "Régénération des assets Odoo")
+        self.log(log, f"Projet: {project}")
+        self.log(log, f"Base: {db_name}")
+        script = """attachments = env["ir.attachment"].sudo().search([("url", "=like", "/web/assets/%")])
+count = len(attachments)
+attachments.unlink()
+env.cr.commit()
+print(f"{count} bundle(s) d'assets supprimé(s), régénérés au prochain chargement d'une page.")
+"""
+        self.run_odoo_shell_script(
+            project, db_name, script, "La régénération des assets a échoué", log=log,
+        )
+        self.log(log, "Assets purgés. Recharge la page Odoo (Ctrl+Maj+R) pour les reconstruire.")
+        self.log(log, f"URL Odoo: {self.project_url(project)}")
+
+    def run_odoo_reset_admin_password(self, project, db_name, password, log=None):
+        if not password:
+            raise ValueError("Le nouveau mot de passe administrateur est vide.")
+        self.ensure_odoo_containers_ready(project, log=log)
+        self.log(log, "")
+        self.log(log, "Réinitialisation du mot de passe administrateur Odoo")
+        self.log(log, f"Projet: {project}")
+        self.log(log, f"Base: {db_name}")
+        script = """import os
+
+user = env.ref("base.user_admin", raise_if_not_found=False)
+if not user:
+    raise SystemExit("Utilisateur administrateur base.user_admin introuvable.")
+user = user.sudo()
+values = {"password": os.environ["ODOO_ADMIN_PASSWORD"]}
+if not user.active:
+    values["active"] = True
+user.write(values)
+env.cr.commit()
+print("Mot de passe réinitialisé pour l'identifiant : " + user.login)
+"""
+        self.run_odoo_shell_script(
+            project,
+            db_name,
+            script,
+            "La réinitialisation du mot de passe administrateur a échoué",
+            env={"ODOO_ADMIN_PASSWORD": password},
+            secrets=(password,),
+            log=log,
+        )
+        self.log(log, "Mot de passe administrateur réinitialisé.")
+        self.log(log, f"URL Odoo: {self.project_url(project)}")
+
+    def run_odoo_uninstall_command(self, project, db_name, modules, log=None):
+        self.ensure_odoo_containers_ready(project, log=log)
 
         self.log(log, "")
         self.log(log, "Commande Odoo (désinstallation)")
@@ -985,35 +1090,14 @@ installed.button_immediate_uninstall()
 env.cr.commit()
 print("Désinstallation terminée.")
 """
-        shell_command = (
-            "odoo shell -c /home/odoo/srv/conf/odoo.conf "
-            "-d \"$ODOO_DB_NAME\" --no-http <<'ODOO_MANAGER_PY'\n"
-            f"{uninstall_script}ODOO_MANAGER_PY"
+        self.run_odoo_shell_script(
+            project,
+            db_name,
+            uninstall_script,
+            "La désinstallation Odoo a échoué",
+            env={"MODULE_NAMES": modules},
+            log=log,
         )
-
-        self.stop_odoo_server(project, log=log)
-        command = self.docker(
-            "exec",
-            "-e",
-            "LOG_ATTACHMENTS=False",
-            "-e",
-            f"ODOO_DB_NAME={db_name}",
-            "-e",
-            f"MODULE_NAMES={modules}",
-            container,
-            "sh",
-            "-lc",
-            shell_command,
-        )
-        try:
-            code = self.stream(command, log=log)
-            if code != 0:
-                self.odoo_startup_diagnostics(container, log=log)
-                raise RuntimeError(f"La désinstallation Odoo a échoué avec le code {code}.")
-        finally:
-            self.log(log, "Redémarrage du serveur Odoo...")
-            self.start_odoo_server(project, log=log)
-        self.wait_project_http(project, log=log)
         self.log(log, "Désinstallation terminée.")
         self.log(log, f"URL Odoo: {self.project_url(project)}")
 

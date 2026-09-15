@@ -2368,6 +2368,45 @@ def neutralize_database_job(job, project, db_name):
     project_service().run_odoo_neutralize_command(project, db_name, log=job.add)
 
 
+def validate_admin_password(password):
+    password = str(password or "")
+    if not password.strip():
+        raise ValueError("Saisis le nouveau mot de passe administrateur.")
+    if len(password) > 128:
+        raise ValueError("Le mot de passe administrateur ne doit pas dépasser 128 caractères.")
+    if any(ord(char) < 32 for char in password):
+        raise ValueError("Le mot de passe administrateur contient des caractères non autorisés.")
+    return password
+
+
+def existing_odoo_database(project, db_name):
+    project = validate_project(project)
+    db_name = validate_odoo_db(db_name)
+    if db_name not in list_databases_for(project):
+        raise ValueError("La base Odoo sélectionnée n'existe plus dans PostgreSQL.")
+    return project, db_name
+
+
+def reset_module_translations_job(job, project, db_name, modules):
+    module_command_job(job, "--update-module", project, db_name, modules, overwrite_translations=True)
+
+
+def update_module_list_job(job, project, db_name):
+    project, db_name = existing_odoo_database(project, db_name)
+    project_service().run_odoo_update_module_list(project, db_name, log=job.add)
+    clear_project_module_cache(project)
+
+
+def regenerate_assets_job(job, project, db_name):
+    project, db_name = existing_odoo_database(project, db_name)
+    project_service().run_odoo_regenerate_assets(project, db_name, log=job.add)
+
+
+def reset_admin_password_job(job, project, db_name, password):
+    project, db_name = existing_odoo_database(project, db_name)
+    project_service().run_odoo_reset_admin_password(project, db_name, validate_admin_password(password), log=job.add)
+
+
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -3055,7 +3094,7 @@ def install_socle_job(job, project, db_name, presets):
     module_command_job(job, "--install-module", project, db_name, ",".join(pending))
 
 
-def module_command_job(job, flag, project, db_name, modules):
+def module_command_job(job, flag, project, db_name, modules, overwrite_translations=False):
     project = validate_project(project)
     db_name = validate_odoo_db(db_name)
     module_names = [name.strip() for name in validate_modules(modules).split(",") if name.strip()]
@@ -3082,6 +3121,7 @@ def module_command_job(job, flag, project, db_name, modules):
         ",".join(module_names),
         option="-i" if flag == "--install-module" else "-u",
         log=job.add,
+        overwrite_translations=overwrite_translations,
     )
 
 
@@ -4284,6 +4324,44 @@ class Handler(BaseHTTPRequestHandler):
                     f"Neutraliser {db_name}",
                     neutralize_database_job,
                     (project, db_name),
+                    project=project,
+                )
+            elif action == "reset_module_translations":
+                project = validate_project(payload.get("project", ""))
+                db_name = validate_odoo_db(payload.get("db", ""))
+                modules = validate_modules(payload.get("modules", ""))
+                job = Job(
+                    f"Réinitialiser les traductions de {modules} sur {db_name}",
+                    reset_module_translations_job,
+                    (project, db_name, modules),
+                    project=project,
+                )
+            elif action == "update_module_list":
+                project = validate_project(payload.get("project", ""))
+                db_name = validate_odoo_db(payload.get("db", ""))
+                job = Job(
+                    f"Actualiser la liste des modules de {db_name}",
+                    update_module_list_job,
+                    (project, db_name),
+                    project=project,
+                )
+            elif action == "regenerate_assets":
+                project = validate_project(payload.get("project", ""))
+                db_name = validate_odoo_db(payload.get("db", ""))
+                job = Job(
+                    f"Régénérer les assets de {db_name}",
+                    regenerate_assets_job,
+                    (project, db_name),
+                    project=project,
+                )
+            elif action == "reset_admin_password":
+                project = validate_project(payload.get("project", ""))
+                db_name = validate_odoo_db(payload.get("db", ""))
+                password = validate_admin_password(payload.get("password"))
+                job = Job(
+                    f"Réinitialiser le mot de passe admin de {db_name}",
+                    reset_admin_password_job,
+                    (project, db_name, password),
                     project=project,
                 )
             elif action == "delete_project":

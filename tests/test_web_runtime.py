@@ -1215,6 +1215,54 @@ class DatabaseNeutralizationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "n'existe plus"):
             web.neutralize_database_job(job, "DEMO", "demo")
 
+    @patch("odoo_manager_web.normalize_module_layout_for_action")
+    @patch("odoo_manager_web.project_service")
+    @patch("odoo_manager_web.validate_project", return_value="DEMO")
+    def test_translation_reset_updates_modules_with_i18n_overwrite(self, _validate_project, project_service, _normalize):
+        job = self.LogJob()
+
+        web.reset_module_translations_job(job, "DEMO", "demo", "sale_custom,stock_custom")
+
+        project_service.return_value.run_odoo_module_command.assert_called_once_with(
+            "DEMO",
+            "demo",
+            "sale_custom,stock_custom",
+            option="-u",
+            log=job.add,
+            overwrite_translations=True,
+        )
+
+    @patch("odoo_manager_web.clear_project_module_cache")
+    @patch("odoo_manager_web.list_databases_for", return_value=["postgres", "demo"])
+    @patch("odoo_manager_web.project_service")
+    @patch("odoo_manager_web.validate_project", return_value="DEMO")
+    def test_module_list_and_assets_jobs_delegate_to_odoo_shell(
+        self, _validate_project, project_service, _list_databases, clear_cache,
+    ):
+        job = self.LogJob()
+
+        web.update_module_list_job(job, "DEMO", "demo")
+        web.regenerate_assets_job(job, "DEMO", "demo")
+
+        project_service.return_value.run_odoo_update_module_list.assert_called_once_with("DEMO", "demo", log=job.add)
+        project_service.return_value.run_odoo_regenerate_assets.assert_called_once_with("DEMO", "demo", log=job.add)
+        clear_cache.assert_called_once_with("DEMO")
+
+    @patch("odoo_manager_web.list_databases_for", return_value=["postgres", "demo"])
+    @patch("odoo_manager_web.project_service")
+    @patch("odoo_manager_web.validate_project", return_value="DEMO")
+    def test_admin_password_reset_job_validates_password(self, _validate_project, project_service, _list_databases):
+        job = self.LogJob()
+
+        web.reset_admin_password_job(job, "DEMO", "demo", "admin")
+
+        project_service.return_value.run_odoo_reset_admin_password.assert_called_once_with(
+            "DEMO", "demo", "admin", log=job.add,
+        )
+        for invalid in ("", "   ", "a\nb", "x" * 129):
+            with self.assertRaises(ValueError):
+                web.validate_admin_password(invalid)
+
 
 if __name__ == "__main__":
     unittest.main()

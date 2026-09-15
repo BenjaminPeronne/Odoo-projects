@@ -433,6 +433,70 @@ class ProjectServiceTests(unittest.TestCase):
         self.assertIn("installed.button_immediate_uninstall()", uninstall[-1])
         self.assertTrue(any("Redémarrage du serveur Odoo" in line for line in logs))
 
+    def test_module_translation_reset_adds_i18n_overwrite_before_stop_after_init(self):
+        self.runner.statuses = {"odoo-DEMO": "running", "postgresql-DEMO": "running"}
+        self.runner.odoo_server_running = False
+        self.runner.odoo_port_ready = True
+        logs = []
+
+        self.service.run_odoo_module_command(
+            "DEMO", "PROTEX_20812", "sale_custom", option="-u", log=logs.append, overwrite_translations=True,
+        )
+
+        commands = [command for command, _cwd in self.runner.streams]
+        update = next(command for command in commands if "--stop-after-init" in command)
+        self.assertEqual(update[-4:], ["-u", "sale_custom", "--i18n-overwrite", "--stop-after-init"])
+        self.assertTrue(any(
+            "Équivalent: odoo -d PROTEX_20812 -u sale_custom --i18n-overwrite --stop-after-init" in line
+            for line in logs
+        ))
+
+    def test_module_list_update_runs_update_list_in_odoo_shell(self):
+        self.runner.statuses = {"odoo-DEMO": "running", "postgresql-DEMO": "running"}
+        self.runner.odoo_server_running = False
+        self.runner.odoo_port_ready = True
+        logs = []
+
+        self.service.run_odoo_update_module_list("DEMO", "PROTEX_20812", log=logs.append)
+
+        commands = [command for command, _cwd in self.runner.streams]
+        shell = next(command for command in commands if "odoo shell" in command[-1])
+        self.assertIn("ODOO_DB_NAME=PROTEX_20812", shell)
+        self.assertIn('env["ir.module.module"].update_list()', shell[-1])
+        self.assertTrue(any("Redémarrage du serveur Odoo" in line for line in logs))
+
+    def test_asset_regeneration_unlinks_web_asset_attachments(self):
+        self.runner.statuses = {"odoo-DEMO": "running", "postgresql-DEMO": "running"}
+        self.runner.odoo_server_running = False
+        self.runner.odoo_port_ready = True
+
+        self.service.run_odoo_regenerate_assets("DEMO", "PROTEX_20812", log=lambda _line: None)
+
+        commands = [command for command, _cwd in self.runner.streams]
+        shell = next(command for command in commands if "odoo shell" in command[-1])
+        self.assertIn('("url", "=like", "/web/assets/%")', shell[-1])
+        self.assertIn("attachments.unlink()", shell[-1])
+
+    def test_admin_password_reset_passes_secret_by_env_and_masks_it_in_logs(self):
+        self.runner.statuses = {"odoo-DEMO": "running", "postgresql-DEMO": "running"}
+        self.runner.odoo_server_running = False
+        self.runner.odoo_port_ready = True
+        logs = []
+
+        self.service.run_odoo_reset_admin_password("DEMO", "PROTEX_20812", "S3cret-Local", log=logs.append)
+
+        commands = [command for command, _cwd in self.runner.streams]
+        shell = next(command for command in commands if "odoo shell" in command[-1])
+        self.assertIn("ODOO_ADMIN_PASSWORD=S3cret-Local", shell)
+        self.assertNotIn("S3cret-Local", shell[-1])
+        self.assertIn('env.ref("base.user_admin"', shell[-1])
+        self.assertFalse(any("S3cret-Local" in line for line in logs))
+        self.assertTrue(any("ODOO_ADMIN_PASSWORD=********" in line for line in logs))
+
+    def test_admin_password_reset_rejects_empty_password(self):
+        with self.assertRaises(ValueError):
+            self.service.run_odoo_reset_admin_password("DEMO", "PROTEX_20812", "", log=lambda _line: None)
+
     def test_neutralization_uses_odoo_engine_verifies_guards_and_restarts_server(self):
         self.runner.statuses = {
             "odoo-DEMO": "running",

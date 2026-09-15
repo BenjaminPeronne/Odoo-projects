@@ -21,10 +21,13 @@ import {
   Heart,
   Info,
   KeyRound,
+  Languages,
+  ListRestart,
   Loader2,
   Logs,
   MoreHorizontal,
   PackageX,
+  Paintbrush,
   Play,
   PlusCircle,
   RefreshCcw,
@@ -868,6 +871,9 @@ export default function Home() {
   const [allowMissingFilestore, setAllowMissingFilestore] = useState(false);
   const [checkingUpdatePrerequisites, setCheckingUpdatePrerequisites] = useState(false);
   const [uninstallDialogOpen, setUninstallDialogOpen] = useState(false);
+  const [pendingTranslationResetModules, setPendingTranslationResetModules] = useState<string[]>([]);
+  const [adminPasswordOpen, setAdminPasswordOpen] = useState(false);
+  const [adminPassword, setAdminPassword] = useState("admin");
   const [deleteCodeDialogOpen, setDeleteCodeDialogOpen] = useState(false);
   const [replaceZipModules, setReplaceZipModules] = useState(true);
   const [zipFile, setZipFile] = useState<File | null>(null);
@@ -2089,6 +2095,46 @@ export default function Home() {
     }
   }
 
+  function requestTranslationReset(moduleNames: string[]) {
+    const installed = moduleNames.filter((name) => modules.find((module) => module.name === name)?.state === "installed");
+    if (!installed.length) {
+      pushToast("error", "Sélectionne au moins un module installé.");
+      return;
+    }
+    setPendingTranslationResetModules(installed);
+  }
+
+  async function confirmTranslationReset() {
+    const db = selectedDatabaseOrNotify("la réinitialisation des traductions");
+    if (!db || !selectedProject || !pendingTranslationResetModules.length) return;
+    const job = await createJob("reset_module_translations", {
+      project: selectedProject.name,
+      db,
+      modules: pendingTranslationResetModules.join(","),
+    });
+    if (job) setPendingTranslationResetModules([]);
+  }
+
+  async function updateOdooModuleList() {
+    const db = selectedDatabaseOrNotify("l’actualisation de la liste des modules Odoo");
+    if (!db || !selectedProject) return;
+    const job = await createJob("update_module_list", { project: selectedProject.name, db });
+    if (job) schedule(refreshModules, 2500);
+  }
+
+  async function regenerateOdooAssets() {
+    const db = selectedDatabaseOrNotify("la régénération des assets");
+    if (!db || !selectedProject) return;
+    await createJob("regenerate_assets", { project: selectedProject.name, db });
+  }
+
+  async function confirmAdminPasswordReset() {
+    const db = selectedDatabaseOrNotify("la réinitialisation du mot de passe admin");
+    if (!db || !selectedProject || !adminPassword.trim()) return;
+    const job = await createJob("reset_admin_password", { project: selectedProject.name, db, password: adminPassword });
+    if (job) setAdminPasswordOpen(false);
+  }
+
   function requestDeleteCode(moduleNames: string[]) {
     const removable = moduleNames.filter((name) => {
       const module = modules.find((candidate) => candidate.name === name);
@@ -2537,7 +2583,7 @@ export default function Home() {
             </div>
             <Badge variant="default">{selectedModuleList.length} module(s)</Badge>
           </div>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-5">
             <Button
               variant="success"
               disabled={!selectedInstallableModuleList.length || !canUseDb || loading}
@@ -2552,6 +2598,14 @@ export default function Home() {
             >
               <RefreshCcw className="h-4 w-4" />
               Mettre à jour ({selectedInstalledModuleList.length})
+            </Button>
+            <Button
+              variant="outline"
+              disabled={!selectedInstalledModuleList.length || !canUseDb || loading}
+              onClick={() => requestTranslationReset(selectedInstalledModuleList)}
+            >
+              <Languages className="h-4 w-4" />
+              Traductions ({selectedInstalledModuleList.length})
             </Button>
             <Button
               className="border-red-300 text-red-700 hover:border-red-400 hover:bg-red-50 hover:text-red-800 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-950/60"
@@ -3149,6 +3203,21 @@ export default function Home() {
                               <ShieldCheck className="h-4 w-4" />
                               Neutraliser et contrôler
                             </Button>
+                            <Button
+                              variant="outline"
+                              disabled={!canUseDb || loading}
+                              onClick={regenerateOdooAssets}
+                              title="Supprime les bundles CSS/JS compilés ; Odoo redémarre et les reconstruit au prochain chargement."
+                            >
+                              <Paintbrush className="h-4 w-4" />
+                              Régénérer les assets
+                            </Button>
+                            {settings?.show_technical_details && (
+                              <Button variant="outline" disabled={!canUseDb || loading} onClick={() => setAdminPasswordOpen(true)}>
+                                <KeyRound className="h-4 w-4" />
+                                Mot de passe admin
+                              </Button>
+                            )}
                             {selectedProject && (
                               <Button variant="outline" onClick={() => openUrl(selectedProject.database_manager_url)}>
                                 <ExternalLink className="h-4 w-4" />
@@ -3297,6 +3366,22 @@ export default function Home() {
                               <ShieldCheck className="h-4 w-4" />
                               Neutraliser et contrôler
                             </Button>
+                            <Button
+                              className="w-full"
+                              variant="outline"
+                              disabled={!canUseDb || loading}
+                              onClick={regenerateOdooAssets}
+                              title="Supprime les bundles CSS/JS compilés ; Odoo redémarre et les reconstruit au prochain chargement."
+                            >
+                              <Paintbrush className="h-4 w-4" />
+                              Régénérer les assets
+                            </Button>
+                            {settings?.show_technical_details && (
+                              <Button className="w-full" variant="outline" disabled={!canUseDb || loading} onClick={() => setAdminPasswordOpen(true)}>
+                                <KeyRound className="h-4 w-4" />
+                                Réinitialiser le mot de passe admin
+                              </Button>
+                            )}
                           </CardContent>
                         </Card>
 
@@ -3359,6 +3444,15 @@ export default function Home() {
                               title="Actualiser la liste des modules"
                             >
                               <RefreshCcw className={cn("h-4 w-4", loadingModules && "animate-spin")} />
+                            </Button>
+                            <Button
+                              variant="outline"
+                              onClick={updateOdooModuleList}
+                              disabled={!selectedProjectReady || !canUseDb || loading}
+                              title="Odoo relit les dossiers addons et enregistre les nouveaux modules (Applications › Mettre à jour la liste)."
+                            >
+                              <ListRestart className="h-4 w-4" />
+                              Scanner les addons
                             </Button>
                             <Button variant="outline" onClick={openSocleDialog} disabled={!selectedProjectReady || loading}>
                               <Boxes className="h-4 w-4" />
@@ -3496,6 +3590,12 @@ export default function Home() {
                                       <DropdownMenu.Content align="end" className="min-w-52">
                                         <DropdownMenu.Label>Actions sur {module.name}</DropdownMenu.Label>
                                         {module.state === "installed" && (
+                                          <DropdownMenu.Item disabled={!canUseDb} onSelect={() => requestTranslationReset([module.name])}>
+                                            <Languages className="h-4 w-4" />
+                                            Réinitialiser les traductions
+                                          </DropdownMenu.Item>
+                                        )}
+                                        {module.state === "installed" && (
                                           <DropdownMenu.Item color="red" disabled={!canUseDb} onSelect={() => requestUninstall([module.name])}>
                                             <PackageX className="h-4 w-4" />
                                             Désinstaller de la base
@@ -3568,6 +3668,16 @@ export default function Home() {
                         <Button className="w-full" variant="outline" onClick={() => setZipDialogOpen(true)} disabled={!selectedProjectReady}>
                           <FileArchive className="h-4 w-4" />
                           Ajouter un pauvre zip
+                        </Button>
+                        <Button
+                          className="w-full"
+                          variant="outline"
+                          onClick={updateOdooModuleList}
+                          disabled={!selectedProjectReady || !canUseDb || loading}
+                          title="Odoo relit les dossiers addons et enregistre les nouveaux modules (Applications › Mettre à jour la liste)."
+                        >
+                          <ListRestart className="h-4 w-4" />
+                          Scanner les addons
                         </Button>
                       </div>
                     </CardHeader>
@@ -3683,6 +3793,12 @@ export default function Home() {
                                       </DropdownMenu.Trigger>
                                       <DropdownMenu.Content align="end" className="min-w-52">
                                         <DropdownMenu.Label>Actions sur {module.name}</DropdownMenu.Label>
+                                        {module.state === "installed" && (
+                                          <DropdownMenu.Item disabled={!canUseDb} onSelect={() => requestTranslationReset([module.name])}>
+                                            <Languages className="h-4 w-4" />
+                                            Réinitialiser les traductions
+                                          </DropdownMenu.Item>
+                                        )}
                                         {module.state === "installed" && (
                                           <DropdownMenu.Item color="red" disabled={!canUseDb} onSelect={() => requestUninstall([module.name])}>
                                             <PackageX className="h-4 w-4" />
@@ -5127,6 +5243,69 @@ export default function Home() {
             >
               {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
               {updateScope === "imported" && detectedImportedModules.length ? "Traiter les modules importés" : "Lancer la MAJ complète"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={pendingTranslationResetModules.length > 0}
+        onOpenChange={(open) => {
+          if (!open) setPendingTranslationResetModules([]);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Réinitialiser les traductions</DialogTitle>
+            <DialogDescription>
+              Les modules sont mis à jour sur {selectedDb || "la base sélectionnée"} avec <code className="text-xs">--i18n-overwrite</code> :
+              les traductions sont rechargées depuis les fichiers <code className="text-xs">.po</code> du code.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/45 dark:text-amber-100">
+            Les traductions modifiées à la main dans Odoo pour ces modules seront écrasées.
+          </div>
+          <div className="max-h-52 overflow-auto rounded-md border bg-muted/40 p-3 font-mono text-xs">
+            {pendingTranslationResetModules.map((name) => (
+              <div key={name}>{name}</div>
+            ))}
+          </div>
+          <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+            <Button variant="outline" onClick={() => setPendingTranslationResetModules([])}>Annuler</Button>
+            <Button disabled={!canUseDb || loading} onClick={confirmTranslationReset}>
+              <Languages className="h-4 w-4" />
+              Réinitialiser ({pendingTranslationResetModules.length})
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={adminPasswordOpen} onOpenChange={setAdminPasswordOpen}>
+        <DialogContent className="space-y-5">
+          <DialogHeader>
+            <DialogTitle>Mot de passe administrateur · {selectedDb || "base"}</DialogTitle>
+            <DialogDescription>
+              Remplace le mot de passe de l’utilisateur <code className="text-xs">base.user_admin</code> et le réactive si besoin.
+              Odoo sera arrêté brièvement. L’identifiant de connexion est affiché dans les logs de la tâche.
+            </DialogDescription>
+          </DialogHeader>
+          <label className="block space-y-2 text-sm">
+            <span>Nouveau mot de passe</span>
+            <Input
+              value={adminPassword}
+              autoComplete="off"
+              maxLength={128}
+              onChange={(event) => setAdminPassword(event.target.value)}
+            />
+          </label>
+          <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/45 dark:text-amber-100">
+            À utiliser uniquement sur une copie locale ou une base de test.
+          </div>
+          <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+            <Button variant="outline" onClick={() => setAdminPasswordOpen(false)}>Annuler</Button>
+            <Button disabled={!canUseDb || loading || !adminPassword.trim()} onClick={confirmAdminPasswordReset}>
+              <KeyRound className="h-4 w-4" />
+              Réinitialiser
             </Button>
           </div>
         </DialogContent>
