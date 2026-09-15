@@ -1251,6 +1251,21 @@ class DatabaseNeutralizationTests(unittest.TestCase):
     @patch("odoo_manager_web.list_databases_for", return_value=["postgres", "demo"])
     @patch("odoo_manager_web.project_service")
     @patch("odoo_manager_web.validate_project", return_value="DEMO")
+    def test_all_translations_reset_job_validates_language_codes(self, _validate_project, project_service, _list_databases):
+        job = self.LogJob()
+
+        web.reset_all_translations_job(job, "DEMO", "demo", "fr_FR,sr@latin,fr_FR")
+
+        project_service.return_value.run_odoo_reset_all_translations.assert_called_once_with(
+            "DEMO", "demo", ["fr_FR", "sr@latin"], log=job.add,
+        )
+        self.assertEqual([], web.validate_language_codes(""))
+        with self.assertRaisesRegex(ValueError, "invalide"):
+            web.validate_language_codes("fr_FR;rm -rf")
+
+    @patch("odoo_manager_web.list_databases_for", return_value=["postgres", "demo"])
+    @patch("odoo_manager_web.project_service")
+    @patch("odoo_manager_web.validate_project", return_value="DEMO")
     def test_admin_password_reset_job_validates_password(self, _validate_project, project_service, _list_databases):
         job = self.LogJob()
 

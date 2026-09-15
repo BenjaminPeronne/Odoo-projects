@@ -493,6 +493,22 @@ class ProjectServiceTests(unittest.TestCase):
         self.assertFalse(any("S3cret-Local" in line for line in logs))
         self.assertTrue(any("ODOO_ADMIN_PASSWORD=********" in line for line in logs))
 
+    def test_all_translations_reset_reloads_terms_of_installed_modules_without_update(self):
+        self.runner.statuses = {"odoo-DEMO": "running", "postgresql-DEMO": "running"}
+        self.runner.odoo_server_running = False
+        self.runner.odoo_port_ready = True
+        logs = []
+
+        self.service.run_odoo_reset_all_translations("DEMO", "PROTEX_20812", ["fr_FR"], log=logs.append)
+
+        commands = [command for command, _cwd in self.runner.streams]
+        shell = next(command for command in commands if "odoo shell" in command[-1])
+        self.assertIn("ODOO_LANGUAGES=fr_FR", shell)
+        self.assertIn('search([("state", "=", "installed")])', shell[-1])
+        self.assertIn("modules._update_translations(languages, overwrite=True)", shell[-1])
+        self.assertFalse(any("--stop-after-init" in command for command in commands))
+        self.assertTrue(any("Langue(s): fr_FR" in line for line in logs))
+
     def test_admin_password_reset_rejects_empty_password(self):
         with self.assertRaises(ValueError):
             self.service.run_odoo_reset_admin_password("DEMO", "PROTEX_20812", "", log=lambda _line: None)

@@ -2455,6 +2455,29 @@ def regenerate_assets_job(job, project, db_name):
     project_service().run_odoo_regenerate_assets(project, db_name, log=job.add)
 
 
+ODOO_LANGUAGE_CODE_RE = re.compile(r"^[a-z]{2,3}(?:_[A-Z]{2})?(?:@[a-z]+)?$")
+
+
+def validate_language_codes(value):
+    codes = list(dict.fromkeys(code.strip() for code in str(value or "").split(",") if code.strip()))
+    invalid = [code for code in codes if not ODOO_LANGUAGE_CODE_RE.fullmatch(code)]
+    if invalid:
+        raise ValueError("Code(s) de langue invalide(s) : " + ", ".join(invalid))
+    return codes
+
+
+def installed_languages(project, db_name):
+    lines = db_query_lines(project, db_name, "select code, name from res_lang where active order by name;")
+    return [{"code": code, "name": name} for code, _, name in (line.partition("|") for line in lines)]
+
+
+def reset_all_translations_job(job, project, db_name, languages):
+    project, db_name = existing_odoo_database(project, db_name)
+    project_service().run_odoo_reset_all_translations(
+        project, db_name, validate_language_codes(languages), log=job.add,
+    )
+
+
 def reset_admin_password_job(job, project, db_name, password):
     project, db_name = existing_odoo_database(project, db_name)
     project_service().run_odoo_reset_admin_password(project, db_name, validate_admin_password(password), log=job.add)
@@ -4074,6 +4097,12 @@ class Handler(BaseHTTPRequestHandler):
                     validate_db(db_name)
                 return json_response(self, {"modules": modules_for(project, db_name)})
 
+            match = re.match(r"^/api/projects/([^/]+)/languages$", path)
+            if match:
+                project = validate_project(urllib.parse.unquote(match.group(1)))
+                db_name = validate_odoo_db(urllib.parse.parse_qs(parsed.query).get("db", [""])[0])
+                return json_response(self, {"languages": installed_languages(project, db_name)})
+
             match = re.match(r"^/api/projects/([^/]+)/socle$", path)
             if match:
                 project = validate_project(urllib.parse.unquote(match.group(1)))
@@ -4582,6 +4611,16 @@ class Handler(BaseHTTPRequestHandler):
                     f"Réinitialiser les traductions de {modules} sur {db_name}",
                     reset_module_translations_job,
                     (project, db_name, modules),
+                    project=project,
+                )
+            elif action == "reset_all_translations":
+                project = validate_project(payload.get("project", ""))
+                db_name = validate_odoo_db(payload.get("db", ""))
+                languages = validate_language_codes(payload.get("languages", ""))
+                job = Job(
+                    f"Réinitialiser toutes les traductions de {db_name}",
+                    reset_all_translations_job,
+                    (project, db_name, ",".join(languages)),
                     project=project,
                 )
             elif action == "update_module_list":

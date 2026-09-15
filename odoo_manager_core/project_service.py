@@ -1023,6 +1023,40 @@ print(f"{count} bundle(s) d'assets supprimé(s), régénérés au prochain charg
         self.log(log, "Assets purgés. Recharge la page Odoo (Ctrl+Maj+R) pour les reconstruire.")
         self.log(log, f"URL Odoo: {self.project_url(project)}")
 
+    def run_odoo_reset_all_translations(self, project, db_name, languages=(), log=None):
+        languages = [code for code in languages if code]
+        self.ensure_odoo_containers_ready(project, log=log)
+        self.log(log, "")
+        self.log(log, "Réinitialisation des traductions de tous les modules installés")
+        self.log(log, f"Projet: {project}")
+        self.log(log, f"Base: {db_name}")
+        self.log(log, "Langue(s): " + (", ".join(languages) if languages else "toutes les langues installées"))
+        # Même traitement que le wizard Odoo « Langues › Mettre à jour » avec
+        # « Écraser les termes existants » : termes .po seulement, sans -u all.
+        script = """import os
+
+installed = [code for code, _name in env["res.lang"].get_installed()]
+languages = [code for code in os.environ.get("ODOO_LANGUAGES", "").split(",") if code] or installed
+unknown = sorted(set(languages) - set(installed))
+if unknown:
+    raise SystemExit("Langue(s) non installée(s) dans la base : " + ", ".join(unknown))
+modules = env["ir.module.module"].search([("state", "=", "installed")])
+print(f"Rechargement des termes ({', '.join(languages)}) pour {len(modules)} module(s) installé(s)...")
+modules._update_translations(languages, overwrite=True)
+env.cr.commit()
+print("Traductions réinitialisées depuis les fichiers .po.")
+"""
+        self.run_odoo_shell_script(
+            project,
+            db_name,
+            script,
+            "La réinitialisation des traductions a échoué",
+            env={"ODOO_LANGUAGES": ",".join(languages)},
+            log=log,
+        )
+        self.log(log, "Traductions de tous les modules réinitialisées.")
+        self.log(log, f"URL Odoo: {self.project_url(project)}")
+
     def run_odoo_reset_admin_password(self, project, db_name, password, log=None):
         if not password:
             raise ValueError("Le nouveau mot de passe administrateur est vide.")

@@ -134,8 +134,6 @@ type ManagerSettings = {
   api_port_actual?: number;
   start_project_before_open: boolean;
   show_technical_details: boolean;
-  bases_layout: "classic" | "compact";
-  modules_layout: "classic" | "compact";
   interface_icon: InterfaceIcon;
   interface_layout: "classic" | "refined";
   onboarding_completed: boolean;
@@ -692,8 +690,6 @@ function fallbackManagerSettings(
     api_port_actual: current?.api_port_actual,
     start_project_before_open: current?.start_project_before_open ?? false,
     show_technical_details: current?.show_technical_details ?? false,
-    bases_layout: current?.bases_layout === "compact" ? "compact" : "classic",
-    modules_layout: current?.modules_layout === "compact" ? "compact" : "classic",
     interface_icon: current?.interface_icon === "local" ? "local" : "manager",
     interface_layout: current?.interface_layout === "refined" ? "refined" : "classic",
     onboarding_completed: current?.onboarding_completed ?? false,
@@ -902,6 +898,9 @@ export default function Home() {
   const [uninstallDialogOpen, setUninstallDialogOpen] = useState(false);
   const [pendingTranslationResetModules, setPendingTranslationResetModules] = useState<string[]>([]);
   const [adminPasswordOpen, setAdminPasswordOpen] = useState(false);
+  const [allTranslationsOpen, setAllTranslationsOpen] = useState(false);
+  const [translationLanguages, setTranslationLanguages] = useState<{ code: string; name: string }[] | null>(null);
+  const [selectedTranslationLanguages, setSelectedTranslationLanguages] = useState<Set<string>>(new Set());
   const [adminPassword, setAdminPassword] = useState("admin");
   const [deleteCodeDialogOpen, setDeleteCodeDialogOpen] = useState(false);
   const [replaceZipModules, setReplaceZipModules] = useState(true);
@@ -1050,10 +1049,8 @@ export default function Home() {
       ))
       .filter((module) => moduleOriginFilter === "all" || normalizedModuleOrigin(module.origin, module.source_path || module.path) === moduleOriginFilter);
   }, [deferredModuleSearch, modules, moduleFilter, moduleOriginFilter]);
-  const compactBases = settings?.bases_layout === "compact";
-  const compactModules = settings?.modules_layout === "compact";
   const refinedInterface = settings?.interface_layout === "refined";
-  const modulesPerPage = compactModules ? 20 : 50;
+  const modulesPerPage = 50;
   const modulePageCount = Math.max(1, Math.ceil(filteredModules.length / modulesPerPage));
   const visibleModules = useMemo(() => {
     const start = (modulePage - 1) * modulesPerPage;
@@ -2162,6 +2159,37 @@ export default function Home() {
       modules: pendingTranslationResetModules.join(","),
     });
     if (job) setPendingTranslationResetModules([]);
+  }
+
+  async function openAllTranslationsReset() {
+    const db = selectedDatabaseOrNotify("la réinitialisation des traductions");
+    if (!db || !selectedProject) return;
+    setTranslationLanguages(null);
+    setSelectedTranslationLanguages(new Set());
+    setAllTranslationsOpen(true);
+    try {
+      const params = new URLSearchParams({ db });
+      const result = await api<{ languages: { code: string; name: string }[] }>(
+        `/api/projects/${encodeURIComponent(selectedProject.name)}/languages?${params}`,
+      );
+      setTranslationLanguages(result.languages);
+      setSelectedTranslationLanguages(new Set(result.languages.map((language) => language.code)));
+    } catch (err) {
+      setTranslationLanguages([]);
+      pushToast("error", err instanceof Error ? err.message : "Impossible de lire les langues installées.");
+    }
+  }
+
+  async function confirmAllTranslationsReset() {
+    const db = selectedDatabaseOrNotify("la réinitialisation des traductions");
+    if (!db || !selectedProject || !selectedTranslationLanguages.size) return;
+    const allSelected = selectedTranslationLanguages.size === translationLanguages?.length;
+    const job = await createJob("reset_all_translations", {
+      project: selectedProject.name,
+      db,
+      languages: allSelected ? "" : Array.from(selectedTranslationLanguages).join(","),
+    });
+    if (job) setAllTranslationsOpen(false);
   }
 
   async function updateOdooModuleList() {
@@ -3294,6 +3322,10 @@ export default function Home() {
                               <Paintbrush className="h-4 w-4" />
                               Régénérer les assets
                             </Button>
+                            <Button variant="outline" disabled={!canUseDb || loading} onClick={openAllTranslationsReset}>
+                              <Languages className="h-4 w-4" />
+                              Réinitialiser les traductions
+                            </Button>
                             {settings?.show_technical_details && (
                               <Button variant="outline" disabled={!canUseDb || loading} onClick={() => setAdminPasswordOpen(true)}>
                                 <KeyRound className="h-4 w-4" />
@@ -3361,7 +3393,7 @@ export default function Home() {
                       </div>
                     </div>
                   ) : (
-                    <div className={cn("grid min-w-0 gap-4", !compactBases && "xl:grid-cols-[minmax(0,1fr)_400px]")}>
+                    <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_400px] xl:items-start">
                       <Card>
                         <CardHeader>
                           <CardTitle>Bases Odoo</CardTitle>
@@ -3398,7 +3430,7 @@ export default function Home() {
                           )}
                         </CardContent>
                       </Card>
-                      <div className={cn("grid min-w-0 content-start gap-4", compactBases && "items-start md:grid-cols-2 2xl:grid-cols-3")}>
+                      <div className="grid min-w-0 content-start gap-4">
                         <Card>
                           <CardHeader>
                             <CardTitle>Créer une base Odoo</CardTitle>
@@ -3458,6 +3490,10 @@ export default function Home() {
                               <Paintbrush className="h-4 w-4" />
                               Régénérer les assets
                             </Button>
+                            <Button className="w-full" variant="outline" disabled={!canUseDb || loading} onClick={openAllTranslationsReset}>
+                              <Languages className="h-4 w-4" />
+                              Réinitialiser les traductions
+                            </Button>
                             {settings?.show_technical_details && (
                               <Button className="w-full" variant="outline" disabled={!canUseDb || loading} onClick={() => setAdminPasswordOpen(true)}>
                                 <KeyRound className="h-4 w-4" />
@@ -3467,7 +3503,7 @@ export default function Home() {
                           </CardContent>
                         </Card>
 
-                        <Card className={cn(compactBases && "md:col-span-2 2xl:col-span-1")}>
+                        <Card>
                           <CardHeader>
                             <div className="flex items-start justify-between gap-3">
                               <div className="min-w-0">
@@ -3775,7 +3811,7 @@ export default function Home() {
                           {showModuleLocations && <div>Emplacements</div>}
                           <div className="text-right">Actions</div>
                         </div>
-                        <div className={cn("min-w-0", !compactModules && "max-h-[min(62vh,720px)] overflow-y-auto")}>
+                        <div className="max-h-[min(62vh,720px)] min-w-0 overflow-y-auto">
                           {visibleModules.length ? (
                             visibleModules.map((module) => {
                               const sourcePath = module.source_path || module.path;
@@ -4569,31 +4605,6 @@ export default function Home() {
                   ))}
                 </div>
               </div>
-
-              {settingsDraft.interface_layout !== "refined" && (
-                <div className="grid gap-3 rounded-md border p-3">
-                  <div className="text-sm font-medium">Affichage des pages</div>
-                  <p className="text-xs text-muted-foreground">L’affichage classique est utilisé par défaut. Tu peux choisir chaque page séparément.</p>
-                  {([
-                    ["bases_layout", "Bases", "Liste à gauche et actions à droite", "Liste en haut et actions en dessous"],
-                    ["modules_layout", "Modules", "50 lignes par page, défilement dans la liste", "20 lignes par page, défilement de la page"],
-                  ] as const).map(([key, title, classicDescription, compactDescription]) => (
-                    <div key={key} className="grid gap-2">
-                      <div className="text-sm font-medium">{title}</div>
-                      <div className="grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label={`Affichage ${title}`}>
-                        {(["classic", "compact"] as const).map((value) => (
-                          <InteractiveCard key={value} role="radio" aria-checked={(settingsDraft[key] ?? "classic") === value}
-                            className={cn("p-3 text-left", (settingsDraft[key] ?? "classic") === value && "border-primary bg-primary/10")}
-                            onClick={() => setSettingsDraft({ ...settingsDraft, [key]: value })}>
-                            <span className="block text-sm font-medium">{value === "classic" ? "Classique (ancien)" : "Compact (nouveau)"}</span>
-                            <span className="mt-1 block text-xs text-muted-foreground">{value === "classic" ? classicDescription : compactDescription}</span>
-                          </InteractiveCard>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
 
               <div className="grid gap-2">
                 <div>
@@ -5432,6 +5443,62 @@ export default function Home() {
             <Button disabled={!canUseDb || loading} onClick={confirmTranslationReset}>
               <Languages className="h-4 w-4" />
               Réinitialiser ({pendingTranslationResetModules.length})
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={allTranslationsOpen} onOpenChange={setAllTranslationsOpen}>
+        <DialogContent className="space-y-5">
+          <DialogHeader>
+            <DialogTitle>Réinitialiser les traductions · {selectedDb || "base"}</DialogTitle>
+            <DialogDescription>
+              Recharge les termes de <strong>tous les modules installés</strong> depuis leurs fichiers <code className="text-xs">.po</code>,
+              comme l’option « Écraser les termes existants » de Paramètres › Traductions › Langues. Les données et les vues ne sont
+              pas mises à jour. Odoo sera arrêté brièvement.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <div className="text-sm font-medium">Langues</div>
+            {translationLanguages === null ? (
+              <p className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Lecture des langues installées…
+              </p>
+            ) : translationLanguages.length ? (
+              <div className="grid gap-2 sm:grid-cols-2">
+                {translationLanguages.map((language) => (
+                  <label key={language.code} className="flex cursor-pointer items-center gap-2 rounded-md border p-2.5 text-sm hover:bg-muted/45">
+                    <Checkbox
+                      checked={selectedTranslationLanguages.has(language.code)}
+                      onCheckedChange={(checked) =>
+                        setSelectedTranslationLanguages((current) => {
+                          const next = new Set(current);
+                          if (checked === true) next.add(language.code);
+                          else next.delete(language.code);
+                          return next;
+                        })
+                      }
+                    />
+                    <span className="min-w-0">
+                      <span className="block truncate">{language.name}</span>
+                      <span className="block font-mono text-xs text-muted-foreground">{language.code}</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground">Aucune langue active trouvée dans la base.</p>
+            )}
+          </div>
+          <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/45 dark:text-amber-100">
+            Les traductions modifiées à la main dans Odoo seront écrasées pour les langues sélectionnées.
+          </div>
+          <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+            <Button variant="outline" onClick={() => setAllTranslationsOpen(false)}>Annuler</Button>
+            <Button disabled={!canUseDb || loading || !selectedTranslationLanguages.size} onClick={confirmAllTranslationsReset}>
+              <Languages className="h-4 w-4" />
+              Réinitialiser ({selectedTranslationLanguages.size} langue{selectedTranslationLanguages.size > 1 ? "s" : ""})
             </Button>
           </div>
         </DialogContent>
