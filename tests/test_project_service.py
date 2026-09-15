@@ -22,6 +22,7 @@ class FakeRunner:
         self.odoo_port_states = []
         self.odoo_init_commands = []
         self.stream_codes = []
+        self.stream_output = []
         self.compose_container_ids = []
         self.localtime_mounts = {}
         self.container_networks = {}
@@ -34,6 +35,9 @@ class FakeRunner:
         self.streams.append((list(command), Path(cwd) if cwd else None))
         if log:
             log("$ " + " ".join(command))
+            if self.stream_output and "--stop-after-init" in command:
+                for line in self.stream_output:
+                    log(line)
         code = self.stream_codes.pop(0) if self.stream_codes else 0
         self.missing_networks.update(self.networks_missing_after_stream)
         self.networks_missing_after_stream.clear()
@@ -339,6 +343,37 @@ class ProjectServiceTests(unittest.TestCase):
         )
         self.assertTrue(any("Équivalent: odoo -d PROTEX_20812 -u sale_custom --stop-after-init" in line for line in logs))
         self.assertTrue(any("Redémarrage du serveur Odoo" in line for line in logs))
+
+    def test_module_update_failure_reports_odoo_error_after_restart(self):
+        self.runner.statuses = {"odoo-DEMO": "running", "postgresql-DEMO": "running"}
+        self.runner.odoo_server_running = False
+        self.runner.odoo_port_ready = True
+        self.runner.stream_codes = [255]
+        self.runner.stream_output = [
+            "2026-09-15 ERROR demo odoo.modules: unable to load module",
+            "Traceback (most recent call last):",
+            "ModuleNotFoundError: No module named 'missing_dependency'",
+        ]
+        logs = []
+
+        with self.assertRaisesRegex(RuntimeError, "ModuleNotFoundError.*missing_dependency"):
+            self.service.run_odoo_module_command(
+                "DEMO", "demo", "all", option="-u", log=logs.append,
+            )
+
+        self.assertTrue(any("Redémarrage du serveur Odoo" in line for line in logs))
+        self.assertTrue(any("Échec de la commande Odoo (code 255)" in line for line in logs))
+
+    def test_module_update_failure_without_odoo_output_points_to_job_logs(self):
+        self.runner.statuses = {"odoo-DEMO": "running", "postgresql-DEMO": "running"}
+        self.runner.odoo_server_running = False
+        self.runner.odoo_port_ready = True
+        self.runner.stream_codes = [255]
+
+        with self.assertRaisesRegex(RuntimeError, "Cause non présente.*Logs de cette tâche"):
+            self.service.run_odoo_module_command(
+                "DEMO", "demo", "all", option="-u", log=lambda _line: None,
+            )
 
     def test_module_update_reneutralizes_an_already_neutralized_database_before_restart(self):
         self.runner.statuses = {

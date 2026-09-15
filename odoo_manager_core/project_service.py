@@ -8,6 +8,7 @@ import threading
 import time
 import urllib.parse
 import uuid
+from collections import deque
 from pathlib import Path
 
 from .system import docker_command
@@ -909,12 +910,22 @@ class ProjectService:
             modules,
             "--stop-after-init",
         )
+        command_output = deque(maxlen=200)
+
+        def log_module_output(line):
+            for part in str(line).replace("\r", "\n").splitlines():
+                if part.strip():
+                    command_output.append(part.strip())
+            self.log(log, line)
+
         code = None
         try:
-            code = self.stream(command, log=log)
+            code = self.stream(command, log=log_module_output)
             if code != 0:
+                reason = self.odoo_command_failure_reason(command_output)
+                self.log(log, f"Échec de la commande Odoo (code {code}). {reason}")
                 self.odoo_startup_diagnostics(container, log=log)
-                raise RuntimeError(f"La commande Odoo a échoué avec le code {code}.")
+                raise RuntimeError(f"La commande Odoo a échoué avec le code {code}. {reason}")
             if was_neutralized:
                 self.log(log, "La base était neutralisée: nouvelle passe après l'opération module...")
                 self._execute_database_neutralization(project, db_name, log=log)
@@ -924,6 +935,16 @@ class ProjectService:
         self.wait_project_http(project, log=log)
         self.log(log, "Opération module terminée.")
         self.log(log, f"URL Odoo: {self.project_url(project)}")
+
+    @staticmethod
+    def odoo_command_failure_reason(lines):
+        exception = re.compile(r"\b[A-Za-z_][\w.]*(?:Error|Exception|Fault):\s*\S")
+        severity = re.compile(r"\b(?:ERROR|CRITICAL)\b")
+        for pattern in (exception, severity):
+            for line in reversed(lines):
+                if pattern.search(line):
+                    return f"Dernière erreur Odoo : {line[:350]}"
+        return "Cause non présente dans la sortie reçue. Consultez les Logs de cette tâche."
 
     def run_odoo_uninstall_command(self, project, db_name, modules, log=None):
         container = f"odoo-{project}"
