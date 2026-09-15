@@ -161,7 +161,8 @@ class RepositoryModulesTests(ModuleLayoutTests):
             tree = "100644 blob a\talpha/__manifest__.py\n100644 blob b\tbeta/__manifest__.py\n100644 blob c\tbad name/__manifest__.py"
             return subprocess.CompletedProcess(command, 0, stdout=tree, stderr='')
 
-        with mock.patch.object(web.subprocess, 'run', side_effect=fake_git):
+        with mock.patch.object(web.subprocess, 'run', side_effect=fake_git), \
+                mock.patch.object(web, 'module_dirs', side_effect=AssertionError('scan du projet')):
             result = web.inspect_repository_modules(
                 self.project, 'ssh://git@gitlab.sudokeys.com:10022/team/addons.git', 'DEV')
 
@@ -189,3 +190,9 @@ class RepositoryModulesTests(ModuleLayoutTests):
             self.run_import(names=['beta'])
         self.assertFalse((self.project_root / 'odoo/addons/beta').exists())
         self.assertFalse((self.project_root / 'odoo/addons-store/beta').exists())
+
+    def test_repository_import_never_scans_the_whole_project(self):
+        # Sous Windows, module_dirs() lance wsl.exe : un import ne doit jamais en dépendre.
+        with mock.patch.object(web, 'module_dirs', side_effect=AssertionError('scan du projet')):
+            job = self.run_import(names=['alpha'])
+        self.assertEqual(job.result['modules'], ['alpha'])

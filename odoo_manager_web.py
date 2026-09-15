@@ -3688,11 +3688,38 @@ def repository_modules_from_tree(tree_output, repository_name):
     return modules, has_symlinks
 
 
-def repository_module_status(project, name, states, project_names=frozenset()):
+def module_provided_by_project(project, name):
+    """Module standard, Enterprise ou ancien stockage portant ce nom, sans scanner le projet.
+
+    module_dirs() lance la détection et le scan WSL sous Windows : trop coûteux pour
+    vérifier quelques noms, et source de processus inattendus pendant un import.
+    """
+    base = project_odoo_root(project)
+    parents = (
+        project_legacy_addons_storage_parent(project),
+        base / "odoo" / "odoo" / "addons",
+        base / "addons-store" / "odoo_entreprise",
+        base / "addons-store" / "odoo_enterprise",
+    )
+    for parent in parents:
+        for manifest in MANIFEST_FILENAMES:
+            try:
+                if (parent / name / manifest).is_file():
+                    return True
+            except OSError:
+                # Lien créé par WSL illisible depuis Windows : on le considère présent par prudence.
+                return True
+    return False
+
+
+def repository_module_status(project, name, states):
     storage = project_addons_storage_parent(project) / name
     link = project_addons_link_parent(project) / name
     # Un module standard ou Enterprise du même nom serait masqué par une copie importée.
-    present = name in project_names or storage.exists() or storage.is_symlink() or link.exists() or link.is_symlink()
+    present = (
+        storage.exists() or storage.is_symlink() or link.exists() or link.is_symlink()
+        or module_provided_by_project(project, name)
+    )
     updatable = present and managed_module_copy_ready(project, name, storage) and managed_storage_link(project, name, storage)
     return {
         "present": present,
@@ -3727,7 +3754,6 @@ def inspect_repository_modules(project, url, branch, db_name=""):
             raise RuntimeError("Lecture de l’arborescence du dépôt impossible.")
     found, has_symlinks = repository_modules_from_tree(output, repository_name)
     states = installed_modules(project, db_name) if db_name else {}
-    project_names = frozenset(module_dependency_graph(project))
     seen = {}
     modules = []
     for path, name in sorted(found.items(), key=lambda item: item[1].lower()):
@@ -3736,7 +3762,7 @@ def inspect_repository_modules(project, url, branch, db_name=""):
         if name in seen:
             seen[name]["duplicate"] = True
         seen[name] = entry
-        entry.update(repository_module_status(project, name, states, project_names) if valid else
+        entry.update(repository_module_status(project, name, states) if valid else
                      {"present": False, "updatable": False, "state": ""})
         modules.append(entry)
     return {"modules": modules, "has_symlinks": has_symlinks}
@@ -3813,13 +3839,12 @@ def repository_modules_job(job, project, url, branch, mode, names):
             candidates = updatable
         if not candidates:
             raise ValueError("Aucun module Odoo trouvé dans le dépôt.")
-        project_names = {path.name for path in module_dirs(project)} if mode == "add" else set()
         for candidate in candidates:
             target, link = storage / candidate.name, links / candidate.name
             exists = target.exists() or target.is_symlink() or link.exists() or link.is_symlink()
             if mode == "add" and exists:
                 raise ValueError(f"Module déjà présent : {candidate.name}. Utilise la mise à jour.")
-            if mode == "add" and candidate.name in project_names:
+            if mode == "add" and module_provided_by_project(project, candidate.name):
                 raise ValueError(
                     f"Module déjà fourni par le projet (Odoo standard, Enterprise ou autre dépôt) : {candidate.name}. "
                     "Une copie importée le masquerait."
