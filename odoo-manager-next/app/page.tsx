@@ -1972,13 +1972,13 @@ export default function Home() {
     }
   }
 
-  function showLogs() {
+  function showLogs(raw = false) {
     if (!selectedProject) return;
     const projectName = selectedProject.name;
     stopLiveLogStream();
     logStreamFirstLineRef.current = true;
     setExternalLogView({
-      title: `Logs Odoo (direct) - ${projectName}`,
+      title: `Logs Odoo (${raw ? "bruts" : "direct"}) - ${projectName}`,
       content: "Connexion au flux de logs en direct…",
       project: projectName,
     });
@@ -1987,7 +1987,7 @@ export default function Home() {
       pushToast("error", "Le suivi en direct des logs n'est pas disponible dans cet environnement.");
       return;
     }
-    const source = new EventSource(`${API_BASE}/api/projects/${encodeURIComponent(projectName)}/logs/stream`);
+    const source = new EventSource(`${API_BASE}/api/projects/${encodeURIComponent(projectName)}/logs/stream${raw ? "?raw=1" : ""}`);
     logStreamRef.current = source;
     source.addEventListener("log", (event) => {
       let line = "";
@@ -3800,9 +3800,13 @@ export default function Home() {
                             <Activity className="h-4 w-4" />
                             Diagnostic
                           </Button>
-                          <Button variant="outline" size="sm" onClick={showLogs} disabled={!selectedProjectReady}>
+                          <Button variant="outline" size="sm" onClick={() => showLogs()} disabled={!selectedProjectReady}>
                             <Logs className="h-4 w-4" />
                             Logs Odoo
+                          </Button>
+                          <Button variant="outline" size="sm" onClick={() => showLogs(true)} disabled={!selectedProjectReady}>
+                            <Logs className="h-4 w-4" />
+                            Logs bruts
                           </Button>
                           <Button variant="outline" size="sm" onClick={copyOutput}>
                             <Copy className="h-4 w-4" />
@@ -3935,14 +3939,18 @@ export default function Home() {
                             </button>
                           )}
                         </div>
-                        <div className="grid w-full min-w-0 grid-cols-1 gap-2 sm:grid-cols-3 min-[1900px]:w-auto min-[1900px]:shrink-0">
+                        <div className="grid w-full min-w-0 grid-cols-1 gap-2 sm:grid-cols-2 min-[1900px]:w-auto min-[1900px]:shrink-0">
                           <Button className="w-full justify-start sm:justify-center" variant="outline" size="sm" onClick={showDiagnostics} disabled={!selectedProjectReady}>
                             <Activity className="h-4 w-4" />
                             Diagnostic
                           </Button>
-                          <Button className="w-full justify-start sm:justify-center" variant="outline" size="sm" onClick={showLogs} disabled={!selectedProjectReady}>
+                          <Button className="w-full justify-start sm:justify-center" variant="outline" size="sm" onClick={() => showLogs()} disabled={!selectedProjectReady}>
                             <Logs className="h-4 w-4" />
                             Logs Odoo
+                          </Button>
+                          <Button className="w-full justify-start sm:justify-center" variant="outline" size="sm" onClick={() => showLogs(true)} disabled={!selectedProjectReady}>
+                            <Logs className="h-4 w-4" />
+                            Logs bruts
                           </Button>
                           <Button
                             className="w-full justify-start sm:justify-center"

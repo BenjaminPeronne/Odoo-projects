@@ -60,6 +60,7 @@ from odoo_manager_core.project_creator import (
     validate_odoo_version,
 )
 from odoo_manager_core.project_service import terminate_active_processes as terminate_project_processes
+from odoo_manager_core.odoo_log_display import OdooLogDisplay, compact_odoo_log_text
 from odoo_manager_core.system import docker_command, reset_docker_backend_cache, shell_command
 
 
@@ -3639,7 +3640,7 @@ def read_container_log_file(container):
     return ""
 
 
-def tail_logs(project):
+def tail_logs(project, raw=False):
     validate_project(project)
     docker_ok, docker_message = docker_available()
     if not docker_ok:
@@ -3652,14 +3653,14 @@ def tail_logs(project):
     if status == "running":
         file_logs = read_container_log_file(container)
         if file_logs:
-            sections.append(file_logs)
+            sections.append(file_logs if raw else compact_odoo_log_text(file_logs))
             return "\n\n".join(sections)
 
     if status != "absent":
         code, output = run_capture(docker_command(SETTINGS, "logs", "--tail", "260", container), timeout=12)
         if code == 0 and output.strip():
             sections.append("===== docker logs =====")
-            sections.append(output.strip())
+            sections.append(output.strip() if raw else compact_odoo_log_text(output.strip()))
             return "\n\n".join(sections)
         if output.strip():
             sections.append("docker logs a retourné une erreur:")
@@ -3788,7 +3789,8 @@ class Handler(BaseHTTPRequestHandler):
             match = re.match(r"^/api/projects/([^/]+)/logs/stream$", path)
             if match:
                 project = validate_project(urllib.parse.unquote(match.group(1)))
-                return self.stream_project_logs(project)
+                raw = truthy(urllib.parse.parse_qs(parsed.query).get("raw", [""])[0])
+                return self.stream_project_logs(project, raw=raw)
 
             match = re.match(r"^/api/projects/([^/]+)/modules$", path)
             if match:
@@ -3813,7 +3815,8 @@ class Handler(BaseHTTPRequestHandler):
             match = re.match(r"^/api/projects/([^/]+)/logs$", path)
             if match:
                 project = validate_project(urllib.parse.unquote(match.group(1)))
-                return json_response(self, {"logs": tail_logs(project)})
+                raw = truthy(urllib.parse.parse_qs(parsed.query).get("raw", [""])[0])
+                return json_response(self, {"logs": tail_logs(project, raw=raw)})
 
             match = re.match(r"^/api/projects/([^/]+)/diagnostics$", path)
             if match:
@@ -3871,7 +3874,7 @@ class Handler(BaseHTTPRequestHandler):
             with EVENT_SUBSCRIBERS_LOCK:
                 EVENT_SUBSCRIBERS.discard(subscriber_queue)
 
-    def stream_project_logs(self, project):
+    def stream_project_logs(self, project, raw=False):
         """Long-lived SSE connection tailing the Odoo container logs live."""
         try:
             self.send_response(200)
@@ -3901,8 +3904,14 @@ class Handler(BaseHTTPRequestHandler):
                 ACTIVE_PROCESSES.add(process)
             self.write_sse("log", {"line": f"--- Suivi en direct des logs de {project} ---"})
             assert process.stdout is not None
+            display = None if raw else OdooLogDisplay()
             for line in process.stdout:
-                self.write_sse("log", {"line": line.rstrip("\n")})
+                lines = [line.rstrip("\n")] if display is None else display.feed(line)
+                for visible_line in lines:
+                    self.write_sse("log", {"line": visible_line})
+            if display is not None:
+                for visible_line in display.finish():
+                    self.write_sse("log", {"line": visible_line})
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             return None
         except Exception:
