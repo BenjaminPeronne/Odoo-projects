@@ -951,8 +951,8 @@ export default function Home() {
     [jobs, selectedProjectName],
   );
   const selectedJob = useMemo(
-    () => projectJobs.find((job) => job.id === selectedJobId) || jobs.find((job) => job.id === selectedJobId) || projectJobs[0],
-    [jobs, projectJobs, selectedJobId],
+    () => projectJobs.find((job) => job.id === selectedJobId) || projectJobs[0],
+    [projectJobs, selectedJobId],
   );
   const hasRunningJobs = useMemo(() => jobs.some((job) => job.status === "running"), [jobs]);
   const runningJobs = useMemo(
@@ -3487,7 +3487,7 @@ export default function Home() {
                                         Installer
                                       </Button>
                                     )}
-                                    <DropdownMenu.Root>
+                                    <DropdownMenu.Root modal={false}>
                                       <DropdownMenu.Trigger>
                                         <Button size="icon" variant="ghost" className="h-9 w-9 shrink-0" title={`Autres actions pour ${module.name}`} aria-label={`Autres actions pour ${module.name}`}>
                                           <MoreHorizontal className="h-4 w-4" />
@@ -3675,7 +3675,7 @@ export default function Home() {
                                         Installer
                                       </Button>
                                     )}
-                                    <DropdownMenu.Root>
+                                    <DropdownMenu.Root modal={false}>
                                       <DropdownMenu.Trigger>
                                         <Button size="icon" variant="outline" title={`Autres actions pour ${module.name}`} aria-label={`Autres actions pour ${module.name}`}>
                                           <MoreHorizontal className="h-4 w-4" />
