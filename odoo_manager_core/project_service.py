@@ -2,6 +2,7 @@ import http.client
 import os
 import platform
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -1162,36 +1163,60 @@ class ProjectService:
         was_neutralized = self.database_is_neutralized(project, db_name)
 
         self.stop_odoo_server(project, log=log)
+        odoo_arguments = [
+            "odoo", "-c", "/home/odoo/srv/conf/odoo.conf", "-d", db_name,
+            option, modules, *extra_args, "--stop-after-init",
+        ]
+        module_log = f"/home/odoo/srv/data/odoo-manager-module-{uuid.uuid4().hex}.log"
+        shell_command = (
+            "set -o pipefail; "
+            + " ".join(shlex.quote(argument) for argument in odoo_arguments)
+            + f" 2>&1 | tee {shlex.quote(module_log)}; "
+            + 'exit "${PIPESTATUS[0]}"'
+        )
         command = self.docker(
             "exec",
             "-e",
             "LOG_ATTACHMENTS=False",
             container,
-            "odoo",
-            "-c",
-            "/home/odoo/srv/conf/odoo.conf",
-            "-d",
-            db_name,
-            option,
-            modules,
-            *extra_args,
-            "--stop-after-init",
+            "bash", "-lc", shell_command,
         )
-        command_output = deque(maxlen=200)
+        command_error = None
+        command_severity_error = None
 
         def log_module_output(line):
+            nonlocal command_error, command_severity_error
             for part in str(line).replace("\r", "\n").splitlines():
-                if part.strip():
-                    command_output.append(part.strip())
+                part = part.strip()
+                if not part:
+                    continue
+                if re.search(r"\b(?:ERROR|CRITICAL)\b", part):
+                    command_severity_error = part
+                elif re.match(r"\d{4}-\d\d-\d\d .*\b(?:INFO|WARNING|DEBUG)\b", part):
+                    command_severity_error = None
+                elif command_severity_error and re.search(r"\b[A-Za-z_][\w.]*(?:Error|Exception|Fault):\s*\S", part):
+                    command_error = part
             self.log(log, line)
 
         code = None
         try:
             code = self.stream(command, log=log_module_output)
             if code != 0:
-                reason = self.odoo_command_failure_reason(command_output)
+                log_code, module_output = self.capture(
+                    self.docker("exec", container, "sh", "-lc", f"tail -n 400 {shlex.quote(module_log)} 2>/dev/null || true"),
+                    timeout=12,
+                )
+                if command_error:
+                    reason = f"Dernière erreur Odoo : {command_error[:350]}"
+                elif command_severity_error:
+                    reason = f"Dernière erreur Odoo : {command_severity_error[:350]}"
+                else:
+                    reason = self.odoo_command_failure_reason(module_output.splitlines() if log_code == 0 else [])
                 self.log(log, f"Échec de la commande Odoo (code {code}). {reason}")
-                self.odoo_startup_diagnostics(container, log=log)
+                self.log(log, f"Journal complet de cette commande dans le conteneur : {module_log}")
+                if module_output:
+                    self.log(log, "Dernières lignes de la commande de mise à jour Odoo:")
+                    self.log(log, module_output)
                 raise RuntimeError(f"La commande Odoo a échoué avec le code {code}. {reason}")
             if was_neutralized:
                 self.log(log, "La base était neutralisée: nouvelle passe après l'opération module...")
@@ -1207,10 +1232,22 @@ class ProjectService:
     def odoo_command_failure_reason(lines):
         exception = re.compile(r"\b[A-Za-z_][\w.]*(?:Error|Exception|Fault):\s*\S")
         severity = re.compile(r"\b(?:ERROR|CRITICAL)\b")
-        for pattern in (exception, severity):
-            for line in reversed(lines):
-                if pattern.search(line):
-                    return f"Dernière erreur Odoo : {line[:350]}"
+        last_severity = None
+        last_exception = None
+        in_error_block = False
+        for line in lines:
+            if not line:
+                continue
+            if severity.search(line):
+                last_severity = line
+                in_error_block = True
+            elif re.match(r"\d{4}-\d\d-\d\d .*\b(?:INFO|WARNING|DEBUG)\b", line):
+                in_error_block = False
+            elif in_error_block and exception.search(line):
+                last_exception = line
+        for line in (last_exception, last_severity):
+            if line:
+                return f"Dernière erreur Odoo : {line[:350]}"
         return "Cause non présente dans la sortie reçue. Consultez les Logs de cette tâche."
 
     def run_odoo_shell_script(self, project, db_name, script, failure_message, env=None, secrets=(), log=None):

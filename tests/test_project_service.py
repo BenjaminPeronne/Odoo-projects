@@ -35,7 +35,7 @@ class FakeRunner:
         self.streams.append((list(command), Path(cwd) if cwd else None))
         if log:
             log("$ " + " ".join(command))
-            if self.stream_output and "--stop-after-init" in command:
+            if self.stream_output and any("--stop-after-init" in argument for argument in command):
                 for line in self.stream_output:
                     log(line)
         code = self.stream_codes.pop(0) if self.stream_codes else 0
@@ -471,21 +471,11 @@ class ProjectServiceTests(unittest.TestCase):
         )
 
         commands = [command for command, _cwd in self.runner.streams]
-        update = next(command for command in commands if "--stop-after-init" in command)
-        self.assertEqual(
-            update[-9:],
-            [
-                "odoo-DEMO",
-                "odoo",
-                "-c",
-                "/home/odoo/srv/conf/odoo.conf",
-                "-d",
-                "PROTEX_20812",
-                "-u",
-                "sale_custom",
-                "--stop-after-init",
-            ],
-        )
+        update = next(command for command in commands if any("--stop-after-init" in argument for argument in command))
+        self.assertEqual(update[-3:-1], ["bash", "-lc"])
+        self.assertIn("odoo -c /home/odoo/srv/conf/odoo.conf -d PROTEX_20812 -u sale_custom --stop-after-init", update[-1])
+        self.assertIn("| tee /home/odoo/srv/data/odoo-manager-module-", update[-1])
+        self.assertIn('exit "${PIPESTATUS[0]}"', update[-1])
         self.assertTrue(any("Équivalent: odoo -d PROTEX_20812 -u sale_custom --stop-after-init" in line for line in logs))
         self.assertTrue(any("Redémarrage du serveur Odoo" in line for line in logs))
 
@@ -508,6 +498,28 @@ class ProjectServiceTests(unittest.TestCase):
 
         self.assertTrue(any("Redémarrage du serveur Odoo" in line for line in logs))
         self.assertTrue(any("Échec de la commande Odoo (code 255)" in line for line in logs))
+        self.assertTrue(any("Journal complet de cette commande" in line for line in logs))
+        self.assertFalse(any("Sortie du dernier lancement Odoo" in line for line in logs))
+
+    def test_module_error_survives_long_shutdown_output(self):
+        self.runner.statuses = {"odoo-DEMO": "running", "postgresql-DEMO": "running"}
+        self.runner.odoo_server_running = False
+        self.runner.stream_codes = [255]
+        self.runner.stream_output = [
+            "2026-09-15 ERROR demo odoo.modules: Failed to initialize database",
+            "ImportError: missing Odoo dependency",
+            *[f"2026-09-15 INFO demo shutdown line {index}" for index in range(250)],
+        ]
+        with self.assertRaisesRegex(RuntimeError, "ImportError: missing Odoo dependency"):
+            self.service.run_odoo_module_command("DEMO", "demo", "all", log=lambda _line: None)
+
+    def test_info_filestore_traceback_is_not_reported_as_module_failure(self):
+        reason = self.service.odoo_command_failure_reason([
+            "2026-09-15 13:29:13 INFO demo ir_attachment: _file_gc could not unlink",
+            "Traceback (most recent call last):",
+            "FileNotFoundError: missing filestore item",
+        ])
+        self.assertIn("Cause non présente", reason)
 
     def test_module_update_failure_without_odoo_output_points_to_job_logs(self):
         self.runner.statuses = {"odoo-DEMO": "running", "postgresql-DEMO": "running"}
@@ -543,7 +555,7 @@ class ProjectServiceTests(unittest.TestCase):
         )
 
         commands = [command for command, _cwd in self.runner.streams]
-        update_index = next(index for index, command in enumerate(commands) if "--stop-after-init" in command)
+        update_index = next(index for index, command in enumerate(commands) if any("--stop-after-init" in argument for argument in command))
         neutralize_index = next(
             index for index, command in enumerate(commands) if "ODOO_MANAGER_NEUTRALIZATION_DONE" in command[-1]
         )
@@ -589,8 +601,8 @@ class ProjectServiceTests(unittest.TestCase):
         )
 
         commands = [command for command, _cwd in self.runner.streams]
-        update = next(command for command in commands if "--stop-after-init" in command)
-        self.assertEqual(update[-4:], ["-u", "sale_custom", "--i18n-overwrite", "--stop-after-init"])
+        update = next(command for command in commands if any("--stop-after-init" in argument for argument in command))
+        self.assertIn("-u sale_custom --i18n-overwrite --stop-after-init", update[-1])
         self.assertTrue(any(
             "Équivalent: odoo -d PROTEX_20812 -u sale_custom --i18n-overwrite --stop-after-init" in line
             for line in logs
