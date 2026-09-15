@@ -1,6 +1,6 @@
 "use client";
 
-import type {} from "@/lib/desktop";
+import type { StoredRikaCredentials } from "@/lib/desktop";
 
 import {
   Activity,
@@ -898,6 +898,7 @@ export default function Home() {
   const [uninstallDialogOpen, setUninstallDialogOpen] = useState(false);
   const [pendingTranslationResetModules, setPendingTranslationResetModules] = useState<string[]>([]);
   const [adminPasswordOpen, setAdminPasswordOpen] = useState(false);
+  const [storedRikaCredentials, setStoredRikaCredentials] = useState<StoredRikaCredentials | null>(null);
   const [allTranslationsOpen, setAllTranslationsOpen] = useState(false);
   const [translationLanguages, setTranslationLanguages] = useState<{ code: string; name: string }[] | null>(null);
   const [selectedTranslationLanguages, setSelectedTranslationLanguages] = useState<Set<string>>(new Set());
@@ -1321,6 +1322,8 @@ export default function Home() {
   const openSettingsDialog = useCallback(() => {
     setSettingsDraft(fallbackManagerSettings(settings, overview, systemStatus));
     setSettingsOpen(true);
+    setStoredRikaCredentials(null);
+    window.sdkDesktop?.rikaCredentials().then(setStoredRikaCredentials).catch(() => setStoredRikaCredentials(null));
     void loadSettings();
     void loadSshKeys();
     void loadManagerErrors();
@@ -1836,7 +1839,7 @@ export default function Home() {
   async function requestProjectCreation(payload: Record<string, unknown>) {
     const projectName = String(payload.name || "").trim();
     const job = await createJob("create_project", payload);
-    if (!job) return;
+    if (!job) return false;
     pendingProjectNames.current.add(projectName);
     setPendingCreatedProjectName(projectName);
     setSelectedProjectName(projectName);
@@ -1846,6 +1849,7 @@ export default function Home() {
     setActiveTab("logs");
     if (!settings?.onboarding_completed) await completeOnboarding();
     schedule(refreshOverview, 2500);
+    return true;
   }
 
   async function submitRepositoryModules() {
@@ -4580,6 +4584,37 @@ export default function Home() {
                 </Button>
               </div>
 
+              {storedRikaCredentials?.available && (
+                <div className="flex flex-col gap-3 rounded-md border p-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium">Identifiants RIKA</div>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {storedRikaCredentials.login
+                        ? `${storedRikaCredentials.login} · ${storedRikaCredentials.password ? "identifiant et mot de passe" : "identifiant seul"} dans le coffre-fort du système.`
+                        : "Aucun identifiant mémorisé sur cet ordinateur."}
+                    </p>
+                  </div>
+                  {storedRikaCredentials.login && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={async () => {
+                        try {
+                          await window.sdkDesktop?.clearRikaCredentials();
+                          setStoredRikaCredentials({ ...storedRikaCredentials, login: "", password: "" });
+                          pushToast("success", "Identifiants RIKA oubliés.");
+                        } catch {
+                          pushToast("error", "Impossible d’effacer les identifiants RIKA.");
+                        }
+                      }}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                      Oublier
+                    </Button>
+                  )}
+                </div>
+              )}
+
               <div className="grid gap-3 rounded-md border p-3">
                 <div className="text-sm font-medium">Interface</div>
                 <p className="text-xs text-muted-foreground">
@@ -5656,7 +5691,7 @@ function CreateProjectDialog({
   dockerReady: boolean;
   loading: boolean;
   onRefreshPrerequisites: () => Promise<ProjectCreationPrerequisites | null>;
-  onSubmit: (payload: Record<string, unknown>) => Promise<void>;
+  onSubmit: (payload: Record<string, unknown>) => Promise<boolean>;
 }) {
   const [name, setName] = useState("");
   const [version, setVersion] = useState("19.0");
@@ -5667,17 +5702,77 @@ function CreateProjectDialog({
   const [rikaLogin, setRikaLogin] = useState("");
   const [rikaPassword, setRikaPassword] = useState("");
   const [startAfterCreation, setStartAfterCreation] = useState(true);
+  const [credentialStore, setCredentialStore] = useState<StoredRikaCredentials | null>(null);
+  const [rememberRikaLogin, setRememberRikaLogin] = useState(false);
+  const [rememberRikaPassword, setRememberRikaPassword] = useState(false);
 
   useEffect(() => {
     if (!open) {
       setRikaPassword("");
+      setCredentialStore(null);
       return;
     }
+    const bridge = window.sdkDesktop;
+    if (!bridge) return;
+    let cancelled = false;
+    bridge.rikaCredentials()
+      .then((stored) => {
+        if (cancelled) return;
+        setCredentialStore(stored);
+        setRememberRikaLogin(Boolean(stored.login));
+        setRememberRikaPassword(Boolean(stored.password));
+        if (stored.login) setRikaLogin((current) => current || stored.login);
+        if (stored.password) setRikaPassword((current) => current || stored.password);
+      })
+      .catch(() => {
+        if (!cancelled) setCredentialStore(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
     setStartAfterCreation(dockerReady);
     if (prerequisites?.supported_versions?.length && !prerequisites.supported_versions.includes(version)) {
       setVersion(prerequisites.supported_versions.at(-1) || "19.0");
     }
   }, [dockerReady, open, prerequisites?.supported_versions, version]);
+
+  const hasStoredRikaCredentials = Boolean(credentialStore?.login);
+
+  async function forgetRikaCredentials() {
+    await window.sdkDesktop?.clearRikaCredentials();
+    setCredentialStore((current) => current && { ...current, login: "", password: "", reason: "" });
+    setRememberRikaLogin(false);
+    setRememberRikaPassword(false);
+  }
+
+  async function submitProject() {
+    const created = await onSubmit({
+      name: name.trim(),
+      version,
+      source_type: sourceType,
+      repository_url: repositoryUrl.trim(),
+      repository_branch: repositoryBranch.trim(),
+      rika_instance: rikaInstance.trim(),
+      rika_login: rikaLogin.trim(),
+      rika_password: rikaPassword,
+      start_after_creation: startAfterCreation,
+    });
+    const bridge = window.sdkDesktop;
+    if (!created || sourceType !== "rika" || !bridge || !credentialStore?.available) return;
+    try {
+      if (rememberRikaLogin) {
+        await bridge.saveRikaCredentials(rikaLogin.trim(), rememberRikaPassword ? rikaPassword : null);
+      } else if (hasStoredRikaCredentials) {
+        await bridge.clearRikaCredentials();
+      }
+    } catch {
+      // La création est lancée : un échec du trousseau ne doit pas la bloquer.
+    }
+  }
 
   const prerequisitesReady = Boolean(
     prerequisites?.workspace_ready && prerequisites.git_available && prerequisites.ssh_key_present,
@@ -5806,9 +5901,46 @@ function CreateProjectDialog({
                   autoComplete="current-password"
                 />
               </label>
-              <p className="text-xs leading-5 text-muted-foreground sm:col-span-2">
-                Ces identifiants sont transmis uniquement à RIKA pendant cette création et ne sont pas enregistrés par le gestionnaire.
-              </p>
+              {credentialStore?.available ? (
+                <div className="grid gap-2 rounded-md border bg-muted/35 p-3 text-sm sm:col-span-2">
+                  <label className="flex items-start gap-2">
+                    <Checkbox
+                      className="mt-0.5"
+                      checked={rememberRikaLogin}
+                      onCheckedChange={(checked) => {
+                        setRememberRikaLogin(checked === true);
+                        if (checked !== true) setRememberRikaPassword(false);
+                      }}
+                    />
+                    <span>Mémoriser mon identifiant sur cet ordinateur</span>
+                  </label>
+                  <label className={cn("flex items-start gap-2 pl-6", !rememberRikaLogin && "opacity-50")}>
+                    <Checkbox
+                      className="mt-0.5"
+                      checked={rememberRikaPassword}
+                      disabled={!rememberRikaLogin}
+                      onCheckedChange={(checked) => setRememberRikaPassword(checked === true)}
+                    />
+                    <span>Mémoriser aussi le mot de passe</span>
+                  </label>
+                  <p className="text-xs leading-5 text-muted-foreground">
+                    Chiffrés par le coffre-fort du système (Trousseau macOS, DPAPI Windows, trousseau Linux) et enregistrés
+                    uniquement si la création démarre. Décocher puis créer efface les identifiants mémorisés.
+                  </p>
+                  {credentialStore.reason && <p className="text-xs text-amber-700 dark:text-amber-300">{credentialStore.reason}</p>}
+                  {hasStoredRikaCredentials && (
+                    <button type="button" className="justify-self-start text-xs font-medium text-primary underline-offset-2 hover:underline" onClick={() => void forgetRikaCredentials()}>
+                      Oublier les identifiants enregistrés
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <p className="text-xs leading-5 text-muted-foreground sm:col-span-2">
+                  {credentialStore?.reason
+                    ? `${credentialStore.reason} Les identifiants sont transmis uniquement à RIKA pendant cette création.`
+                    : "Ces identifiants sont transmis uniquement à RIKA pendant cette création et ne sont pas enregistrés par le gestionnaire."}
+                </p>
+              )}
             </div>
           )}
 
@@ -5846,17 +5978,7 @@ function CreateProjectDialog({
             <Button variant="outline" onClick={() => onOpenChange(false)}>Annuler</Button>
             <Button
               disabled={loading || !name.trim() || !prerequisitesReady || !sourceFieldsReady}
-              onClick={() => onSubmit({
-                name: name.trim(),
-                version,
-                source_type: sourceType,
-                repository_url: repositoryUrl.trim(),
-                repository_branch: repositoryBranch.trim(),
-                rika_instance: rikaInstance.trim(),
-                rika_login: rikaLogin.trim(),
-                rika_password: rikaPassword,
-                start_after_creation: startAfterCreation,
-              })}
+              onClick={() => void submitProject()}
             >
               {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <FolderPlus className="h-4 w-4" />}
               Créer le projet

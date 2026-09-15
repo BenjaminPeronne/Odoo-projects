@@ -10,4 +10,7 @@ contextBridge.exposeInMainWorld('sdkDesktop', Object.freeze({
   pickDirectory: defaultPath => ipcRenderer.invoke('sdk:pick-directory', defaultPath),
   notificationsSupported: () => ipcRenderer.invoke('sdk:notifications-supported'),
   notify: (title, body) => ipcRenderer.invoke('sdk:notify', { title, body }),
+  rikaCredentials: () => ipcRenderer.invoke('sdk:rika-credentials'),
+  saveRikaCredentials: (login, password) => ipcRenderer.invoke('sdk:save-rika-credentials', { login, password }),
+  clearRikaCredentials: () => ipcRenderer.invoke('sdk:clear-rika-credentials'),
 }));

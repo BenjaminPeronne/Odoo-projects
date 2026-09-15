@@ -1,9 +1,10 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, Notification, protocol, net, session, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Notification, protocol, net, session, Menu, safeStorage } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { spawn } = require('node:child_process');
 const { APP_ORIGIN, Backend, externalUrl, staticPath, contentPolicy } = require('./runtime.cjs');
+const { CredentialStore } = require('./credentials.cjs');
 
 app.setName('SDK Local Manager');
 app.setAppUserModelId('com.sudokeys.odoo-manager');
@@ -63,6 +64,10 @@ function installHandlers() {
     });
     return result.canceled ? null : result.filePaths[0] || null;
   });
+  const credentials = new CredentialStore({ directory: app.getPath('userData'), safeStorage });
+  handle('rika-credentials', () => credentials.read());
+  handle('save-rika-credentials', payload => credentials.save(payload));
+  handle('clear-rika-credentials', () => credentials.clear());
   handle('notifications-supported', () => Notification.isSupported());
   handle('notify', payload => {
     if (!payload || typeof payload.title !== 'string' || typeof payload.body !== 'string'
