@@ -43,7 +43,7 @@ class OdooLogDisplay:
         self._databases.clear()
         return [
             f"Info Odoo ({databases}) : {count} fichier(s) déjà absent(s) lors du nettoyage "
-            "du filestore. Le nettoyage continue ; traces complètes dans les Logs bruts."
+            "du filestore. Le nettoyage continue ; « Voir les traces complètes » affiche le détail."
         ]
 
     def feed(self, line):

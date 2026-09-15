@@ -5,6 +5,7 @@ const { pathToFileURL } = require('node:url');
 const { spawn } = require('node:child_process');
 const { APP_ORIGIN, Backend, externalUrl, staticPath, contentPolicy } = require('./runtime.cjs');
 const { CredentialStore } = require('./credentials.cjs');
+const { GitLabClient } = require('./gitlab.cjs');
 
 app.setName('SDK Local Manager');
 app.setAppUserModelId('com.sudokeys.odoo-manager');
@@ -68,6 +69,13 @@ function installHandlers() {
   handle('rika-credentials', () => credentials.read());
   handle('save-rika-credentials', payload => credentials.save(payload));
   handle('clear-rika-credentials', () => credentials.clear());
+  // Le jeton GitLab reste dans ce processus : l'interface ne reçoit que des résultats.
+  const gitlab = new GitLabClient({ directory: app.getPath('userData'), safeStorage, fetch: (url, init) => net.fetch(url, init) });
+  handle('gitlab-status', () => gitlab.status());
+  handle('gitlab-connect', token => gitlab.connect(token));
+  handle('gitlab-disconnect', () => gitlab.disconnect());
+  handle('gitlab-projects', search => gitlab.searchProjects(search));
+  handle('gitlab-refs', (id, search) => gitlab.listRefs(id, search));
   handle('notifications-supported', () => Notification.isSupported());
   handle('notify', payload => {
     if (!payload || typeof payload.title !== 'string' || typeof payload.body !== 'string'

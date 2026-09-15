@@ -4467,7 +4467,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-            self.send_header("Cache-Control", "no-cache")
+            # no-transform : un proxy (next dev) ne doit ni compresser ni retenir le flux.
+            self.send_header("Cache-Control", "no-cache, no-transform")
+            self.send_header("X-Accel-Buffering", "no")
             add_cors_headers(self)
             self.end_headers()
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
@@ -4504,7 +4506,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-            self.send_header("Cache-Control", "no-cache")
+            # no-transform : un proxy (next dev) ne doit ni compresser ni retenir le flux.
+            self.send_header("Cache-Control", "no-cache, no-transform")
+            self.send_header("X-Accel-Buffering", "no")
             add_cors_headers(self)
             self.end_headers()
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):

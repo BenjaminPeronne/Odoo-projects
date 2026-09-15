@@ -13,4 +13,9 @@ contextBridge.exposeInMainWorld('sdkDesktop', Object.freeze({
   rikaCredentials: () => ipcRenderer.invoke('sdk:rika-credentials'),
   saveRikaCredentials: (login, password) => ipcRenderer.invoke('sdk:save-rika-credentials', { login, password }),
   clearRikaCredentials: () => ipcRenderer.invoke('sdk:clear-rika-credentials'),
+  gitlabStatus: () => ipcRenderer.invoke('sdk:gitlab-status'),
+  gitlabConnect: token => ipcRenderer.invoke('sdk:gitlab-connect', token),
+  gitlabDisconnect: () => ipcRenderer.invoke('sdk:gitlab-disconnect'),
+  gitlabProjects: search => ipcRenderer.invoke('sdk:gitlab-projects', search),
+  gitlabRefs: (projectId, search) => ipcRenderer.invoke('sdk:gitlab-refs', projectId, search),
 }));

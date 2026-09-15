@@ -18,6 +18,37 @@ function field(value, label, { required }) {
   return value;
 }
 
+function secureStorageUnavailableReason(safeStorage, platform = process.platform) {
+  if (!safeStorage.isEncryptionAvailable()) {
+    return 'Le coffre-fort du système est indisponible sur cet ordinateur.';
+  }
+  if (platform === 'linux' && WEAK_LINUX_BACKENDS.has(safeStorage.getSelectedStorageBackend?.())) {
+    return 'Aucun trousseau sécurisé (GNOME Keyring ou KWallet) n’est actif : enregistrement refusé.';
+  }
+  return '';
+}
+
+// Retourne undefined si le fichier n'existe pas ; lève une erreur s'il est illisible (clé changée, altération).
+function readEncryptedJson(file, safeStorage) {
+  let encrypted;
+  try {
+    encrypted = fs.readFileSync(file);
+  } catch {
+    return undefined;
+  }
+  const payload = JSON.parse(safeStorage.decryptString(encrypted));
+  if (payload?.version !== FORMAT_VERSION) throw new Error('format');
+  return payload;
+}
+
+function writeEncryptedJson(file, safeStorage, payload) {
+  const encrypted = safeStorage.encryptString(JSON.stringify({ ...payload, version: FORMAT_VERSION }));
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const temporary = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(temporary, encrypted, { mode: 0o600 });
+  fs.renameSync(temporary, file);
+}
+
 class CredentialStore {
   constructor({ directory, safeStorage, platform = process.platform }) {
     this.file = path.join(directory, FILE_NAME);
@@ -26,27 +57,15 @@ class CredentialStore {
   }
 
   unavailableReason() {
-    if (!this.safeStorage.isEncryptionAvailable()) {
-      return 'Le coffre-fort du système est indisponible sur cet ordinateur.';
-    }
-    if (this.platform === 'linux' && WEAK_LINUX_BACKENDS.has(this.safeStorage.getSelectedStorageBackend?.())) {
-      return 'Aucun trousseau sécurisé (GNOME Keyring ou KWallet) n’est actif : enregistrement refusé.';
-    }
-    return '';
+    return secureStorageUnavailableReason(this.safeStorage, this.platform);
   }
 
   read() {
     const reason = this.unavailableReason();
     if (reason) return { available: false, reason, login: '', password: '' };
-    let encrypted;
     try {
-      encrypted = fs.readFileSync(this.file);
-    } catch {
-      return { available: true, reason: '', login: '', password: '' };
-    }
-    try {
-      const payload = JSON.parse(this.safeStorage.decryptString(encrypted));
-      if (payload?.version !== FORMAT_VERSION) throw new Error('format');
+      const payload = readEncryptedJson(this.file, this.safeStorage);
+      if (payload === undefined) return { available: true, reason: '', login: '', password: '' };
       return {
         available: true,
         reason: '',
@@ -64,11 +83,7 @@ class CredentialStore {
     if (reason) throw new Error(reason);
     const login = field(typeof credentials?.login === 'string' ? credentials.login.trim() : credentials?.login, 'Identifiant', { required: true });
     const password = field(credentials?.password, 'Mot de passe', { required: false });
-    const encrypted = this.safeStorage.encryptString(JSON.stringify({ version: FORMAT_VERSION, login, password }));
-    fs.mkdirSync(path.dirname(this.file), { recursive: true });
-    const temporary = `${this.file}.${process.pid}.tmp`;
-    fs.writeFileSync(temporary, encrypted, { mode: 0o600 });
-    fs.renameSync(temporary, this.file);
+    writeEncryptedJson(this.file, this.safeStorage, { login, password });
   }
 
   clear() {
@@ -76,4 +91,4 @@ class CredentialStore {
   }
 }
 
-module.exports = { CredentialStore, FILE_NAME };
+module.exports = { CredentialStore, FILE_NAME, readEncryptedJson, secureStorageUnavailableReason, writeEncryptedJson };

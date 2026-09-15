@@ -10,6 +10,33 @@ export interface DesktopBridge {
   rikaCredentials(): Promise<StoredRikaCredentials>;
   saveRikaCredentials(login: string, password: string | null): Promise<void>;
   clearRikaCredentials(): Promise<void>;
+  gitlabStatus(): Promise<GitLabStatus>;
+  gitlabConnect(token: string): Promise<GitLabStatus>;
+  gitlabDisconnect(): Promise<GitLabStatus>;
+  gitlabProjects(search: string): Promise<GitLabProject[]>;
+  gitlabRefs(projectId: number, search: string): Promise<GitLabRefs>;
+}
+
+export interface GitLabStatus {
+  available: boolean;
+  reason: string;
+  connected: boolean;
+  username: string;
+  url: string;
+}
+
+export interface GitLabProject {
+  id: number;
+  name: string;
+  path: string;
+  sshUrl: string;
+  defaultBranch: string;
+  lastActivityAt: string;
+}
+
+export interface GitLabRefs {
+  branches: { name: string; default: boolean }[];
+  tags: string[];
 }
 
 export interface StoredRikaCredentials {

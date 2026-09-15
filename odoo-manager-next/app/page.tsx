@@ -1,6 +1,6 @@
 "use client";
 
-import type { StoredRikaCredentials } from "@/lib/desktop";
+import type { GitLabProject, GitLabRefs, GitLabStatus, StoredRikaCredentials } from "@/lib/desktop";
 
 import {
   Activity,
@@ -269,6 +269,7 @@ type RepositoryInspection =
 
 // Au-delà, le rendu des lignes ralentit la fenêtre (dépôts complets de 1 500 modules) : on filtre.
 const REPOSITORY_PICKER_MAX_ROWS = 200;
+const GITLAB_TOKEN_URL = "https://gitlab.sudokeys.com/-/user_settings/personal_access_tokens?name=SDK%20Local%20Manager&scopes=read_api";
 
 function repositoryModuleEligible(module: RepositoryModule, mode: string) {
   if (!module.valid || module.duplicate) return false;
@@ -843,6 +844,36 @@ function JobProgressPanel({ label, percent }: { label: string; percent: number |
   );
 }
 
+// Ligne de synthèse produite par odoo_log_display.py quand des traces non bloquantes sont résumées.
+const CONDENSED_ODOO_LOG_RE = /^Info Odoo \(.*\) : \d+ fichier\(s\) déjà absent\(s\) lors du nettoyage du filestore\./m;
+
+function OdooLogsModeBar({
+  view,
+  onShowFull,
+  onShowSummary,
+}: {
+  view: { content: string; logs?: "summary" | "full" } | null;
+  onShowFull: () => void;
+  onShowSummary: () => void;
+}) {
+  if (!view?.logs) return null;
+  if (view.logs === "summary" && !CONDENSED_ODOO_LOG_RE.test(view.content)) return null;
+  const full = view.logs === "full";
+  return (
+    <div className="mb-3 flex flex-col gap-2 rounded-md border bg-muted/35 px-3 py-2 text-sm sm:flex-row sm:items-center sm:justify-between">
+      <span className="text-muted-foreground">
+        {full
+          ? "Traces complètes : les erreurs non bloquantes du nettoyage du filestore ne sont pas résumées."
+          : "Des traces non bloquantes du nettoyage du filestore ont été résumées."}
+      </span>
+      <Button type="button" size="sm" variant="outline" className="shrink-0" onClick={full ? onShowSummary : onShowFull}>
+        <Logs className="h-4 w-4" />
+        {full ? "Revenir aux logs résumés" : "Voir les traces complètes"}
+      </Button>
+    </div>
+  );
+}
+
 function JobOutputPre({
   outputRef,
   content,
@@ -910,7 +941,7 @@ export default function Home() {
   const jobOutputCache = useRef<JobOutputCache>(new Map());
   const [selectedJobId, setSelectedJobId] = useState<number | null>(null);
   const [logDescriptionExpanded, setLogDescriptionExpanded] = useState(false);
-  const [externalLogView, setExternalLogView] = useState<{ title: string; content: string; project: string } | null>(null);
+  const [externalLogView, setExternalLogView] = useState<{ title: string; content: string; project: string; logs?: "summary" | "full" } | null>(null);
   const [loading, setLoading] = useState(false);
   const [openingOdoo, setOpeningOdoo] = useState(false);
   const [openingPostgresql, setOpeningPostgresql] = useState(false);
@@ -934,6 +965,16 @@ export default function Home() {
   const [repositoryPickerSearch, setRepositoryPickerSearch] = useState("");
   const [repositoryUpdateAll, setRepositoryUpdateAll] = useState(false);
   const repositoryAutoOpenedKey = useRef("");
+  const [gitlabStatus, setGitlabStatus] = useState<GitLabStatus | null>(null);
+  const [gitlabTokenDraft, setGitlabTokenDraft] = useState("");
+  const [gitlabConnecting, setGitlabConnecting] = useState(false);
+  const [repositorySource, setRepositorySource] = useState<"ssh" | "gitlab">("ssh");
+  const [gitlabSearch, setGitlabSearch] = useState("");
+  const [gitlabProjects, setGitlabProjects] = useState<GitLabProject[] | null>(null);
+  const [gitlabProject, setGitlabProject] = useState<GitLabProject | null>(null);
+  const [gitlabRefSearch, setGitlabRefSearch] = useState("");
+  const [gitlabRefs, setGitlabRefs] = useState<GitLabRefs | null>(null);
+  const [gitlabError, setGitlabError] = useState("");
   const repositoryUrlError = moduleRepositoryUrlError(repositoryUrl);
   const [zipDialogOpen, setZipDialogOpen] = useState(false);
   const [createDbOpen, setCreateDbOpen] = useState(false);
@@ -1380,6 +1421,7 @@ export default function Home() {
     setSettingsOpen(true);
     setStoredRikaCredentials(null);
     window.sdkDesktop?.rikaCredentials().then(setStoredRikaCredentials).catch(() => setStoredRikaCredentials(null));
+    window.sdkDesktop?.gitlabStatus().then(setGitlabStatus).catch(() => setGitlabStatus(null));
     void loadSettings();
     void loadSshKeys();
     void loadManagerErrors();
@@ -2094,9 +2136,10 @@ export default function Home() {
     stopLiveLogStream();
     logStreamFirstLineRef.current = true;
     setExternalLogView({
-      title: `Logs Odoo (${raw ? "bruts" : "direct"}) - ${projectName}`,
+      title: `Logs Odoo${raw ? " (traces complètes)" : ""} - ${projectName}`,
       content: "Connexion au flux de logs en direct…",
       project: projectName,
+      logs: raw ? "full" : "summary",
     });
     enableLogAutoFollow();
     if (typeof EventSource === "undefined") {
@@ -2480,6 +2523,67 @@ export default function Home() {
   const repositoryHasTarget = repositoryMode === "update" && repositoryUpdateAll
     ? !repositoryUsesPicker || repositoryEligibleModules.length > 0
     : repositoryUsesPicker ? repositorySelectedList.length > 0 : repositoryMode === "add" || Boolean(repositoryModules.trim());
+
+  useEffect(() => {
+    if (!repositoryOpen) return;
+    setRepositorySource("ssh");
+    setGitlabProject(null);
+    setGitlabRefs(null);
+    setGitlabError("");
+    window.sdkDesktop?.gitlabStatus().then(setGitlabStatus).catch(() => setGitlabStatus(null));
+  }, [repositoryOpen]);
+
+  useEffect(() => {
+    const bridge = window.sdkDesktop;
+    if (!repositoryOpen || repositorySource !== "gitlab" || gitlabProject || !bridge) return;
+    let cancelled = false;
+    setGitlabProjects(null);
+    const timer = window.setTimeout(() => {
+      bridge.gitlabProjects(gitlabSearch)
+        .then((projects) => {
+          if (!cancelled) {
+            setGitlabProjects(projects);
+            setGitlabError("");
+          }
+        })
+        .catch((err) => {
+          if (!cancelled) {
+            setGitlabProjects([]);
+            setGitlabError(err instanceof Error ? err.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, "") : "Recherche GitLab impossible.");
+          }
+        });
+    }, 350);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [repositoryOpen, repositorySource, gitlabProject, gitlabSearch]);
+
+  useEffect(() => {
+    const bridge = window.sdkDesktop;
+    if (!repositoryOpen || repositorySource !== "gitlab" || !gitlabProject || !bridge) return;
+    let cancelled = false;
+    setGitlabRefs(null);
+    const timer = window.setTimeout(() => {
+      bridge.gitlabRefs(gitlabProject.id, gitlabRefSearch)
+        .then((refs) => {
+          if (!cancelled) {
+            setGitlabRefs(refs);
+            setGitlabError("");
+          }
+        })
+        .catch((err) => {
+          if (!cancelled) {
+            setGitlabRefs({ branches: [], tags: [] });
+            setGitlabError(err instanceof Error ? err.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, "") : "Lecture des branches impossible.");
+          }
+        });
+    }, 300);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [repositoryOpen, repositorySource, gitlabProject, gitlabRefSearch]);
 
   useEffect(() => {
     if (!repositoryOpen) {
@@ -4146,10 +4250,6 @@ export default function Home() {
                             <Logs className="h-4 w-4" />
                             Logs Odoo
                           </Button>
-                          <Button variant="outline" size="sm" onClick={() => showLogs(true)} disabled={!selectedProjectReady}>
-                            <Logs className="h-4 w-4" />
-                            Logs bruts
-                          </Button>
                           <Button variant="outline" size="sm" onClick={copyOutput}>
                             <Copy className="h-4 w-4" />
                             Copier
@@ -4199,6 +4299,7 @@ export default function Home() {
                             </Button>
                           </div>
                         )}
+                        <OdooLogsModeBar view={scopedExternalLogView} onShowFull={() => showLogs(true)} onShowSummary={() => showLogs()} />
                         <JobOutputPre
                           outputRef={logOutputRef}
                           content={outputContent}
@@ -4281,7 +4382,7 @@ export default function Home() {
                             </button>
                           )}
                         </div>
-                        <div className="grid w-full min-w-0 grid-cols-1 gap-2 sm:grid-cols-2 min-[1900px]:w-auto min-[1900px]:shrink-0">
+                        <div className="grid w-full min-w-0 grid-cols-1 gap-2 sm:grid-cols-3 min-[1900px]:w-auto min-[1900px]:shrink-0">
                           <Button className="w-full justify-start sm:justify-center" variant="outline" size="sm" onClick={showDiagnostics} disabled={!selectedProjectReady}>
                             <Activity className="h-4 w-4" />
                             Diagnostic
@@ -4289,10 +4390,6 @@ export default function Home() {
                           <Button className="w-full justify-start sm:justify-center" variant="outline" size="sm" onClick={() => showLogs()} disabled={!selectedProjectReady}>
                             <Logs className="h-4 w-4" />
                             Logs Odoo
-                          </Button>
-                          <Button className="w-full justify-start sm:justify-center" variant="outline" size="sm" onClick={() => showLogs(true)} disabled={!selectedProjectReady}>
-                            <Logs className="h-4 w-4" />
-                            Logs bruts
                           </Button>
                           <Button
                             className="w-full justify-start sm:justify-center"
@@ -4312,6 +4409,7 @@ export default function Home() {
                             percent={outputProgressPercent}
                           />
                         )}
+                        <OdooLogsModeBar view={scopedExternalLogView} onShowFull={() => showLogs(true)} onShowSummary={() => showLogs()} />
                         <JobOutputPre outputRef={logOutputRef} content={outputContent} onScroll={handleLogOutputScroll} />
                       </CardContent>
                     </Card>
@@ -4687,6 +4785,76 @@ export default function Home() {
                   Ouvrir l’assistant de configuration
                 </Button>
               </div>
+
+              {gitlabStatus && (
+                <div className="grid gap-3 rounded-md border p-3">
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium">Recherche de dépôts GitLab</div>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {gitlabStatus.connected
+                          ? `Connecté à gitlab.sudokeys.com${gitlabStatus.username ? ` en tant que @${gitlabStatus.username}` : ""}. « Dépôt SSH » propose la recherche de dépôts et de branches ; le lien SSH reste le mode par défaut.`
+                          : "Désactivée : « Dépôt SSH » utilise le lien SSH. Connecte un jeton personnel en lecture seule (portée read_api) pour chercher un dépôt et choisir sa branche."}
+                      </p>
+                    </div>
+                    {gitlabStatus.connected && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="shrink-0"
+                        onClick={async () => {
+                          try {
+                            setGitlabStatus(await window.sdkDesktop!.gitlabDisconnect());
+                            pushToast("success", "GitLab déconnecté.");
+                          } catch {
+                            pushToast("error", "Impossible de déconnecter GitLab.");
+                          }
+                        }}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                        Déconnecter
+                      </Button>
+                    )}
+                  </div>
+                  {!gitlabStatus.available && <p className="text-xs text-amber-700 dark:text-amber-300">{gitlabStatus.reason}</p>}
+                  {gitlabStatus.available && !gitlabStatus.connected && (
+                    <form
+                      className="flex flex-col gap-2 sm:flex-row"
+                      onSubmit={async (event) => {
+                        event.preventDefault();
+                        if (!gitlabTokenDraft.trim()) return;
+                        setGitlabConnecting(true);
+                        try {
+                          setGitlabStatus(await window.sdkDesktop!.gitlabConnect(gitlabTokenDraft));
+                          setGitlabTokenDraft("");
+                          pushToast("success", "GitLab connecté : la recherche de dépôts est activée.");
+                        } catch (err) {
+                          pushToast("error", err instanceof Error ? err.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, "") : "Connexion GitLab impossible.");
+                        } finally {
+                          setGitlabConnecting(false);
+                        }
+                      }}
+                    >
+                      <Input
+                        type="password"
+                        autoComplete="off"
+                        value={gitlabTokenDraft}
+                        onChange={(event) => setGitlabTokenDraft(event.target.value)}
+                        placeholder="Jeton personnel GitLab (glpat-…)"
+                        aria-label="Jeton personnel GitLab"
+                      />
+                      <Button type="submit" className="shrink-0" disabled={gitlabConnecting || !gitlabTokenDraft.trim()}>
+                        {gitlabConnecting ? <Loader2 className="h-4 w-4 animate-spin" /> : <KeyRound className="h-4 w-4" />}
+                        Activer
+                      </Button>
+                      <Button type="button" variant="ghost" className="shrink-0" onClick={() => void openExternalUrl(GITLAB_TOKEN_URL)}>
+                        <ExternalLink className="h-4 w-4" />
+                        Créer un jeton
+                      </Button>
+                    </form>
+                  )}
+                </div>
+              )}
 
               {storedRikaCredentials?.available && (
                 <div className="flex flex-col gap-3 rounded-md border p-3 sm:flex-row sm:items-center sm:justify-between">
@@ -5163,6 +5331,140 @@ export default function Home() {
             <DialogDescription>Copie le code dans le projet {selectedProject?.name}. Choisis une branche compatible avec sa version Odoo.</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
+            {gitlabStatus?.connected && (
+              <div className="grid grid-cols-2 gap-1 rounded-md border bg-muted/35 p-1" role="radiogroup" aria-label="Source du dépôt">
+                {([["ssh", "Lien SSH"], ["gitlab", "Rechercher dans GitLab"]] as const).map(([value, label]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    role="radio"
+                    aria-checked={repositorySource === value}
+                    className={cn(
+                      "rounded px-3 py-1.5 text-sm font-medium transition-colors",
+                      repositorySource === value ? "bg-background shadow-sm" : "text-muted-foreground hover:text-foreground",
+                    )}
+                    onClick={() => setRepositorySource(value)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+            {repositorySource === "gitlab" && gitlabStatus?.connected ? (
+              <div className="space-y-3">
+                {gitlabError && <p className="text-sm text-destructive">{gitlabError}</p>}
+                {!gitlabProject ? (
+                  <div className="space-y-2">
+                    <div className="relative">
+                      <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                      <Input
+                        className="pl-9"
+                        value={gitlabSearch}
+                        onChange={(event) => setGitlabSearch(event.target.value)}
+                        placeholder="Nom du dépôt, par exemple protex"
+                        aria-label="Rechercher un dépôt GitLab"
+                        autoFocus
+                      />
+                    </div>
+                    <div className="max-h-64 overflow-y-auto rounded-md border">
+                      {gitlabProjects === null ? (
+                        <p className="flex items-center gap-2 p-3 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />Recherche dans GitLab…</p>
+                      ) : gitlabProjects.length ? (
+                        <div className="divide-y">
+                          {gitlabProjects.map((project) => (
+                            <button
+                              key={project.id}
+                              type="button"
+                              className="flex w-full min-w-0 items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-muted/45"
+                              onClick={() => {
+                                setGitlabProject(project);
+                                setGitlabRefSearch("");
+                                setRepositoryUrl(project.sshUrl);
+                                setRepositoryBranch("");
+                              }}
+                            >
+                              <span className="min-w-0">
+                                <span className="block truncate font-medium">{project.name}</span>
+                                <span className="block truncate text-xs text-muted-foreground">{project.path}</span>
+                              </span>
+                              {project.defaultBranch && <Badge variant="outline" className="shrink-0">{project.defaultBranch}</Badge>}
+                            </button>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="p-3 text-sm text-muted-foreground">Aucun dépôt accessible ne correspond à cette recherche.</p>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <div className="flex min-w-0 items-center justify-between gap-3 rounded-md border bg-muted/35 p-3 text-sm">
+                      <span className="min-w-0">
+                        <span className="block truncate font-medium">{gitlabProject.name}</span>
+                        <span className="block truncate font-mono text-xs text-muted-foreground">{gitlabProject.sshUrl}</span>
+                      </span>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="shrink-0"
+                        onClick={() => {
+                          setGitlabProject(null);
+                          setGitlabRefs(null);
+                          setRepositoryUrl("");
+                          setRepositoryBranch("");
+                        }}
+                      >
+                        Changer
+                      </Button>
+                    </div>
+                    <div className="relative">
+                      <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                      <Input
+                        className="pl-9"
+                        value={gitlabRefSearch}
+                        onChange={(event) => setGitlabRefSearch(event.target.value)}
+                        placeholder="Filtrer les branches et tags"
+                        aria-label="Filtrer les branches et tags"
+                      />
+                    </div>
+                    <div className="max-h-56 overflow-y-auto rounded-md border" role="listbox" aria-label="Branches et tags">
+                      {gitlabRefs === null ? (
+                        <p className="flex items-center gap-2 p-3 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />Lecture des branches…</p>
+                      ) : gitlabRefs.branches.length || gitlabRefs.tags.length ? (
+                        <div className="divide-y">
+                          {[
+                            ...[...gitlabRefs.branches].sort((left, right) => Number(right.default) - Number(left.default)).map((branch) => ({ name: branch.name, kind: branch.default ? "Branche par défaut" : "Branche" })),
+                            ...gitlabRefs.tags.map((tag) => ({ name: tag, kind: "Tag" })),
+                          ].map((ref) => (
+                            <button
+                              key={`${ref.kind}:${ref.name}`}
+                              type="button"
+                              role="option"
+                              aria-selected={repositoryBranch === ref.name}
+                              className={cn(
+                                "flex w-full min-w-0 items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-muted/45",
+                                repositoryBranch === ref.name && "bg-primary/[0.08] font-medium",
+                              )}
+                              onClick={() => setRepositoryBranch(ref.name)}
+                            >
+                              <span className="flex min-w-0 items-center gap-2">
+                                {repositoryBranch === ref.name ? <CheckCircle2 className="h-4 w-4 shrink-0 text-primary" /> : <GitBranch className="h-4 w-4 shrink-0 text-muted-foreground" />}
+                                <span className="truncate font-mono text-[13px]">{ref.name}</span>
+                              </span>
+                              <span className="shrink-0 text-xs text-muted-foreground">{ref.kind}</span>
+                            </button>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="p-3 text-sm text-muted-foreground">Aucune branche ni aucun tag ne correspond.</p>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+            <>
             <label className="block space-y-2">
               <span>URL SSH du dépôt</span>
               <Input
@@ -5175,6 +5477,8 @@ export default function Home() {
               {repositoryUrlError ? <span id="repository-url-error" className="block text-sm text-destructive">{repositoryUrlError}</span> : null}
             </label>
             <label className="block space-y-2"><span>Branche ou tag</span><Input value={repositoryBranch} onChange={(e) => setRepositoryBranch(e.target.value)} placeholder="18.0" /></label>
+            </>
+            )}
             <Select
               value={repositoryMode}
               onValueChange={(mode) => {
