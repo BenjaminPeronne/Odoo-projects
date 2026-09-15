@@ -54,16 +54,14 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(loaded.execution_mode, "wsl")
             self.assertEqual(loaded.docker_poll_interval, 3)
             self.assertEqual(loaded.api_port, 19876)
-            self.assertFalse(loaded.start_project_before_open)
             self.assertTrue(loaded.show_technical_details)
             self.assertEqual(loaded.interface_icon, "local")
             self.assertEqual(loaded.interface_layout, "refined")
             self.assertTrue(loaded.onboarding_completed)
 
-    def test_open_odoo_does_not_start_project_by_default(self):
-        settings = ManagerSettings.from_dict({}, "/tmp/workspace")
-
-        self.assertFalse(settings.start_project_before_open)
+    def test_obsolete_open_odoo_start_preference_is_ignored(self):
+        settings = ManagerSettings.from_dict({"start_project_before_open": True}, "/tmp/workspace")
+        self.assertNotIn("start_project_before_open", settings.to_dict())
         self.assertFalse(settings.show_technical_details)
 
     def test_removed_page_layout_settings_are_ignored(self):
@@ -87,19 +85,6 @@ class SettingsTests(unittest.TestCase):
             ManagerSettings.from_dict({"interface_layout": "REFINED"}, "/tmp/workspace").interface_layout,
             "refined",
         )
-
-    def test_open_odoo_start_preference_round_trip(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            workspace = root / "workspace"
-            store = SettingsStore(workspace, root / "config.json")
-
-            store.update(
-                {"start_project_before_open": True},
-                create_workspace=True,
-            )
-
-            self.assertTrue(store.load().start_project_before_open)
 
     def test_invalid_mode_uses_native(self):
         settings = ManagerSettings.from_dict({"execution_mode": "dos"}, "/tmp/workspace")

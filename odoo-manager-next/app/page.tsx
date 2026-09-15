@@ -133,7 +133,6 @@ type ManagerSettings = {
   docker_poll_interval: number;
   api_port: number;
   api_port_actual?: number;
-  start_project_before_open: boolean;
   show_technical_details: boolean;
   interface_icon: InterfaceIcon;
   interface_layout: "classic" | "refined";
@@ -738,7 +737,6 @@ function fallbackManagerSettings(
     docker_poll_interval: current?.docker_poll_interval || 10,
     api_port: current?.api_port || 18765,
     api_port_actual: current?.api_port_actual,
-    start_project_before_open: current?.start_project_before_open ?? false,
     show_technical_details: current?.show_technical_details ?? false,
     interface_icon: current?.interface_icon === "local" ? "local" : "manager",
     interface_layout: current?.interface_layout === "refined" ? "refined" : "classic",
@@ -2665,24 +2663,12 @@ export default function Home() {
   }
 
   async function requestOpenOdoo() {
-    const startBeforeOpen = settings?.start_project_before_open ?? false;
-    if (!selectedProject || openingOdoo || (startBeforeOpen && selectedProjectLifecycleJob)) return;
+    if (!selectedProject || openingOdoo) return;
     setOpeningOdoo(true);
     try {
-      if (startBeforeOpen) {
-        const job = await createJob("start_project", { project: selectedProject.name });
-        if (!job) return;
-        await waitForJob(job.id);
-        await refreshOverview();
-      }
       const opened = await openExternalUrl(selectedOdooUrl);
       if (!opened) throw new Error("Lien impossible à ouvrir depuis l'application.");
-      pushToast(
-        "success",
-        startBeforeOpen
-          ? "Odoo est prêt et a été ouvert dans le navigateur."
-          : "La base Odoo a été ouverte dans le navigateur.",
-      );
+      pushToast("success", "La base Odoo a été ouverte dans le navigateur.");
     } catch (err) {
       pushToast("error", err instanceof Error ? err.message : "Impossible d'ouvrir Odoo.");
     } finally {
@@ -3129,17 +3115,12 @@ export default function Home() {
                     variant="outline"
                     disabled={
                       !selectedProjectReady ||
-                      openingOdoo ||
-                      Boolean(settings?.start_project_before_open && selectedProjectLifecycleJob)
+                      openingOdoo
                     }
                     onClick={requestOpenOdoo}
                   >
                     {openingOdoo ? <Loader2 className="h-4 w-4 animate-spin" /> : <ExternalLink className="h-4 w-4" />}
-                    {openingOdoo
-                      ? settings?.start_project_before_open
-                        ? "Préparation d’Odoo…"
-                        : "Ouverture…"
-                      : "Ouvrir Odoo"}
+                    {openingOdoo ? "Ouverture…" : "Ouvrir Odoo"}
                   </Button>
                 )}
               </div>
@@ -4821,23 +4802,6 @@ export default function Home() {
                     Affiche les états Odoo et PostgreSQL ainsi que le nombre de bases dans la liste des projets,
                     les emplacements des modules, et les actions de mise à jour du code et des images Docker.
                     Désactivé, le gestionnaire présente uniquement le voyant d’état des projets et une liste de modules compacte.
-                  </span>
-                </span>
-              </label>
-
-              <label className="flex cursor-pointer items-start gap-3 rounded-md border p-3 text-sm">
-                <Checkbox
-                  className="mt-0.5"
-                  checked={settingsDraft.start_project_before_open}
-                  onCheckedChange={(checked) =>
-                    setSettingsDraft({ ...settingsDraft, start_project_before_open: checked === true })
-                  }
-                />
-                <span className="min-w-0">
-                  <span className="block font-medium">Démarrer le projet avant d’ouvrir Odoo</span>
-                  <span className="mt-1 block text-xs font-normal leading-relaxed text-muted-foreground">
-                    Si cette option est activée, le bouton « Ouvrir Odoo » démarre et attend le projet avant
-                    d’ouvrir le navigateur. Par défaut, le bouton ouvre uniquement la base sélectionnée.
                   </span>
                 </span>
               </label>

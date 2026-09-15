@@ -62,7 +62,6 @@ class ManagerSettings:
     terminal: str = "auto"
     docker_poll_interval: int = 10
     api_port: int = DEFAULT_API_PORT
-    start_project_before_open: bool = False
     show_technical_details: bool = False
     interface_icon: str = "manager"
     interface_layout: str = "classic"
@@ -105,7 +104,6 @@ class ManagerSettings:
             terminal=str(payload.get("terminal", "auto")).strip() or "auto",
             docker_poll_interval=poll_interval,
             api_port=api_port,
-            start_project_before_open=bool(payload.get("start_project_before_open", False)),
             show_technical_details=bool(payload.get("show_technical_details", False)),
             interface_icon=interface_icon,
             interface_layout=interface_layout,
