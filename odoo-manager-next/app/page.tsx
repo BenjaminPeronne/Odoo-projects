@@ -281,6 +281,8 @@ type RepositoryInspection =
 const REPOSITORY_PICKER_MAX_ROWS = 200;
 const GITLAB_TOKEN_URL = "https://gitlab.sudokeys.com/-/user_settings/personal_access_tokens?name=SDK%20Local%20Manager&scopes=read_api";
 const REPOSITORY_ACTION_ORDER = { update: 0, add: 1, blocked: 2 } as const;
+// Distance de défilement sur laquelle le bandeau des onglets collés passe de transparent à opaque.
+const TABS_BACKDROP_FADE_PX = 96;
 
 function RepositoryModuleVersion({ module }: { module: RepositoryModule }) {
   if (module.action === "update" && module.current_version && module.version && module.current_version !== module.version) {
@@ -1224,6 +1226,26 @@ export default function Home() {
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
   }, [stickyHeader]);
+
+  useEffect(() => {
+    const tabs = projectTabsRef.current;
+    if (!stickyHeader || !tabs) return;
+    let frame = 0;
+    // Variable CSS écrite directement : un état React re-rendrait toute la page à chaque pixel défilé.
+    const update = () => {
+      frame = 0;
+      tabs.style.setProperty("--tabs-backdrop", String(Math.min(1, Math.max(0, window.scrollY / TABS_BACKDROP_FADE_PX))));
+    };
+    const onScroll = () => {
+      if (!frame) frame = window.requestAnimationFrame(update);
+    };
+    update();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      window.removeEventListener("scroll", onScroll);
+      if (frame) window.cancelAnimationFrame(frame);
+    };
+  }, [stickyHeader, selectedProject?.name]);
 
   const [moduleSelectionBanner, setModuleSelectionBanner] = useState<HTMLDivElement | null>(null);
   const [moduleSelectionBannerVisible, setModuleSelectionBannerVisible] = useState(true);
@@ -3713,10 +3735,9 @@ export default function Home() {
               <div
                 ref={projectTabsRef}
                 className={cn(
-                  // Fond transparent au repos : le bandeau n'apparaît qu'une fois collé, sur toute la largeur de la zone.
+                  // Fond transparent au repos : le bandeau apparaît en fondu, au rythme du défilement, sur toute la largeur de la zone.
                   stickyHeader &&
-                    "-my-2 py-2 lg:sticky lg:z-20 lg:before:pointer-events-none lg:before:absolute lg:before:inset-y-0 lg:before:-inset-x-[100vw] lg:before:-z-10 lg:before:border-b lg:before:bg-background/90 lg:before:opacity-0 lg:before:backdrop-blur lg:before:transition-opacity lg:before:duration-200",
-                  stickyHeader && projectHeaderCompact && "lg:before:opacity-100",
+                    "-my-2 py-2 lg:sticky lg:z-20 lg:before:pointer-events-none lg:before:absolute lg:before:inset-y-0 lg:before:-inset-x-[100vw] lg:before:-z-10 lg:before:border-b lg:before:bg-background/90 lg:before:opacity-[var(--tabs-backdrop,0)] lg:before:backdrop-blur lg:before:transition-opacity lg:before:duration-300 lg:before:ease-out motion-reduce:lg:before:transition-none",
                 )}
                 style={stickyHeader ? { top: projectHeaderHeight } : undefined}
               >
