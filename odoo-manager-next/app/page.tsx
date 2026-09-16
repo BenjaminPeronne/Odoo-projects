@@ -41,6 +41,7 @@ import {
   Terminal,
   Trash2,
   Upload,
+  X,
 } from "lucide-react";
 import { DropdownMenu } from "@radix-ui/themes";
 import { type HTMLAttributes, type ReactNode, type RefObject, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
@@ -3032,56 +3033,123 @@ export default function Home() {
     </div>
   );
 
-  function moduleSelectionButtons(compact = false) {
-    const size = compact ? "sm" : "default";
+  function moduleSelectionBar(floating = false) {
+    const count = selectedModuleList.length;
+    const installable = selectedInstallableModuleList.length;
+    const installed = selectedInstalledModuleList.length;
+    const removable = selectedRemovableModuleList.length;
+    const busy = !canUseDb || loading;
+    const clearSelection = () => setSelectedModules(new Set());
+    const details = [installable && `${installable} disponible(s)`, installed && `${installed} installé(s)`].filter(Boolean).join(", ");
+    const selectAllFiltered = !allFilteredModulesSelected && filteredModuleNames.length > 0 && (
+      <button
+        type="button"
+        className={cn("shrink-0 rounded-sm text-sm font-medium text-primary underline-offset-2 hover:underline", REFINED_FOCUS_RING)}
+        onClick={() => toggleFilteredModules(true)}
+      >
+        Tout sélectionner ({filteredModuleNames.length})
+      </button>
+    );
+
+    if (!count) {
+      return (
+        <div className="flex flex-wrap items-center gap-3 rounded-md border bg-muted/45 px-3 py-2.5 text-sm">
+          <Checkbox
+            checked={false}
+            disabled={!filteredModuleNames.length}
+            onCheckedChange={() => toggleFilteredModules(true)}
+            aria-label={`Sélectionner les ${filteredModuleNames.length} modules affichés par la recherche`}
+          />
+          <span className="min-w-0 flex-1 text-muted-foreground">Coche des modules pour agir dessus.</span>
+          {selectAllFiltered}
+        </div>
+      );
+    }
+
+    // Seules les actions applicables sont proposées ; l'action la plus probable est pleine.
     return (
-      <>
-        <Button
-          size={size}
-          variant="success"
-          disabled={!selectedInstallableModuleList.length || !canUseDb || loading}
-          onClick={() => createJob("install_module", { project: selectedProject?.name, db: selectedDb, modules: selectedInstallableModuleList.join(",") })}
-        >
-          <PlusCircle className="h-4 w-4" />
-          Installer ({selectedInstallableModuleList.length})
+      <div
+        className={cn(
+          "flex flex-wrap items-center gap-2 text-sm",
+          floating
+            ? "floating-selection-bar pointer-events-auto max-w-full justify-center rounded-xl border border-primary/45 p-2 shadow-[0_18px_40px_-12px_rgb(0_0_0/0.45)] ring-1 ring-black/5 dark:ring-white/10"
+            : "rounded-md border border-primary/35 bg-primary/[0.06] px-3 py-2 dark:bg-primary/[0.12]",
+        )}
+      >
+        <Checkbox
+          checked={allFilteredModulesSelected && count === filteredModuleNames.length ? true : "indeterminate"}
+          onCheckedChange={clearSelection}
+          aria-label="Désélectionner tous les modules"
+          title="Désélectionner tous les modules"
+        />
+        <span className="flex min-w-0 flex-wrap items-baseline gap-x-1.5 pr-1">
+          <span className="font-semibold">{count} sélectionné(s)</span>
+          {details && <span className="text-muted-foreground">· {details}</span>}
+        </span>
+        {!floating && selectAllFiltered}
+        <span className="hidden flex-1 sm:block" aria-hidden="true" />
+        {installable > 0 && (
+          <Button
+            size="sm"
+            variant="success"
+            disabled={busy}
+            onClick={() => createJob("install_module", { project: selectedProject?.name, db: selectedDb, modules: selectedInstallableModuleList.join(",") })}
+          >
+            <PlusCircle className="h-4 w-4" />
+            Installer ({installable})
+          </Button>
+        )}
+        {installed > 0 && (
+          <Button
+            size="sm"
+            variant={installable > 0 ? "outline" : "default"}
+            disabled={busy}
+            onClick={() => createJob("update_module", { project: selectedProject?.name, db: selectedDb, modules: selectedInstalledModuleList.join(",") })}
+          >
+            <RefreshCcw className="h-4 w-4" />
+            Mettre à jour ({installed})
+          </Button>
+        )}
+        {installed > 0 && (
+          <Button
+            size="sm"
+            variant="outline"
+            className="border-red-300 text-red-700 hover:border-red-400 hover:bg-red-50 hover:text-red-800 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-950/60"
+            disabled={busy}
+            onClick={() => requestUninstall(selectedInstalledModuleList)}
+          >
+            <PackageX className="h-4 w-4" />
+            Désinstaller ({installed})
+          </Button>
+        )}
+        {(installed > 0 || removable > 0) && (
+          <DropdownMenu.Root>
+            <DropdownMenu.Trigger>
+              <Button size="sm" variant="outline" disabled={loading} aria-label="Autres actions sur la sélection">
+                <MoreHorizontal className="h-4 w-4" />
+                Plus
+              </Button>
+            </DropdownMenu.Trigger>
+            <DropdownMenu.Content align="end" className="min-w-60">
+              <DropdownMenu.Item disabled={!installed || busy} onSelect={() => requestTranslationReset(selectedInstalledModuleList)}>
+                <Languages className="h-4 w-4" />
+                Réinitialiser les traductions ({installed})
+              </DropdownMenu.Item>
+              <DropdownMenu.Separator />
+              <DropdownMenu.Item color="red" disabled={!removable} onSelect={() => requestDeleteCode(selectedRemovableModuleList)}>
+                <Trash2 className="h-4 w-4" />
+                Supprimer le code du projet ({removable})
+              </DropdownMenu.Item>
+            </DropdownMenu.Content>
+          </DropdownMenu.Root>
+        )}
+        <span className="mx-0.5 hidden h-6 w-px bg-border sm:block" aria-hidden="true" />
+        <Button size="sm" variant="ghost" onClick={clearSelection} title="Désélectionner tous les modules (Échap)">
+          <X className="h-4 w-4" />
+          Désélectionner
+          <kbd className="ml-0.5 rounded border px-1 font-mono text-[10px] font-normal text-muted-foreground">Échap</kbd>
         </Button>
-        <Button
-          size={size}
-          disabled={!selectedInstalledModuleList.length || !canUseDb || loading}
-          onClick={() => createJob("update_module", { project: selectedProject?.name, db: selectedDb, modules: selectedInstalledModuleList.join(",") })}
-        >
-          <RefreshCcw className="h-4 w-4" />
-          Mettre à jour ({selectedInstalledModuleList.length})
-        </Button>
-        <Button
-          size={size}
-          variant="outline"
-          disabled={!selectedInstalledModuleList.length || !canUseDb || loading}
-          onClick={() => requestTranslationReset(selectedInstalledModuleList)}
-        >
-          <Languages className="h-4 w-4" />
-          Traductions ({selectedInstalledModuleList.length})
-        </Button>
-        <Button
-          size={size}
-          className="border-red-300 text-red-700 hover:border-red-400 hover:bg-red-50 hover:text-red-800 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-950/60"
-          variant="outline"
-          disabled={!selectedInstalledModuleList.length || !canUseDb || loading}
-          onClick={() => requestUninstall(selectedInstalledModuleList)}
-        >
-          <PackageX className="h-4 w-4" />
-          Désinstaller ({selectedInstalledModuleList.length})
-        </Button>
-        <Button
-          size={size}
-          variant="destructive"
-          disabled={!selectedRemovableModuleList.length || loading}
-          onClick={() => requestDeleteCode(selectedRemovableModuleList)}
-        >
-          <Trash2 className="h-4 w-4" />
-          Supprimer ({selectedRemovableModuleList.length})
-        </Button>
-      </>
+      </div>
     );
   }
 
@@ -3092,52 +3160,8 @@ export default function Home() {
   const showFloatingModuleActions =
     activeTab === "modules" && selectedModuleList.length > 0 && Boolean(moduleSelectionBanner) && !moduleSelectionBannerVisible;
 
-  const moduleSelectionBlock = (
-    <>
-      <div className="flex flex-col gap-3 rounded-md border bg-muted/45 p-3 text-sm sm:flex-row sm:items-center sm:justify-between">
-        <label className="flex min-w-0 cursor-pointer items-start gap-3">
-          <Checkbox
-            className="mt-0.5"
-            checked={someFilteredModulesSelected ? "indeterminate" : allFilteredModulesSelected}
-            disabled={!filteredModuleNames.length}
-            onCheckedChange={(checked) => toggleFilteredModules(checked === true)}
-          />
-          <span className="min-w-0">
-            <span className="block font-medium">Sélectionner les {filteredModuleNames.length} résultats</span>
-            <span className="block text-xs text-muted-foreground">
-              La sélection s’applique à toutes les pages de la recherche courante.
-            </span>
-          </span>
-        </label>
-        <div className="flex shrink-0 items-center gap-2">
-          <Badge className="w-fit" variant="outline">
-            {selectedModuleList.length} sélectionné(s)
-          </Badge>
-          {selectedModuleList.length > 0 && (
-            <Button size="sm" variant="ghost" onClick={() => setSelectedModules(new Set())} title="Effacer la sélection (Échap)">
-              Effacer
-            </Button>
-          )}
-        </div>
-      </div>
-      {selectedModuleList.length > 0 && (
-        <div ref={setModuleSelectionBanner} className="rounded-md border border-primary/25 bg-primary/[0.06] p-3 dark:bg-primary/[0.12]">
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <div className="text-sm font-semibold">Actions sur la sélection</div>
-              <div className="mt-0.5 text-xs text-muted-foreground">
-                {selectedInstallableModuleList.length} disponible(s), {selectedInstalledModuleList.length} installé(s)
-              </div>
-            </div>
-            <Badge variant="default">{selectedModuleList.length} module(s)</Badge>
-          </div>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-5">
-            {moduleSelectionButtons()}
-          </div>
-        </div>
-      )}
-    </>
-  );
+  // Le ref suit la barre en place : quand elle sort de l'écran, sa copie flottante prend le relais.
+  const moduleSelectionBlock = <div ref={setModuleSelectionBanner}>{moduleSelectionBar()}</div>;
 
   const modulePaginationBlock = filteredModules.length > 0 && (
     <div className="flex flex-col gap-3 border-t bg-muted/30 px-3 py-2 text-sm sm:flex-row sm:items-center sm:justify-between">
@@ -6643,19 +6667,7 @@ export default function Home() {
           aria-label="Actions sur les modules sélectionnés"
         >
           {/* Le dégradé estompe les lignes qui passent sous la barre ; la surface teintée la distingue du tableau. */}
-          <div className="floating-selection-bar pointer-events-auto flex max-w-full flex-wrap items-center justify-center gap-2 rounded-xl border border-primary/45 p-2 shadow-[0_18px_40px_-12px_rgb(0_0_0/0.45)] ring-1 ring-black/5 dark:ring-white/10">
-            <span className="flex shrink-0 items-center gap-2 pl-1 pr-1 text-sm font-semibold">
-              <CheckCircle2 className="h-4 w-4 text-primary" />
-              {selectedModuleList.length} sélectionné(s)
-            </span>
-            <span className="hidden h-6 w-px bg-border sm:block" aria-hidden="true" />
-            {moduleSelectionButtons(true)}
-            <span className="hidden h-6 w-px bg-border sm:block" aria-hidden="true" />
-            <Button size="sm" variant="ghost" onClick={() => setSelectedModules(new Set())} title="Effacer la sélection (Échap)">
-              Effacer
-              <kbd className="ml-1 rounded border px-1 font-mono text-[10px] text-muted-foreground">Échap</kbd>
-            </Button>
-          </div>
+          {moduleSelectionBar(true)}
         </div>
       )}
 
