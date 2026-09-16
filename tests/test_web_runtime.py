@@ -1355,6 +1355,50 @@ class DatabaseNeutralizationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "n'existe plus"):
             web.neutralize_database_job(job, "DEMO", "demo")
 
+    @patch("odoo_manager_web.time.sleep")
+    @patch("odoo_manager_web.clear_project_module_cache")
+    @patch("odoo_manager_web.post_form_no_redirect", return_value=(303, ""))
+    @patch("odoo_manager_web.project_url", return_value="http://demo.localhost/")
+    @patch("odoo_manager_web.list_databases_for", side_effect=[["postgres", "demo"], ["postgres"]])
+    @patch("odoo_manager_web.validate_project", return_value="DEMO")
+    def test_drop_database_posts_to_odoo_and_waits_for_removal(
+        self,
+        _validate_project,
+        _list_databases,
+        _project_url,
+        post_form,
+        clear_cache,
+        _sleep,
+    ):
+        job = self.LogJob()
+
+        web.drop_database_job(job, "DEMO", "demo", "secret")
+
+        post_form.assert_called_once_with(
+            "http://demo.localhost/web/database/drop",
+            {"master_pwd": "secret", "name": "demo"},
+        )
+        clear_cache.assert_called_once_with("DEMO")
+        self.assertIn("Base supprimée (filestore inclus) : demo", job.lines)
+
+    @patch("odoo_manager_web.post_form_no_redirect", return_value=(200, '<div class="alert alert-danger">Access Denied</div>'))
+    @patch("odoo_manager_web.project_url", return_value="http://demo.localhost/")
+    @patch("odoo_manager_web.list_databases_for", return_value=["postgres", "demo"])
+    @patch("odoo_manager_web.validate_project", return_value="DEMO")
+    def test_drop_database_reports_odoo_refusal(self, _validate_project, _list_databases, _project_url, _post_form):
+        job = self.LogJob()
+
+        with self.assertRaisesRegex(RuntimeError, "Access Denied"):
+            web.drop_database_job(job, "DEMO", "demo", "wrong")
+
+    @patch("odoo_manager_web.list_databases_for", return_value=["postgres"])
+    @patch("odoo_manager_web.validate_project", return_value="DEMO")
+    def test_drop_database_rejects_an_unknown_database(self, _validate_project, _list_databases):
+        job = self.LogJob()
+
+        with self.assertRaisesRegex(ValueError, "n'existe plus"):
+            web.drop_database_job(job, "DEMO", "demo", "secret")
+
     @patch("odoo_manager_web.normalize_module_layout_for_action")
     @patch("odoo_manager_web.project_service")
     @patch("odoo_manager_web.validate_project", return_value="DEMO")

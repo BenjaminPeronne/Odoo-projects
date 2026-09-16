@@ -980,6 +980,7 @@ export default function Home() {
   const [createDbOpen, setCreateDbOpen] = useState(false);
   const [restoreDbOpen, setRestoreDbOpen] = useState(false);
   const [neutralizeDbOpen, setNeutralizeDbOpen] = useState(false);
+  const [dropDbOpen, setDropDbOpen] = useState(false);
   const [postgresDetailsOpen, setPostgresDetailsOpen] = useState(false);
   const [rawOutputVisible, setRawOutputVisible] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
@@ -3550,6 +3551,15 @@ export default function Home() {
                                 Gestionnaire Odoo
                               </Button>
                             )}
+                            <Button
+                              variant="outline"
+                              className="text-destructive hover:text-destructive"
+                              disabled={!canUseDb || loading}
+                              onClick={() => setDropDbOpen(true)}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                              Supprimer la base
+                            </Button>
                           </div>
                         </RefinedPanel>
                       )}
@@ -3712,6 +3722,15 @@ export default function Home() {
                                 Réinitialiser le mot de passe admin
                               </Button>
                             )}
+                            <Button
+                              className="w-full text-destructive hover:text-destructive"
+                              variant="outline"
+                              disabled={!canUseDb || loading}
+                              onClick={() => setDropDbOpen(true)}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                              Supprimer la base
+                            </Button>
                           </CardContent>
                         </Card>
 
@@ -5828,6 +5847,22 @@ export default function Home() {
         </DialogContent>
       </Dialog>
 
+      <DropDatabaseDialog
+        open={dropDbOpen}
+        onOpenChange={setDropDbOpen}
+        project={selectedProject}
+        database={selectedDb}
+        disabled={!canUseDb || loading}
+        onSubmit={async (masterPwd) => {
+          const job = await createJob("drop_database", {
+            project: selectedProject?.name,
+            db: selectedDb,
+            master_pwd: masterPwd,
+          });
+          if (job) setDropDbOpen(false);
+        }}
+      />
+
       <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
         <DialogContent>
           <DialogHeader>
@@ -6669,6 +6704,67 @@ function CreateDatabaseDialog({
           <Database className="h-4 w-4" />
           Créer la base
         </Button>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function DropDatabaseDialog({
+  open,
+  onOpenChange,
+  project,
+  database,
+  disabled,
+  onSubmit,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  project?: Project;
+  database: string;
+  disabled: boolean;
+  onSubmit: (masterPwd: string) => Promise<void>;
+}) {
+  const [confirm, setConfirm] = useState("");
+  const [masterPwd, setMasterPwd] = useState("odoo");
+
+  useEffect(() => {
+    if (!open) setConfirm("");
+  }, [open]);
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="space-y-5">
+        <DialogHeader>
+          <DialogTitle>Supprimer {database || "la base"}</DialogTitle>
+          <DialogDescription>
+            {project ? `Projet : ${project.name}. ` : ""}
+            La base PostgreSQL et son filestore seront supprimés définitivement via Odoo. Saisis le nom de la base pour confirmer.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-900 dark:border-red-800 dark:bg-red-950/45 dark:text-red-100">
+          Cette opération est irréversible. Pense à sauvegarder la base avant si nécessaire.
+        </div>
+        <div className="grid gap-4">
+          <label className="grid gap-1.5 text-sm font-medium">
+            Nom de la base
+            <Input value={confirm} onChange={(event) => setConfirm(event.target.value)} placeholder={database} autoComplete="off" />
+          </label>
+          <label className="grid gap-1.5 text-sm font-medium">
+            Master password
+            <Input value={masterPwd} onChange={(event) => setMasterPwd(event.target.value)} type="password" />
+          </label>
+        </div>
+        <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Annuler</Button>
+          <Button
+            variant="destructive"
+            disabled={disabled || !database || confirm !== database || !masterPwd}
+            onClick={() => onSubmit(masterPwd)}
+          >
+            <Trash2 className="h-4 w-4" />
+            Supprimer définitivement
+          </Button>
+        </div>
       </DialogContent>
     </Dialog>
   );

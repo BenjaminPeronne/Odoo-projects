@@ -2904,6 +2904,29 @@ def create_database_job(job, project, db_name, master_pwd, login, password, lang
     )
 
 
+def drop_database_job(job, project, db_name, master_pwd):
+    project, db_name = existing_odoo_database(project, db_name)
+    master_pwd = validate_required_text(master_pwd, "Master password")
+
+    url = urllib.parse.urljoin(project_url(project), "web/database/drop")
+    job.add(f"Suppression de la base {db_name} dans {project}")
+    job.add(f"Appel Odoo: {url}")
+    status, content = post_form_no_redirect(url, {"master_pwd": master_pwd, "name": db_name})
+    job.add(f"Réponse Odoo: HTTP {status}")
+    odoo_error = extract_odoo_page_error(content) if status == 200 else ""
+    if odoo_error:
+        raise RuntimeError(f"Odoo a refusé la suppression de la base : {odoo_error}")
+
+    for waited in range(0, 32, 2):
+        if db_name not in set(list_databases_for(project)):
+            invalidate_overview_databases(project)
+            clear_project_module_cache(project)
+            job.add(f"Base supprimée (filestore inclus) : {db_name}")
+            return
+        time.sleep(2)
+    raise RuntimeError("La suppression a été envoyée, mais la base est toujours présente dans PostgreSQL.")
+
+
 def delete_project_job(job, project):
     project = validate_project(project)
     path = (WORKSPACE / project).resolve()
@@ -4925,6 +4948,15 @@ class Handler(BaseHTTPRequestHandler):
                 country = payload.get("country", "")
                 demo = bool(payload.get("demo", False))
                 job = Job(f"Créer base {db_name}", create_database_job, (project, db_name, master_pwd, login, password, lang, country, demo), project=project)
+            elif action == "drop_database":
+                project = validate_project(payload.get("project", ""))
+                db_name = validate_odoo_db(payload.get("db", ""))
+                job = Job(
+                    f"Supprimer base {db_name}",
+                    drop_database_job,
+                    (project, db_name, payload.get("master_pwd", "")),
+                    project=project,
+                )
             elif action == "neutralize_database":
                 project = validate_project(payload.get("project", ""))
                 db_name = validate_odoo_db(payload.get("db", ""))
