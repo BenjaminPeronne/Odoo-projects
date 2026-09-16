@@ -3102,23 +3102,48 @@ def run_wsl_script(distribution, script, arguments, error):
     return output
 
 
+ADDON_LINK_STATUS_CHUNK = 100  # Paires par appel WSL : reste sous la limite de ligne de commande Windows.
+
+
+def addon_link_statuses(pairs):
+    """États de plusieurs liens en un appel WSL par lot ; voir addon_link_status."""
+    pairs = list(pairs)
+    distribution = addon_links_wsl_distribution()
+    if distribution is None:
+        return [addon_link_status_native(link, target) for link, target in pairs]
+    script = (
+        'while [ "$#" -gt 1 ]; do link=$1; target=$2; shift 2; '
+        'if [ -L "$link" ]; then '
+        'if [ "$(readlink -f -- "$link")" = "$(readlink -f -- "$target")" ]; then state=matching; else state=different; fi; '
+        'printf "%s\\t%s\\n" "$state" "$(readlink -- "$link")"; '
+        'elif [ -e "$link" ]; then printf "other\\t\\n"; else printf "missing\\t\\n"; fi; done'
+    )
+    statuses = []
+    for index in range(0, len(pairs), ADDON_LINK_STATUS_CHUNK):
+        chunk = pairs[index:index + ADDON_LINK_STATUS_CHUNK]
+        arguments = [
+            value
+            for link, target in chunk
+            for value in (wsl_entry_path(link, distribution), wsl_entry_path(target, distribution))
+        ]
+        output = run_wsl_script(distribution, script, arguments, "Lecture des liens d'addons impossible depuis WSL")
+        lines = output.strip("\n").split("\n") if output.strip() else []
+        if len(lines) != len(chunk):
+            raise RuntimeError("Réponse incomplète de WSL pendant la lecture des liens d'addons.")
+        for line in lines:
+            state, _, value = line.partition("\t")
+            if state not in {"missing", "matching", "different", "other"}:
+                raise RuntimeError(f"Réponse inattendue de WSL pour les liens d'addons : {line[:200]}")
+            statuses.append((state, value))
+    return statuses
+
+
 def addon_link_status(link_path, expected_target):
     """Retourne (état, valeur du lien) ; état : missing, matching, different ou other."""
-    distribution = addon_links_wsl_distribution()
-    if distribution is not None:
-        output = run_wsl_script(
-            distribution,
-            'if [ -L "$1" ]; then '
-            'if [ "$(readlink -f -- "$1")" = "$(readlink -f -- "$2")" ]; then state=matching; else state=different; fi; '
-            'printf "%s\\t%s" "$state" "$(readlink -- "$1")"; '
-            'elif [ -e "$1" ]; then printf other; else printf missing; fi',
-            [wsl_entry_path(link_path, distribution), wsl_entry_path(expected_target, distribution)],
-            f"Lecture du lien {link_path.name} impossible depuis WSL",
-        )
-        state, _, value = output.strip().partition("\t")
-        if state not in {"missing", "matching", "different", "other"}:
-            raise RuntimeError(f"Réponse inattendue de WSL pour le lien {link_path.name} : {output.strip()[:200]}")
-        return state, value
+    return addon_link_statuses([(link_path, expected_target)])[0]
+
+
+def addon_link_status_native(link_path, expected_target):
     if link_path.is_symlink():
         matching = link_path.resolve(strict=False) == Path(expected_target).resolve(strict=False)
         return ("matching" if matching else "different"), os.readlink(link_path)
@@ -3870,15 +3895,16 @@ def link_modules_job(job, project, source):
     link_module_candidates(job, project, find_module_candidates(source_path))
 
 
-def validate_module_repository(url, branch, mode, modules):
+def validate_module_repository(url, branch, modules, commit=""):
     url = validate_gitlab_repository(url)
     branch = validate_git_ref(branch)
-    if mode not in {"add", "update"}:
-        raise ValueError("Mode d’import invalide.")
-    # Sans noms : « add » importe tout le dépôt, « update » remplace tous les modules du
-    # dépôt déjà présents comme copies gérées dans le projet.
     names = module_name_list(modules) if modules else []
-    return url, branch, mode, names
+    if not names:
+        raise ValueError("Sélectionne au moins un module à importer.")
+    commit = str(commit or "").strip()
+    if commit and not REPOSITORY_COMMIT_RE.fullmatch(commit):
+        raise ValueError("Commit d’analyse invalide.")
+    return url, branch, names, commit
 
 
 REPOSITORY_SKIPPED_DIRS = frozenset({".git", "__pycache__", "node_modules"})
@@ -3938,20 +3964,106 @@ def module_provided_by_project(project, name):
     return False
 
 
-def repository_module_status(project, name, states):
-    storage = project_addons_storage_parent(project) / name
-    link = project_addons_link_parent(project) / name
-    # Un module standard ou Enterprise du même nom serait masqué par une copie importée.
-    present = (
-        storage.exists() or storage.is_symlink() or link.exists() or link.is_symlink()
-        or module_provided_by_project(project, name)
-    )
-    updatable = present and managed_module_copy_ready(project, name, storage) and managed_storage_link(project, name, storage)
-    return {
-        "present": present,
-        "updatable": updatable,
-        "state": states.get(name, {}).get("state", ""),
-    }
+REPOSITORY_GIT_OPTIONS = (
+    "-c", "core.sshCommand=ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new",
+    "-c", "protocol.allow=never", "-c", "protocol.ssh.allow=always",
+)
+REPOSITORY_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+MAX_MANIFEST_BYTES = 512 * 1024
+ODOO_SERIES_VERSION_RE = re.compile(r"^(\d+\.\d+)\.\d+\.\d+\.\d+$")
+
+
+def manifest_version_key(version):
+    parts = re.findall(r"\d+", str(version or ""))
+    return tuple(int(part) for part in parts) if parts else None
+
+
+def read_repository_manifest(module_path):
+    for filename in MANIFEST_FILENAMES:
+        manifest = Path(module_path) / filename
+        try:
+            if manifest.is_symlink() or not manifest.is_file():
+                continue
+            if manifest.stat().st_size > MAX_MANIFEST_BYTES:
+                return {}
+            return parse_manifest_text(manifest.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            return {}
+    return {}
+
+
+def repository_module_plans(project, modules, states, odoo_version):
+    """Décide, module par module, ce qu'un import ferait : add, update ou blocked.
+
+    Même règle pour l'aperçu et pour l'import, qui la réapplique sur le commit
+    réellement récupéré avant toute modification du projet.
+    `modules` : dicts name, path, manifest, has_symlink, duplicate.
+    """
+    storage_parent = project_addons_storage_parent(project)
+    link_parent = project_addons_link_parent(project)
+    valid = [module for module in modules if SAFE_MODULE_RE.fullmatch(module["name"]) and "," not in module["name"]]
+    link_states = dict(zip(
+        (module["name"] for module in valid),
+        addon_link_statuses((link_parent / module["name"], storage_parent / module["name"]) for module in valid),
+    ))
+    plans = []
+    for module in modules:
+        name = module["name"]
+        manifest = module.get("manifest") or {}
+        version = str(manifest.get("version") or "")
+        state = states.get(name, {})
+        plan = {
+            "name": name,
+            "path": module.get("path") or ".",
+            "title": str(manifest.get("name") or ""),
+            "version": version,
+            "current_version": "",
+            "installed_version": state.get("installed_version", ""),
+            "state": state.get("state", ""),
+            "action": "blocked",
+            "reason": "",
+            "warning": "",
+        }
+        plans.append(plan)
+        if name not in link_states:
+            plan["reason"] = "Nom de module invalide."
+            continue
+        if module.get("duplicate"):
+            plan["reason"] = "Présent plusieurs fois dans le dépôt."
+            continue
+        if module.get("has_symlink"):
+            plan["reason"] = "Contient des liens symboliques."
+            continue
+        if manifest and not manifest.get("installable", True):
+            plan["reason"] = "Marqué non installable dans son manifeste."
+            continue
+        series = ODOO_SERIES_VERSION_RE.match(version)
+        if series and odoo_version and series.group(1) != odoo_version:
+            plan["reason"] = f"Prévu pour Odoo {series.group(1)}, le projet est en Odoo {odoo_version}."
+            continue
+
+        storage = storage_parent / name
+        link_state, link_value = link_states[name]
+        if link_state == "matching" and managed_module_copy_ready(project, name, storage):
+            plan["action"] = "update"
+            plan["current_version"] = str(read_manifest_dict(storage).get("version") or "")
+            current_key, new_key = manifest_version_key(plan["current_version"]), manifest_version_key(version)
+            if current_key and new_key and new_key < current_key:
+                plan["warning"] = f"Version plus ancienne que celle du projet ({plan['current_version']})."
+        elif link_state == "different":
+            source = posixpath.dirname(posixpath.normpath(link_value.replace("\\", "/"))).lstrip("./")
+            plan["reason"] = f"Déjà fourni par {source}." if source else "Déjà fourni par un autre dossier du projet."
+        elif link_state == "other":
+            plan["reason"] = "Un dossier non géré occupe odoo/addons."
+        elif safe_path_exists(storage) or storage.is_symlink():
+            plan["reason"] = "Présent dans addons-store sans lien géré par le manager."
+        elif module_provided_by_project(project, name):
+            plan["reason"] = "Fourni par Odoo standard ou Enterprise : une copie le masquerait."
+        else:
+            plan["action"] = "add"
+            if plan["state"] in ACTIVE_MODULE_STATES:
+                plan["warning"] = "Installé en base mais code absent : l’import le rétablit."
+    return plans
 
 
 def inspect_repository_modules(project, url, branch, db_name=""):
@@ -3964,34 +4076,83 @@ def inspect_repository_modules(project, url, branch, db_name=""):
     repository_name = url.rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1].removesuffix(".git")
     with tempfile.TemporaryDirectory(prefix="repository-inspect-", dir=staging) as temporary:
         checkout = Path(temporary) / (repository_name or "repository")
-        # Arborescence seule : aucun contenu de fichier n'est téléchargé ni extrait.
+        # Clone sans contenu : seuls les manifestes sont téléchargés ensuite.
         clone = creator.git(
-            "-c", "core.sshCommand=ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new",
-            "-c", "protocol.allow=never", "-c", "protocol.ssh.allow=always",
+            *REPOSITORY_GIT_OPTIONS,
             "clone", "--depth", "1", "--filter=blob:none", "--no-checkout",
             "--single-branch", "--branch", branch, "--", url, creator.command_path(checkout),
         )
         code, output = creator.project_service.capture(clone, cwd=creator.command_cwd, timeout=180)
         if code:
             raise repository_clone_error(output)
-        tree = creator.git("-C", creator.command_path(checkout), "ls-tree", "-r", "--full-tree", "HEAD")
-        code, output = creator.project_service.capture(tree, cwd=creator.command_cwd, timeout=60)
+        git_dir = creator.command_path(checkout)
+        code, commit = creator.project_service.capture(creator.git("-C", git_dir, "rev-parse", "HEAD"), cwd=creator.command_cwd, timeout=30)
+        commit = commit.strip()
+        if code or not REPOSITORY_COMMIT_RE.fullmatch(commit):
+            raise RuntimeError("Lecture du commit de la branche impossible.")
+        code, tree = creator.project_service.capture(
+            creator.git("-C", git_dir, "ls-tree", "-r", "--full-tree", "HEAD"), cwd=creator.command_cwd, timeout=60,
+        )
         if code:
             raise RuntimeError("Lecture de l’arborescence du dépôt impossible.")
-    found, has_symlinks = repository_modules_from_tree(output, repository_name)
+        found, symlink_paths = repository_tree_modules(tree, repository_name)
+        manifests = {}
+        if found:
+            # Checkout clairsemé limité aux manifestes : Git récupère ces fichiers en un seul
+            # échange, là où `checkout -- chemins` les téléchargeait un par un (50 s pour 20 modules).
+            sparse = checkout / ".git" / "info" / "sparse-checkout"
+            sparse.parent.mkdir(parents=True, exist_ok=True)
+            sparse.write_text(
+                "".join(sparse_checkout_pattern(posixpath.join(path, filename) if path else filename)
+                        for path, _name, filename in found),
+                encoding="utf-8",
+            )
+            fetch = creator.git(*REPOSITORY_GIT_OPTIONS, "-c", "core.sparseCheckout=true", "-C", git_dir, "checkout", "-q", "HEAD")
+            code, _ = creator.project_service.capture(fetch, cwd=creator.command_cwd, timeout=180)
+            if code == 0:
+                manifests = {path: read_repository_manifest(checkout / path if path else checkout) for path, _name, _file in found}
+    names = [name for _path, name, _file in found]
+    modules = [
+        {
+            "name": name,
+            "path": path,
+            "manifest": manifests.get(path, {}),
+            "has_symlink": any(link == path or not path or link.startswith(path + "/") for link in symlink_paths),
+            "duplicate": names.count(name) > 1,
+        }
+        for path, name, _file in sorted(found, key=lambda item: (item[1].lower(), item[0]))
+    ]
     states = installed_modules(project, db_name) if db_name else {}
-    seen = {}
-    modules = []
-    for path, name in sorted(found.items(), key=lambda item: item[1].lower()):
-        valid = bool(SAFE_MODULE_RE.fullmatch(name)) and "," not in name
-        entry = {"name": name, "path": path or ".", "valid": valid, "duplicate": name in seen}
-        if name in seen:
-            seen[name]["duplicate"] = True
-        seen[name] = entry
-        entry.update(repository_module_status(project, name, states) if valid else
-                     {"present": False, "updatable": False, "state": ""})
-        modules.append(entry)
-    return {"modules": modules, "has_symlinks": has_symlinks}
+    odoo_version = project_odoo_version(project)
+    return {
+        "commit": commit,
+        "odoo_version": odoo_version,
+        "manifests_read": bool(manifests),
+        "modules": repository_module_plans(project, modules, states, odoo_version),
+    }
+
+
+def sparse_checkout_pattern(path):
+    """Motif sparse-checkout ne désignant que ce chemin exact, caractères spéciaux échappés."""
+    escaped = "".join("\\" + char if char in "*?[\\" else char for char in path)
+    return "/" + escaped + "\n"
+
+
+def repository_tree_modules(tree_output, repository_name):
+    """Liste (chemin, nom, manifeste) et les liens symboliques d'un `git ls-tree -r`."""
+    found, has_symlinks = repository_modules_from_tree(tree_output, repository_name)
+    manifest_files = {}
+    symlinks = []
+    for line in str(tree_output or "").splitlines():
+        meta, _, path = line.partition("\t")
+        if not path:
+            continue
+        if meta.split(" ", 1)[0] == "120000":
+            symlinks.append(path)
+        directory, filename = posixpath.dirname(path), posixpath.basename(path)
+        if filename in MANIFEST_FILENAMES and directory in found:
+            manifest_files.setdefault(directory, filename)
+    return [(path, name, manifest_files.get(path, MANIFEST_FILENAMES[0])) for path, name in found.items()], symlinks
 
 
 def repository_clone_error(stderr):
@@ -4016,78 +4177,87 @@ def repository_clone_error(stderr):
     )
 
 
-def repository_modules_job(job, project, url, branch, mode, names):
-    """Import an isolated SSH snapshot; roll back every changed module on failure."""
+def repository_modules_job(job, project, url, branch, names, commit=""):
+    """Import des modules choisis : ajout ou remplacement décidé par module, tout ou rien."""
     project = validate_project(project)
+    if not names:
+        raise ValueError("Sélectionne au moins un module à importer.")
     creator = ProjectCreator(SETTINGS, WORKSPACE, project_service())
     staging = project_staging_imports_root(project)
     staging.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="repository-", dir=staging) as temporary:
-        checkout = Path(temporary) / url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+        checkout = Path(temporary) / url.rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1].removesuffix(".git")
         job.add(f"Récupération du dépôt {url}, branche {branch}…")
         command = creator.git(
-            "-c", "core.sshCommand=ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new",
-            "-c", "protocol.allow=never", "-c", "protocol.ssh.allow=always",
-            "clone", "--depth", "1",
-            "--single-branch", "--branch", branch, "--", url, creator.command_path(checkout),
+            *REPOSITORY_GIT_OPTIONS,
+            "clone", "--depth", "1", "--single-branch", "--branch", branch, "--", url, creator.command_path(checkout),
         )
         code, output = creator.project_service.capture(command, cwd=creator.command_cwd, timeout=300)
         if code:
             raise repository_clone_error(output)
-        # Reject symlinks before discovery/copy, including links outside the checkout.
-        if any(path.is_symlink() for path in checkout.rglob("*") if ".git" not in path.relative_to(checkout).parts):
-            raise ValueError("Ce dépôt contient des liens symboliques : import refusé.")
-        candidates = find_module_candidates(checkout)
-        by_name = {}
-        for candidate in candidates:
-            validate_modules(candidate.name)
-            if candidate.name in by_name:
-                raise ValueError(f"Nom de module ambigu dans le dépôt : {candidate.name}")
-            by_name[candidate.name] = candidate
-        storage = project_addons_storage_parent(project)
-        links = project_addons_link_parent(project)
-        if names:
-            missing = sorted(set(names) - by_name.keys())
-            if missing:
-                raise ValueError("Modules absents du dépôt : " + ", ".join(missing))
-            candidates = [by_name[name] for name in dict.fromkeys(names)]
-        elif mode == "update":
-            updatable = [
-                candidate for candidate in candidates
-                if managed_module_copy_ready(project, candidate.name, storage / candidate.name)
-                and managed_storage_link(project, candidate.name, storage / candidate.name)
-            ]
-            skipped = len(candidates) - len(updatable)
-            if skipped:
-                job.add(f"{skipped} module(s) du dépôt ignoré(s) : absents du projet ou non gérés dans addons-store.")
-            if not updatable:
-                raise ValueError("Aucun module du dépôt n’est déjà présent comme copie gérée dans ce projet.")
-            candidates = updatable
-        if not candidates:
-            raise ValueError("Aucun module Odoo trouvé dans le dépôt.")
-        for candidate in candidates:
-            target, link = storage / candidate.name, links / candidate.name
-            exists = target.exists() or target.is_symlink() or addon_link_status(link, target)[0] != "missing"
-            if mode == "add" and exists:
-                raise ValueError(f"Module déjà présent : {candidate.name}. Utilise la mise à jour.")
-            if mode == "add" and module_provided_by_project(project, candidate.name):
+        if commit:
+            code, head = creator.project_service.capture(
+                creator.git("-C", creator.command_path(checkout), "rev-parse", "HEAD"), cwd=creator.command_cwd, timeout=30,
+            )
+            if code or head.strip() != commit:
                 raise ValueError(
-                    f"Module déjà fourni par le projet (Odoo standard, Enterprise ou autre dépôt) : {candidate.name}. "
-                    "Une copie importée le masquerait."
+                    f"La branche {branch} a reçu de nouveaux commits depuis l’analyse. "
+                    "Rouvre l’import pour vérifier les modules avant de les copier."
                 )
-            if mode == "update" and not (managed_module_copy_ready(project, candidate.name, target)
-                                          and managed_storage_link(project, candidate.name, target)):
-                raise ValueError(f"Mise à jour refusée : {candidate.name} doit être une copie gérée dans addons-store.")
-        job.add("Modules sélectionnés : " + ", ".join(c.name for c in candidates))
+            job.add(f"Commit vérifié : {commit[:12]}")
+
+        by_name = {}
+        for candidate in find_module_candidates(checkout):
+            by_name.setdefault(candidate.name, []).append(candidate)
+        names = list(dict.fromkeys(names))
+        missing = sorted(set(names) - by_name.keys())
+        if missing:
+            raise ValueError("Modules absents du dépôt : " + ", ".join(missing))
+        selected = [by_name[name][0] for name in names]
+        plans = repository_module_plans(
+            project,
+            [
+                {
+                    "name": candidate.name,
+                    "path": str(candidate.relative_to(checkout)),
+                    "manifest": read_repository_manifest(candidate),
+                    # Liens refusés dans les modules copiés : ils pourraient pointer hors du dépôt.
+                    "has_symlink": candidate.is_symlink() or any(path.is_symlink() for path in candidate.rglob("*")),
+                    "duplicate": len(by_name[candidate.name]) > 1,
+                }
+                for candidate in selected
+            ],
+            {},
+            project_odoo_version(project),
+        )
+        blocked = [plan for plan in plans if plan["action"] == "blocked"]
+        if blocked:
+            raise ValueError(
+                "Import annulé avant toute modification :\n"
+                + "\n".join(f"• {plan['name']} : {plan['reason']}" for plan in blocked)
+            )
+        for plan in plans:
+            if plan["warning"]:
+                job.add(f"Attention, {plan['name']} : {plan['warning']}")
+
+        storage, links = project_addons_storage_parent(project), project_addons_link_parent(project)
+        added = [plan["name"] for plan in plans if plan["action"] == "add"]
+        updated = [plan["name"] for plan in plans if plan["action"] == "update"]
+        job.add(
+            f"Modules à ajouter ({len(added)}) : {', '.join(added) or '-'} · "
+            f"à mettre à jour ({len(updated)}) : {', '.join(updated) or '-'}"
+        )
         backups, created = [], []
         try:
-            for candidate in candidates:
+            for candidate, plan in zip(selected, plans):
                 target, link = storage / candidate.name, links / candidate.name
-                if mode == "update":
+                if plan["action"] == "update":
                     backups.append((target, backup_existing_module(job, project, target)))
-                created.append(target)
+                # Seul ce que l'import crée est retiré en cas d'échec, jamais un dossier déjà présent.
+                if not (target.exists() or target.is_symlink()):
+                    created.append(target)
                 copy_module_to_storage(job, project, candidate)
-                if mode == "add":
+                if plan["action"] == "add" and addon_link_status(link, target)[0] == "missing":
                     created.append(link)
                 ensure_relative_module_link(job, project, candidate.name, target)
         except Exception:
@@ -4099,13 +4269,9 @@ def repository_modules_job(job, project, url, branch, mode, names):
             raise
         finally:
             clear_project_module_cache(project)
-        job.add(f"Code préparé : {len(candidates)} module(s), source {url}, branche {branch}.")
+        job.add(f"Code préparé : {len(plans)} module(s), source {url}, branche {branch}.")
         job.add("Installe ou mets à jour ces modules dans la base Odoo depuis l’interface.")
-        job.result = {
-            "kind": "repository_modules",
-            "mode": mode,
-            "modules": [candidate.name for candidate in candidates],
-        }
+        job.result = {"kind": "repository_modules", "modules": names, "added": added, "updated": updated}
 
 
 def safe_import_name(filename):
@@ -5010,10 +5176,10 @@ class Handler(BaseHTTPRequestHandler):
 
             if action == "repository_modules":
                 project = validate_project(payload.get("project", ""))
-                url, branch, mode, names = validate_module_repository(
-                    payload.get("url"), payload.get("branch"), payload.get("mode"), payload.get("modules"))
-                job = Job(f"{'Ajouter' if mode == 'add' else 'Actualiser'} des modules depuis Git · {project}",
-                          repository_modules_job, (project, url, branch, mode, names), project=project)
+                url, branch, names, commit = validate_module_repository(
+                    payload.get("url"), payload.get("branch"), payload.get("modules"), payload.get("commit"))
+                job = Job(f"Importer des modules depuis Git · {project}",
+                          repository_modules_job, (project, url, branch, names, commit), project=project)
             elif action == "start_project":
                 project = validate_project(payload.get("project", ""))
                 job = Job(f"Démarrer {project}", start_project_job, (project,), project=project)

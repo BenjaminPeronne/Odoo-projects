@@ -261,36 +261,45 @@ function normalizeSearchText(value: string) {
 type RepositoryModule = {
   name: string;
   path: string;
-  valid: boolean;
-  duplicate: boolean;
-  present: boolean;
-  updatable: boolean;
+  title: string;
+  version: string;
+  current_version: string;
+  installed_version: string;
   state: string;
+  action: "add" | "update" | "blocked";
+  reason: string;
+  warning: string;
 };
 
 type RepositoryInspection =
   | { status: "idle" }
   | { status: "loading"; key: string }
-  | { status: "ready"; key: string; modules: RepositoryModule[]; hasSymlinks: boolean }
+  | { status: "ready"; key: string; modules: RepositoryModule[]; commit: string; odooVersion: string; manifestsRead: boolean }
   | { status: "error"; key: string; error: string };
 
 // Au-delà, le rendu des lignes ralentit la fenêtre (dépôts complets de 1 500 modules) : on filtre.
 const REPOSITORY_PICKER_MAX_ROWS = 200;
 const GITLAB_TOKEN_URL = "https://gitlab.sudokeys.com/-/user_settings/personal_access_tokens?name=SDK%20Local%20Manager&scopes=read_api";
+const REPOSITORY_ACTION_ORDER = { update: 0, add: 1, blocked: 2 } as const;
 
-function repositoryModuleEligible(module: RepositoryModule, mode: string) {
-  if (!module.valid || module.duplicate) return false;
-  return mode === "update" ? module.updatable : !module.present;
+function RepositoryModuleVersion({ module }: { module: RepositoryModule }) {
+  if (module.action === "update" && module.current_version && module.version && module.current_version !== module.version) {
+    return (
+      <span className="font-mono text-xs tabular-nums">
+        <span className="text-muted-foreground">{module.current_version}</span>
+        <span className="mx-1 text-muted-foreground">→</span>
+        <span className="font-medium">{module.version}</span>
+      </span>
+    );
+  }
+  return <span className="font-mono text-xs tabular-nums text-muted-foreground">{module.version || "—"}</span>;
 }
 
-function repositoryModuleHint(module: RepositoryModule, mode: string) {
-  if (!module.valid) return "Nom invalide";
-  if (module.duplicate) return "En double dans le dépôt";
-  if (mode === "update") {
-    if (module.updatable) return "Remplaçable";
-    return module.present ? "Présent, non géré par le manager" : "Absent du projet";
-  }
-  return module.present ? "Déjà présent dans le projet" : "Nouveau";
+function RepositoryModuleStatus({ module }: { module: RepositoryModule }) {
+  if (module.action === "blocked") return <Badge variant="outline" className="shrink-0">Bloqué</Badge>;
+  if (module.action === "add") return <Badge variant="success" className="shrink-0">Nouveau</Badge>;
+  const same = Boolean(module.current_version && module.current_version === module.version);
+  return <Badge variant="default" className="shrink-0">{same ? "Réimport" : "Mise à jour"}</Badge>;
 }
 
 function socleAppInstalled(app: SocleApp) {
@@ -1007,14 +1016,10 @@ export default function Home() {
   const [repositorySubmitting, setRepositorySubmitting] = useState(false);
   const [repositoryUrl, setRepositoryUrl] = useState("");
   const [repositoryBranch, setRepositoryBranch] = useState("");
-  const [repositoryMode, setRepositoryMode] = useState("add");
-  const [repositoryModules, setRepositoryModules] = useState("");
   const [repositoryInspection, setRepositoryInspection] = useState<RepositoryInspection>({ status: "idle" });
   const [repositorySelection, setRepositorySelection] = useState<Set<string>>(new Set());
-  const [repositoryPickerOpen, setRepositoryPickerOpen] = useState(false);
-  const [repositoryPickerSearch, setRepositoryPickerSearch] = useState("");
-  const [repositoryUpdateAll, setRepositoryUpdateAll] = useState(false);
-  const repositoryAutoOpenedKey = useRef("");
+  const [repositoryFilter, setRepositoryFilter] = useState("");
+  const [repositoryInspectionAttempt, setRepositoryInspectionAttempt] = useState(0);
   const [gitlabStatus, setGitlabStatus] = useState<GitLabStatus | null>(null);
   const [gitlabTokenDraft, setGitlabTokenDraft] = useState("");
   const [gitlabConnecting, setGitlabConnecting] = useState(false);
@@ -2083,8 +2088,9 @@ export default function Home() {
         project: selectedProject.name,
         url: repositoryUrl.trim(),
         branch: repositoryBranch.trim(),
-        mode: repositoryMode,
-        modules: repositorySubmittedModules,
+        modules: repositorySelectedModules.map((module) => module.name).join(","),
+        // Le serveur refuse l'import si la branche a bougé depuis l'aperçu validé ici.
+        commit: repositoryInspection.status === "ready" ? repositoryInspection.commit : "",
       });
       if (!job) return;
       setRepositoryOpen(false);
@@ -2653,20 +2659,81 @@ export default function Home() {
   const repositoryInspectionKey = repositoryOpen && repositoryUrl.trim() && !repositoryUrlError && repositoryBranch.trim()
     ? `${selectedProject?.name || ""}|${repositoryUrl.trim()}|${repositoryBranch.trim()}`
     : "";
-  const repositoryReadyModules = repositoryInspection.status === "ready" ? repositoryInspection.modules : [];
-  const repositoryEligibleModules = repositoryReadyModules.filter((module) => repositoryModuleEligible(module, repositoryMode));
-  const repositoryUsesPicker = repositoryInspection.status === "ready";
-  const repositorySelectedList = repositoryEligibleModules.map((module) => module.name).filter((name) => repositorySelection.has(name));
-  const repositorySubmittedModules = repositoryMode === "update" && repositoryUpdateAll
-    ? ""
-    : repositoryUsesPicker ? repositorySelectedList.join(",") : repositoryModules.trim();
-  const repositoryHasTarget = repositoryMode === "update" && repositoryUpdateAll
-    ? !repositoryUsesPicker || repositoryEligibleModules.length > 0
-    : repositoryUsesPicker ? repositorySelectedList.length > 0 : repositoryMode === "add" || Boolean(repositoryModules.trim());
+  const repositoryReadyModules = useMemo(
+    () =>
+      repositoryInspection.status === "ready"
+        ? [...repositoryInspection.modules].sort(
+            (left, right) => REPOSITORY_ACTION_ORDER[left.action] - REPOSITORY_ACTION_ORDER[right.action] || left.name.localeCompare(right.name),
+          )
+        : [],
+    [repositoryInspection],
+  );
+  const repositorySelectableModules = repositoryReadyModules.filter((module) => module.action !== "blocked");
+  const repositorySelectedModules = repositorySelectableModules.filter((module) => repositorySelection.has(module.name));
+  const repositorySelectedAdds = repositorySelectedModules.filter((module) => module.action === "add").length;
+  const repositorySelectedUpdates = repositorySelectedModules.length - repositorySelectedAdds;
+  const repositoryUpdatableModules = repositorySelectableModules.filter((module) => module.action === "update");
+  function repositoryModuleRow(module: RepositoryModule) {
+    const blocked = module.action === "blocked";
+    const selected = !blocked && repositorySelection.has(module.name);
+    const note = module.reason || module.warning;
+    const detail = [module.title, module.path !== module.name && module.path !== "." ? module.path : ""].filter(Boolean).join(" · ");
+    return (
+      <label
+        key={`${module.path}:${module.name}`}
+        className={cn(
+          "grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1 px-3 py-2.5 text-sm sm:grid-cols-[auto_minmax(0,1fr)_9rem_6.5rem] sm:items-center",
+          blocked ? "cursor-default" : "cursor-pointer hover:bg-muted/45",
+          selected && "bg-primary/[0.06] dark:bg-primary/[0.12]",
+        )}
+      >
+        <Checkbox
+          className="mt-0.5 sm:mt-0"
+          checked={selected}
+          disabled={blocked}
+          aria-label={`Importer ${module.name}`}
+          onCheckedChange={(checked) =>
+            setRepositorySelection((current) => {
+              const next = new Set(current);
+              if (checked === true) next.add(module.name);
+              else next.delete(module.name);
+              return next;
+            })
+          }
+        />
+        <span className="min-w-0">
+          <span className={cn("block truncate font-mono text-[13px] font-medium", blocked && "text-muted-foreground")}>{module.name}</span>
+          {detail && <span className="block truncate text-xs text-muted-foreground">{detail}</span>}
+          {note && (
+            <span className={cn("mt-0.5 block text-xs", module.reason ? "text-muted-foreground" : "text-amber-700 dark:text-amber-300")}>
+              {note}
+            </span>
+          )}
+        </span>
+        <span className="col-start-2 sm:col-start-auto sm:text-right">
+          <RepositoryModuleVersion module={module} />
+        </span>
+        <span className="col-start-3 row-start-1 flex justify-end sm:col-start-auto sm:row-start-auto">
+          <RepositoryModuleStatus module={module} />
+        </span>
+      </label>
+    );
+  }
+
+  const repositoryVisibleModules = useMemo(() => {
+    const query = normalizeSearchText(repositoryFilter.trim());
+    return query
+      ? repositoryReadyModules.filter((module) => normalizeSearchText(`${module.name} ${module.title} ${module.path}`).includes(query))
+      : repositoryReadyModules;
+  }, [repositoryFilter, repositoryReadyModules]);
+  const repositoryVisibleSelectable = repositoryVisibleModules.filter((module) => module.action !== "blocked");
+  const repositoryVisibleBlocked = repositoryVisibleModules.filter((module) => module.action === "blocked");
 
   useEffect(() => {
     if (!repositoryOpen) return;
     setRepositorySource("ssh");
+    // Proposition par défaut : la branche qui porte le nom de la version Odoo du projet.
+    setRepositoryBranch((current) => current || selectedProject?.odoo_version || "");
     setGitlabProject(null);
     setGitlabRefs(null);
     setGitlabError("");
@@ -2726,10 +2793,15 @@ export default function Home() {
   }, [repositoryOpen, repositorySource, gitlabProject, gitlabRefSearch]);
 
   useEffect(() => {
+    const version = selectedProject?.odoo_version;
+    if (!gitlabRefs || repositoryBranch || !version) return;
+    if (gitlabRefs.branches.some((branch) => branch.name === version)) setRepositoryBranch(version);
+  }, [gitlabRefs]);
+
+  useEffect(() => {
     if (!repositoryOpen) {
       setRepositoryInspection({ status: "idle" });
-      setRepositoryPickerOpen(false);
-      repositoryAutoOpenedKey.current = "";
+      setRepositoryFilter("");
       return;
     }
     if (!repositoryInspectionKey || !selectedProject) {
@@ -2740,7 +2812,7 @@ export default function Home() {
     // Attend la fin de la saisie : une branche tapée lettre par lettre n'existe pas encore.
     const timer = window.setTimeout(() => {
       setRepositoryInspection({ status: "loading", key: repositoryInspectionKey });
-      api<{ modules: RepositoryModule[]; has_symlinks: boolean }>(
+      api<{ modules: RepositoryModule[]; commit: string; odoo_version: string; manifests_read: boolean }>(
         `/api/projects/${encodeURIComponent(selectedProject.name)}/repository/inspect`,
         {
           method: "POST",
@@ -2749,13 +2821,15 @@ export default function Home() {
       )
         .then((result) => {
           if (cancelled) return;
-          setRepositoryInspection({ status: "ready", key: repositoryInspectionKey, modules: result.modules, hasSymlinks: result.has_symlinks });
+          setRepositoryInspection({
+            status: "ready",
+            key: repositoryInspectionKey,
+            modules: result.modules,
+            commit: result.commit,
+            odooVersion: result.odoo_version,
+            manifestsRead: result.manifests_read,
+          });
           setRepositorySelection(new Set());
-          if (repositoryAutoOpenedKey.current !== repositoryInspectionKey) {
-            repositoryAutoOpenedKey.current = repositoryInspectionKey;
-            setRepositoryPickerSearch("");
-            setRepositoryPickerOpen(true);
-          }
         })
         .catch((err) => {
           if (!cancelled) {
@@ -2771,7 +2845,7 @@ export default function Home() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [repositoryInspectionKey, repositoryOpen]);
+  }, [repositoryInspectionKey, repositoryOpen, repositoryInspectionAttempt]);
   const soclePlanKey = socleDialogOpen && canUseDb ? soclePresetsToInstall.join(",") : "";
 
   useEffect(() => {
@@ -5746,361 +5820,325 @@ export default function Home() {
       </Dialog>
 
       <Dialog open={repositoryOpen} onOpenChange={setRepositoryOpen}>
-        <DialogContent className="max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>Modules depuis un dépôt SSH</DialogTitle>
-            <DialogDescription>Copie le code dans le projet {selectedProject?.name}. Choisis une branche compatible avec sa version Odoo.</DialogDescription>
+        <DialogContent className="flex max-w-3xl flex-col gap-0 overflow-hidden p-0">
+          <DialogHeader className="border-b px-6 pb-4 pt-6">
+            <DialogTitle>Importer des modules depuis Git</DialogTitle>
+            <DialogDescription>
+              Le code est copié dans {selectedProject?.name}. Un module absent est ajouté, une copie déjà gérée est mise à jour.
+            </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4">
-            {gitlabStatus?.connected && (
-              <div className="grid grid-cols-2 gap-1 rounded-md border bg-muted/35 p-1" role="radiogroup" aria-label="Source du dépôt">
-                {([["ssh", "Lien SSH"], ["gitlab", "Rechercher dans GitLab"]] as const).map(([value, label]) => (
-                  <button
-                    key={value}
-                    type="button"
-                    role="radio"
-                    aria-checked={repositorySource === value}
-                    className={cn(
-                      "rounded px-3 py-1.5 text-sm font-medium transition-colors",
-                      repositorySource === value ? "bg-background shadow-sm" : "text-muted-foreground hover:text-foreground",
-                    )}
-                    onClick={() => setRepositorySource(value)}
-                  >
-                    {label}
-                  </button>
-                ))}
+
+          <div className="min-h-0 flex-1 space-y-6 overflow-y-auto px-6 py-5">
+            <section className="space-y-3" aria-labelledby="repository-source-title">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h3 id="repository-source-title" className="text-sm font-semibold">Dépôt et branche</h3>
+                {gitlabStatus?.connected && (
+                  <div className="grid grid-cols-2 gap-1 rounded-md border bg-muted/35 p-1" role="radiogroup" aria-label="Source du dépôt">
+                    {([["ssh", "Lien SSH"], ["gitlab", "Rechercher dans GitLab"]] as const).map(([value, label]) => (
+                      <button
+                        key={value}
+                        type="button"
+                        role="radio"
+                        aria-checked={repositorySource === value}
+                        className={cn(
+                          "rounded px-3 py-1 text-sm font-medium transition-colors",
+                          repositorySource === value ? "bg-background shadow-sm" : "text-muted-foreground hover:text-foreground",
+                        )}
+                        onClick={() => setRepositorySource(value)}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
-            )}
-            {repositorySource === "gitlab" && gitlabStatus?.connected ? (
-              <div className="space-y-3">
-                {gitlabError && <p className="text-sm text-destructive">{gitlabError}</p>}
-                {!gitlabProject ? (
-                  <div className="space-y-2">
-                    <div className="relative">
+                {repositorySource === "gitlab" && gitlabStatus?.connected ? (
+                  <div className="space-y-3">
+                    {gitlabError && <p className="text-sm text-destructive">{gitlabError}</p>}
+                    {!gitlabProject ? (
+                      <div className="space-y-2">
+                        <div className="relative">
+                          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                          <Input
+                            className="pl-9"
+                            value={gitlabSearch}
+                            onChange={(event) => setGitlabSearch(event.target.value)}
+                            placeholder="Nom du dépôt, par exemple protex"
+                            aria-label="Rechercher un dépôt GitLab"
+                            autoFocus
+                          />
+                        </div>
+                        <div className="max-h-64 overflow-y-auto rounded-md border">
+                          {gitlabProjects === null ? (
+                            <p className="flex items-center gap-2 p-3 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />Recherche dans GitLab…</p>
+                          ) : gitlabProjects.length ? (
+                            <div className="divide-y">
+                              {gitlabProjects.map((project) => (
+                                <button
+                                  key={project.id}
+                                  type="button"
+                                  className="flex w-full min-w-0 items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-muted/45"
+                                  onClick={() => {
+                                    setGitlabProject(project);
+                                    setGitlabRefSearch("");
+                                    setRepositoryUrl(project.sshUrl);
+                                    setRepositoryBranch("");
+                                  }}
+                                >
+                                  <span className="min-w-0">
+                                    <span className="block truncate font-medium">{project.name}</span>
+                                    <span className="block truncate text-xs text-muted-foreground">{project.path}</span>
+                                  </span>
+                                  {project.defaultBranch && <Badge variant="outline" className="shrink-0">{project.defaultBranch}</Badge>}
+                                </button>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="p-3 text-sm text-muted-foreground">Aucun dépôt accessible ne correspond à cette recherche.</p>
+                          )}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        <div className="flex min-w-0 items-center justify-between gap-3 rounded-md border bg-muted/35 p-3 text-sm">
+                          <span className="min-w-0">
+                            <span className="block truncate font-medium">{gitlabProject.name}</span>
+                            <span className="block truncate font-mono text-xs text-muted-foreground">{gitlabProject.sshUrl}</span>
+                          </span>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="shrink-0"
+                            onClick={() => {
+                              setGitlabProject(null);
+                              setGitlabRefs(null);
+                              setRepositoryUrl("");
+                              setRepositoryBranch("");
+                            }}
+                          >
+                            Changer
+                          </Button>
+                        </div>
+                        <div className="relative">
+                          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                          <Input
+                            className="pl-9"
+                            value={gitlabRefSearch}
+                            onChange={(event) => setGitlabRefSearch(event.target.value)}
+                            placeholder="Filtrer les branches et tags"
+                            aria-label="Filtrer les branches et tags"
+                          />
+                        </div>
+                        <div className="max-h-56 overflow-y-auto rounded-md border" role="listbox" aria-label="Branches et tags">
+                          {gitlabRefs === null ? (
+                            <p className="flex items-center gap-2 p-3 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />Lecture des branches…</p>
+                          ) : gitlabRefs.branches.length || gitlabRefs.tags.length ? (
+                            <div className="divide-y">
+                              {[
+                                ...[...gitlabRefs.branches].sort((left, right) => Number(right.default) - Number(left.default)).map((branch) => ({ name: branch.name, kind: branch.default ? "Branche par défaut" : "Branche" })),
+                                ...gitlabRefs.tags.map((tag) => ({ name: tag, kind: "Tag" })),
+                              ].map((ref) => (
+                                <button
+                                  key={`${ref.kind}:${ref.name}`}
+                                  type="button"
+                                  role="option"
+                                  aria-selected={repositoryBranch === ref.name}
+                                  className={cn(
+                                    "flex w-full min-w-0 items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-muted/45",
+                                    repositoryBranch === ref.name && "bg-primary/[0.08] font-medium",
+                                  )}
+                                  onClick={() => setRepositoryBranch(ref.name)}
+                                >
+                                  <span className="flex min-w-0 items-center gap-2">
+                                    {repositoryBranch === ref.name ? <CheckCircle2 className="h-4 w-4 shrink-0 text-primary" /> : <GitBranch className="h-4 w-4 shrink-0 text-muted-foreground" />}
+                                    <span className="truncate font-mono text-[13px]">{ref.name}</span>
+                                  </span>
+                                  <span className="shrink-0 text-xs text-muted-foreground">{ref.kind}</span>
+                                </button>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="p-3 text-sm text-muted-foreground">Aucune branche ni aucun tag ne correspond.</p>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+            ) : (
+                <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_12rem]">
+                  <label className="grid gap-1.5 text-sm font-medium">
+                    URL SSH du dépôt
+                    <Input
+                      value={repositoryUrl}
+                      onChange={(event) => setRepositoryUrl(event.target.value)}
+                      placeholder="ssh://git@gitlab.sudokeys.com:10022/equipe/depot.git"
+                      aria-invalid={Boolean(repositoryUrlError)}
+                      aria-describedby={repositoryUrlError ? "repository-url-error" : undefined}
+                    />
+                    {repositoryUrlError && <span id="repository-url-error" className="text-xs font-normal text-destructive">{repositoryUrlError}</span>}
+                  </label>
+                  <label className="grid content-start gap-1.5 text-sm font-medium">
+                    Branche ou tag
+                    <Input
+                      value={repositoryBranch}
+                      onChange={(event) => setRepositoryBranch(event.target.value)}
+                      placeholder={selectedProject?.odoo_version || "18.0"}
+                      className="font-mono"
+                    />
+                  </label>
+                </div>
+              )}
+              <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                <KeyRound className="h-3.5 w-3.5" />
+                Accès par la clé SSH de cet ordinateur, sans jeton stocké.
+                <button type="button" className="font-medium text-primary underline-offset-2 hover:underline" onClick={() => openSshAssistant()}>
+                  Gérer la clé SSH
+                </button>
+              </p>
+            </section>
+
+            <section className="space-y-3 border-t pt-5" aria-labelledby="repository-modules-title">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <h3 id="repository-modules-title" className="text-sm font-semibold">Modules</h3>
+                {repositoryInspection.status === "ready" && (
+                  <span className="font-mono text-xs text-muted-foreground" title={repositoryInspection.commit}>
+                    {repositoryBranch.trim()} · {repositoryInspection.commit.slice(0, 10)}
+                    {repositoryInspection.odooVersion ? ` · projet Odoo ${repositoryInspection.odooVersion}` : ""}
+                  </span>
+                )}
+              </div>
+
+              {repositoryInspection.status === "idle" && (
+                <p className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
+                  Choisis un dépôt et une branche : ses modules s’afficheront ici avec leur version et l’action prévue.
+                </p>
+              )}
+              {repositoryInspection.status === "loading" && (
+                <p className="flex items-center gap-2 rounded-md border border-dashed p-4 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Lecture des modules et de leurs versions…
+                </p>
+              )}
+              {repositoryInspection.status === "error" && (
+                <div className="flex flex-col gap-3 rounded-md border border-destructive/40 bg-destructive/5 p-4 text-sm sm:flex-row sm:items-center sm:justify-between">
+                  <span className="text-destructive">{repositoryInspection.error}</span>
+                  <Button type="button" size="sm" variant="outline" onClick={() => setRepositoryInspectionAttempt((attempt) => attempt + 1)}>
+                    <RefreshCcw className="h-4 w-4" />
+                    Réessayer
+                  </Button>
+                </div>
+              )}
+              {repositoryInspection.status === "ready" && (
+                <>
+                  {!repositoryInspection.manifestsRead && repositoryReadyModules.length > 0 && (
+                    <p className="text-xs text-amber-700 dark:text-amber-300">
+                      Versions illisibles pour ce dépôt : la compatibilité Odoo sera vérifiée pendant l’import.
+                    </p>
+                  )}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="relative min-w-48 flex-1">
                       <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                       <Input
                         className="pl-9"
-                        value={gitlabSearch}
-                        onChange={(event) => setGitlabSearch(event.target.value)}
-                        placeholder="Nom du dépôt, par exemple protex"
-                        aria-label="Rechercher un dépôt GitLab"
-                        autoFocus
+                        value={repositoryFilter}
+                        onChange={(event) => setRepositoryFilter(event.target.value)}
+                        placeholder={`Filtrer les ${repositoryReadyModules.length} modules`}
+                        aria-label="Filtrer les modules du dépôt"
                       />
                     </div>
-                    <div className="max-h-64 overflow-y-auto rounded-md border">
-                      {gitlabProjects === null ? (
-                        <p className="flex items-center gap-2 p-3 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />Recherche dans GitLab…</p>
-                      ) : gitlabProjects.length ? (
-                        <div className="divide-y">
-                          {gitlabProjects.map((project) => (
-                            <button
-                              key={project.id}
-                              type="button"
-                              className="flex w-full min-w-0 items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-muted/45"
-                              onClick={() => {
-                                setGitlabProject(project);
-                                setGitlabRefSearch("");
-                                setRepositoryUrl(project.sshUrl);
-                                setRepositoryBranch("");
-                              }}
-                            >
-                              <span className="min-w-0">
-                                <span className="block truncate font-medium">{project.name}</span>
-                                <span className="block truncate text-xs text-muted-foreground">{project.path}</span>
-                              </span>
-                              {project.defaultBranch && <Badge variant="outline" className="shrink-0">{project.defaultBranch}</Badge>}
-                            </button>
-                          ))}
-                        </div>
-                      ) : (
-                        <p className="p-3 text-sm text-muted-foreground">Aucun dépôt accessible ne correspond à cette recherche.</p>
-                      )}
-                    </div>
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    <div className="flex min-w-0 items-center justify-between gap-3 rounded-md border bg-muted/35 p-3 text-sm">
-                      <span className="min-w-0">
-                        <span className="block truncate font-medium">{gitlabProject.name}</span>
-                        <span className="block truncate font-mono text-xs text-muted-foreground">{gitlabProject.sshUrl}</span>
-                      </span>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={!repositorySelectableModules.length}
+                      onClick={() => setRepositorySelection(new Set(repositorySelectableModules.map((module) => module.name)))}
+                    >
+                      Tout sélectionner ({repositorySelectableModules.length})
+                    </Button>
+                    {repositoryUpdatableModules.length > 0 && (
                       <Button
                         type="button"
                         size="sm"
                         variant="outline"
-                        className="shrink-0"
-                        onClick={() => {
-                          setGitlabProject(null);
-                          setGitlabRefs(null);
-                          setRepositoryUrl("");
-                          setRepositoryBranch("");
-                        }}
+                        onClick={() => setRepositorySelection(new Set(repositoryUpdatableModules.map((module) => module.name)))}
                       >
-                        Changer
+                        Seulement les mises à jour ({repositoryUpdatableModules.length})
                       </Button>
-                    </div>
-                    <div className="relative">
-                      <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                      <Input
-                        className="pl-9"
-                        value={gitlabRefSearch}
-                        onChange={(event) => setGitlabRefSearch(event.target.value)}
-                        placeholder="Filtrer les branches et tags"
-                        aria-label="Filtrer les branches et tags"
-                      />
-                    </div>
-                    <div className="max-h-56 overflow-y-auto rounded-md border" role="listbox" aria-label="Branches et tags">
-                      {gitlabRefs === null ? (
-                        <p className="flex items-center gap-2 p-3 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />Lecture des branches…</p>
-                      ) : gitlabRefs.branches.length || gitlabRefs.tags.length ? (
-                        <div className="divide-y">
-                          {[
-                            ...[...gitlabRefs.branches].sort((left, right) => Number(right.default) - Number(left.default)).map((branch) => ({ name: branch.name, kind: branch.default ? "Branche par défaut" : "Branche" })),
-                            ...gitlabRefs.tags.map((tag) => ({ name: tag, kind: "Tag" })),
-                          ].map((ref) => (
-                            <button
-                              key={`${ref.kind}:${ref.name}`}
-                              type="button"
-                              role="option"
-                              aria-selected={repositoryBranch === ref.name}
-                              className={cn(
-                                "flex w-full min-w-0 items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-muted/45",
-                                repositoryBranch === ref.name && "bg-primary/[0.08] font-medium",
-                              )}
-                              onClick={() => setRepositoryBranch(ref.name)}
-                            >
-                              <span className="flex min-w-0 items-center gap-2">
-                                {repositoryBranch === ref.name ? <CheckCircle2 className="h-4 w-4 shrink-0 text-primary" /> : <GitBranch className="h-4 w-4 shrink-0 text-muted-foreground" />}
-                                <span className="truncate font-mono text-[13px]">{ref.name}</span>
-                              </span>
-                              <span className="shrink-0 text-xs text-muted-foreground">{ref.kind}</span>
-                            </button>
-                          ))}
-                        </div>
-                      ) : (
-                        <p className="p-3 text-sm text-muted-foreground">Aucune branche ni aucun tag ne correspond.</p>
-                      )}
-                    </div>
+                    )}
+                    {repositorySelection.size > 0 && (
+                      <Button type="button" size="sm" variant="ghost" onClick={() => setRepositorySelection(new Set())}>
+                        <X className="h-4 w-4" />
+                        Désélectionner
+                      </Button>
+                    )}
                   </div>
-                )}
-              </div>
-            ) : (
-            <>
-            <label className="block space-y-2">
-              <span>URL SSH du dépôt</span>
-              <Input
-                value={repositoryUrl}
-                onChange={(e) => setRepositoryUrl(e.target.value)}
-                placeholder="ssh://git@gitlab.sudokeys.com:10022/equipe/depot.git"
-                aria-invalid={Boolean(repositoryUrlError)}
-                aria-describedby={repositoryUrlError ? "repository-url-error" : undefined}
-              />
-              {repositoryUrlError ? <span id="repository-url-error" className="block text-sm text-destructive">{repositoryUrlError}</span> : null}
-            </label>
-            <label className="block space-y-2"><span>Branche ou tag</span><Input value={repositoryBranch} onChange={(e) => setRepositoryBranch(e.target.value)} placeholder="18.0" /></label>
-            </>
-            )}
-            <Select
-              value={repositoryMode}
-              onValueChange={(mode) => {
-                setRepositoryMode(mode);
-                setRepositorySelection(new Set());
-              }}
-            >
-              <SelectTrigger aria-label="Opération"><SelectValue /></SelectTrigger>
-              <SelectContent><SelectItem value="add">Ajouter des modules</SelectItem><SelectItem value="update">Mettre à jour le code existant</SelectItem></SelectContent>
-            </Select>
-            {repositoryMode === "update" && (
-              <label className="flex items-start gap-2 rounded-md border bg-muted/35 p-3 text-sm">
-                <Checkbox className="mt-0.5" checked={repositoryUpdateAll} onCheckedChange={(checked) => setRepositoryUpdateAll(checked === true)} />
-                <span>
-                  <span className="block font-medium">
-                    Mettre à jour tous les modules du dépôt déjà présents
-                    {repositoryUsesPicker ? ` (${repositoryEligibleModules.length})` : ""}
-                  </span>
-                  <span className="mt-0.5 block text-xs text-muted-foreground">
-                    Seules les copies gérées dans addons-store sont remplacées, avec sauvegarde et restauration en cas d’échec.
-                  </span>
-                  {repositoryUpdateAll && repositoryUsesPicker && repositoryEligibleModules.length === 0 && (
-                    <span className="mt-1 block text-xs text-amber-700 dark:text-amber-300">
-                      Aucun module de ce dépôt n’est présent comme copie gérée dans ce projet : utilise « Ajouter des modules ».
-                    </span>
-                  )}
-                </span>
-              </label>
-            )}
-            {!(repositoryMode === "update" && repositoryUpdateAll) && (
-              <div className="space-y-2 text-sm">
-                {repositoryInspection.status === "idle" && (
-                  <p className="text-muted-foreground">Renseigne l’URL et la branche : les modules du dépôt s’afficheront pour être sélectionnés.</p>
-                )}
-                {repositoryInspection.status === "loading" && (
-                  <p className="flex items-center gap-2 text-muted-foreground">
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                    Lecture des modules du dépôt…
-                  </p>
-                )}
-                {repositoryInspection.status === "ready" && (
-                  <div className="flex flex-col gap-2 rounded-md border p-3 sm:flex-row sm:items-center sm:justify-between">
-                    <div className="min-w-0">
-                      <div className="font-medium">
-                        {repositorySelectedList.length} module(s) sélectionné(s) sur {repositoryEligibleModules.length} disponible(s)
-                      </div>
-                      <div className="mt-0.5 truncate font-mono text-xs text-muted-foreground" title={repositorySelectedList.join(", ")}>
-                        {repositorySelectedList.length ? repositorySelectedList.join(", ") : `${repositoryReadyModules.length} module(s) trouvé(s) dans le dépôt`}
-                      </div>
-                    </div>
-                    <Button type="button" size="sm" variant="outline" onClick={() => { setRepositoryPickerSearch(""); setRepositoryPickerOpen(true); }}>
-                      <Boxes className="h-4 w-4" />
-                      Choisir les modules
-                    </Button>
-                  </div>
-                )}
-                {repositoryInspection.status === "error" && (
-                  <>
-                    <p className="text-destructive">{repositoryInspection.error}</p>
-                    <label className="block space-y-2">
-                      <span>Noms techniques, séparés par des virgules</span>
-                      <Input value={repositoryModules} onChange={(e) => setRepositoryModules(e.target.value)} placeholder="sale_exception, sale_order_type" />
-                    </label>
-                  </>
-                )}
-              </div>
-            )}
-            <div className="flex flex-col gap-2 rounded-md border p-3 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
-              <span>Le manager utilise la clé SSH de cette machine. Aucun jeton GitLab n’est demandé ni stocké.</span>
-              <Button type="button" size="sm" variant="outline" onClick={() => openSshAssistant()}>
-                <KeyRound className="h-4 w-4" />
-                Gérer la clé SSH
-              </Button>
-            </div>
-            <p className="text-sm text-muted-foreground">Après l’import, lance l’installation ou la mise à jour dans la base Odoo.</p>
-            <Button
-              disabled={repositorySubmitting || !selectedProjectReady || !repositoryUrl.trim() || Boolean(repositoryUrlError) || !repositoryBranch.trim() || repositoryInspection.status === "loading" || !repositoryHasTarget}
-              onClick={submitRepositoryModules}
-            >
-              {repositorySubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <CloudDownload className="h-4 w-4" />}
-              {repositorySubmitting
-                ? "Lancement de l’import…"
-                : repositoryMode === "add"
-                  ? repositoryUsesPicker ? `Ajouter ${repositorySelectedList.length} module(s)` : "Ajouter depuis le dépôt"
-                  : repositoryUpdateAll
-                    ? "Sauvegarder et remplacer tous les modules présents"
-                    : repositoryUsesPicker ? `Sauvegarder et remplacer ${repositorySelectedList.length} module(s)` : "Sauvegarder et remplacer le code"}
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
 
-      <Dialog open={repositoryPickerOpen} onOpenChange={setRepositoryPickerOpen}>
-        <DialogContent className="flex max-w-2xl flex-col gap-4 overflow-hidden">
-          <DialogHeader>
-            <DialogTitle>Modules du dépôt</DialogTitle>
-            <DialogDescription>
-              Branche {repositoryBranch.trim() || "?"} · {repositoryMode === "update" ? "remplacement du code existant" : "ajout au projet"}
-              {selectedProject ? ` ${selectedProject.name}` : ""}.
-            </DialogDescription>
-          </DialogHeader>
-          {repositoryInspection.status === "ready" && repositoryInspection.hasSymlinks && (
-            <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/45 dark:text-amber-100">
-              Ce dépôt contient des liens symboliques : le manager refusera l’import.
-            </div>
-          )}
-          <div className="relative">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              className="pl-9"
-              value={repositoryPickerSearch}
-              onChange={(event) => setRepositoryPickerSearch(event.target.value)}
-              placeholder="Filtrer les modules"
-              aria-label="Filtrer les modules du dépôt"
-            />
-          </div>
-          {(() => {
-            const query = normalizeSearchText(repositoryPickerSearch.trim());
-            const visible = repositoryReadyModules.filter((module) => !query || normalizeSearchText(`${module.name} ${module.path}`).includes(query));
-            const visibleEligible = visible.filter((module) => repositoryModuleEligible(module, repositoryMode));
-            const allVisibleSelected = visibleEligible.length > 0 && visibleEligible.every((module) => repositorySelection.has(module.name));
-            return (
-              <>
-                <label className="flex items-center justify-between gap-3 rounded-md border bg-muted/35 px-3 py-2 text-sm">
-                  <span className="flex items-center gap-2">
-                    <Checkbox
-                      checked={allVisibleSelected ? true : visibleEligible.some((module) => repositorySelection.has(module.name)) ? "indeterminate" : false}
-                      disabled={!visibleEligible.length}
-                      onCheckedChange={(checked) =>
-                        setRepositorySelection((current) => {
-                          const next = new Set(current);
-                          for (const module of visibleEligible) {
-                            if (checked === true) next.add(module.name);
-                            else next.delete(module.name);
-                          }
-                          return next;
-                        })
-                      }
-                    />
-                    <span className="font-medium">Tout sélectionner</span>
-                  </span>
-                  <span className="text-xs text-muted-foreground">{visibleEligible.length} sélectionnable(s) sur {visible.length}</span>
-                </label>
-                <div className="-mx-1 min-h-0 flex-1 overflow-y-auto px-1">
-                  {visible.length ? (
-                    <div className="divide-y rounded-md border">
-                      {visible.slice(0, REPOSITORY_PICKER_MAX_ROWS).map((module) => {
-                        const eligible = repositoryModuleEligible(module, repositoryMode);
-                        return (
-                          <label
-                            key={`${module.path}:${module.name}`}
-                            className={cn(
-                              "flex min-w-0 items-center gap-3 px-3 py-2 text-sm",
-                              eligible ? "cursor-pointer hover:bg-muted/45" : "cursor-not-allowed opacity-60",
-                            )}
-                          >
-                            <Checkbox
-                              checked={eligible && repositorySelection.has(module.name)}
-                              disabled={!eligible}
-                              onCheckedChange={(checked) =>
-                                setRepositorySelection((current) => {
-                                  const next = new Set(current);
-                                  if (checked === true) next.add(module.name);
-                                  else next.delete(module.name);
-                                  return next;
-                                })
-                              }
-                            />
-                            <span className="min-w-0 flex-1">
-                              <span className="block truncate font-mono text-[13px]">{module.name}</span>
-                              {module.path !== module.name && module.path !== "." && (
-                                <span className="block truncate text-xs text-muted-foreground">{module.path}</span>
-                              )}
-                            </span>
-                            {module.state === "installed" && <Badge variant="success" className="shrink-0">Installé</Badge>}
-                            <span className="shrink-0 text-xs text-muted-foreground">{repositoryModuleHint(module, repositoryMode)}</span>
-                          </label>
-                        );
-                      })}
-                      {visible.length > REPOSITORY_PICKER_MAX_ROWS && (
-                        <p className="px-3 py-2 text-xs text-muted-foreground">
-                          {REPOSITORY_PICKER_MAX_ROWS} modules affichés sur {visible.length} : affine le filtre pour voir les autres.
-                          « Tout sélectionner » s’applique à tous les modules filtrés.
-                        </p>
+                  {repositoryVisibleModules.length ? (
+                    <>
+                      {repositoryVisibleSelectable.length > 0 && (
+                        <div className="divide-y rounded-md border">
+                          {repositoryVisibleSelectable.slice(0, REPOSITORY_PICKER_MAX_ROWS).map((module) => repositoryModuleRow(module))}
+                          {repositoryVisibleSelectable.length > REPOSITORY_PICKER_MAX_ROWS && (
+                            <p className="px-3 py-2 text-xs text-muted-foreground">
+                              {REPOSITORY_PICKER_MAX_ROWS} modules affichés sur {repositoryVisibleSelectable.length} : affine le filtre pour voir les autres.
+                            </p>
+                          )}
+                        </div>
                       )}
-                    </div>
+                      {repositoryVisibleBlocked.length > 0 && (
+                        // Replié par défaut : ces modules ne demandent aucune décision.
+                        <details className="group rounded-md border" open={!repositoryVisibleSelectable.length}>
+                          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 text-sm hover:bg-muted/45">
+                            <span className="font-medium">Non importables ({repositoryVisibleBlocked.length})</span>
+                            <span className="flex items-center gap-2 text-xs text-muted-foreground">
+                              Déjà fournis par le projet ou incompatibles
+                              <ChevronDown className="h-4 w-4 transition-transform group-open:rotate-180" />
+                            </span>
+                          </summary>
+                          <div className="divide-y border-t">
+                            {repositoryVisibleBlocked.slice(0, REPOSITORY_PICKER_MAX_ROWS).map((module) => repositoryModuleRow(module))}
+                          </div>
+                        </details>
+                      )}
+                    </>
                   ) : (
-                    <p className="py-6 text-center text-sm text-muted-foreground">
+                    <p className="rounded-md border border-dashed p-4 text-center text-sm text-muted-foreground">
                       {repositoryReadyModules.length ? "Aucun module ne correspond au filtre." : "Aucun module Odoo trouvé dans ce dépôt."}
                     </p>
                   )}
-                </div>
-              </>
-            );
-          })()}
-          <div className="flex flex-col-reverse gap-2 border-t pt-3 sm:flex-row sm:justify-end">
-            <Button variant="outline" onClick={() => setRepositoryPickerOpen(false)}>Fermer</Button>
-            <Button disabled={!repositorySelectedList.length} onClick={() => setRepositoryPickerOpen(false)}>
-              <CheckCircle2 className="h-4 w-4" />
-              Valider la sélection ({repositorySelectedList.length})
-            </Button>
+                </>
+              )}
+            </section>
+          </div>
+
+          <div className="flex flex-col gap-3 border-t bg-muted/30 px-6 py-4 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-xs text-muted-foreground">
+              {repositorySelectedModules.length > 0 && (
+                <span className="block font-medium text-foreground">
+                  {[
+                    repositorySelectedAdds && `${repositorySelectedAdds} ajout(s)`,
+                    repositorySelectedUpdates && `${repositorySelectedUpdates} mise(s) à jour`,
+                  ].filter(Boolean).join(" · ")}
+                </span>
+              )}
+              {repositorySelectedUpdates > 0 ? "Les versions remplacées sont sauvegardées ; " : ""}
+              {repositorySelectedUpdates > 0 ? "tout est annulé si un module échoue." : "Tout est annulé si un module échoue."}
+            </p>
+            <div className="flex shrink-0 justify-end gap-2">
+              <Button variant="outline" onClick={() => setRepositoryOpen(false)}>Annuler</Button>
+              <Button
+                disabled={repositorySubmitting || !selectedProjectReady || repositoryInspection.status !== "ready" || !repositorySelectedModules.length}
+                onClick={submitRepositoryModules}
+              >
+                {repositorySubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <CloudDownload className="h-4 w-4" />}
+                {repositorySubmitting
+                  ? "Lancement…"
+                  : repositorySelectedModules.length
+                    ? `Importer ${repositorySelectedModules.length} module(s)`
+                    : "Importer"}
+              </Button>
+            </div>
           </div>
         </DialogContent>
       </Dialog>
