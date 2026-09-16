@@ -123,6 +123,8 @@ type BootstrapSnapshot = {
   jobs: Job[];
 };
 
+type DatabaseMenuAction = "regenerate_assets" | "reset_translations" | "neutralize" | "admin_password" | "psql" | "drop";
+
 type ManagerSettings = {
   version: number;
   workspace: string;
@@ -134,6 +136,7 @@ type ManagerSettings = {
   api_port: number;
   api_port_actual?: number;
   show_technical_details: boolean;
+  sticky_header: boolean;
   interface_icon: InterfaceIcon;
   interface_layout: "classic" | "refined";
   onboarding_completed: boolean;
@@ -739,6 +742,7 @@ function fallbackManagerSettings(
     api_port: current?.api_port || 18765,
     api_port_actual: current?.api_port_actual,
     show_technical_details: current?.show_technical_details ?? false,
+    sticky_header: current?.sticky_header ?? false,
     interface_icon: current?.interface_icon === "local" ? "local" : "manager",
     interface_layout: current?.interface_layout === "refined" ? "refined" : "classic",
     onboarding_completed: current?.onboarding_completed ?? false,
@@ -981,6 +985,7 @@ export default function Home() {
   const [restoreDbOpen, setRestoreDbOpen] = useState(false);
   const [neutralizeDbOpen, setNeutralizeDbOpen] = useState(false);
   const [dropDbOpen, setDropDbOpen] = useState(false);
+  const [pendingDatabaseAction, setPendingDatabaseAction] = useState<{ db: string; action: DatabaseMenuAction } | null>(null);
   const [postgresDetailsOpen, setPostgresDetailsOpen] = useState(false);
   const [rawOutputVisible, setRawOutputVisible] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
@@ -1148,6 +1153,33 @@ export default function Home() {
       .filter((module) => moduleOriginFilter === "all" || normalizedModuleOrigin(module.origin, module.source_path || module.path) === moduleOriginFilter);
   }, [deferredModuleSearch, modules, moduleFilter, moduleOriginFilter]);
   const refinedInterface = settings?.interface_layout === "refined";
+  const stickyHeader = settings?.sticky_header ?? false;
+  const projectHeaderRef = useRef<HTMLElement>(null);
+  const [projectHeaderHeight, setProjectHeaderHeight] = useState(0);
+  const [projectHeaderCompact, setProjectHeaderCompact] = useState(false);
+
+  useEffect(() => {
+    if (!stickyHeader) {
+      setProjectHeaderCompact(false);
+      return;
+    }
+    const onScroll = () => {
+      // Hystérésis : le passage en mode compact réduit la hauteur de l'en-tête, sans quoi il oscillerait au seuil.
+      setProjectHeaderCompact((compact) => (compact ? window.scrollY > 8 : window.scrollY > 64));
+    };
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, [stickyHeader]);
+
+  useEffect(() => {
+    const header = projectHeaderRef.current;
+    if (!stickyHeader || !header) return;
+    const observer = new ResizeObserver(() => setProjectHeaderHeight(header.offsetHeight));
+    observer.observe(header);
+    setProjectHeaderHeight(header.offsetHeight);
+    return () => observer.disconnect();
+  }, [stickyHeader]);
   const modulesPerPage = 50;
   const modulePageCount = Math.max(1, Math.ceil(filteredModules.length / modulesPerPage));
   const visibleModules = useMemo(() => {
@@ -2307,6 +2339,25 @@ export default function Home() {
     if (job) schedule(refreshModules, 2500);
   }
 
+  function runDatabaseAction(db: string, action: DatabaseMenuAction) {
+    if (db !== selectedDb) {
+      // Les actions lisent la base sélectionnée : on attend que la sélection soit appliquée.
+      setSelectedDb(db);
+      setPendingDatabaseAction({ db, action });
+      return;
+    }
+    executeDatabaseAction(action);
+  }
+
+  function executeDatabaseAction(action: DatabaseMenuAction) {
+    if (action === "regenerate_assets") void regenerateOdooAssets();
+    else if (action === "reset_translations") void openAllTranslationsReset();
+    else if (action === "neutralize") setNeutralizeDbOpen(true);
+    else if (action === "admin_password") setAdminPasswordOpen(true);
+    else if (action === "psql") void openPostgresqlConsole();
+    else if (action === "drop") setDropDbOpen(true);
+  }
+
   async function regenerateOdooAssets() {
     const db = selectedDatabaseOrNotify("la régénération des assets");
     if (!db || !selectedProject) return;
@@ -2511,6 +2562,13 @@ export default function Home() {
   const selectedProjectStarting = selectedProjectLifecycleJob?.title.startsWith("Démarrer ") ?? false;
   const selectedProjectStopping = selectedProjectLifecycleJob?.title.startsWith("Arrêter ") ?? false;
   const canUseDb = Boolean(selectedDb && odooDatabases.includes(selectedDb));
+
+  useEffect(() => {
+    if (!pendingDatabaseAction || pendingDatabaseAction.db !== selectedDb) return;
+    setPendingDatabaseAction(null);
+    executeDatabaseAction(pendingDatabaseAction.action);
+    // executeDatabaseAction est recréée à chaque rendu et lit la sélection courante.
+  }, [pendingDatabaseAction, selectedDb]);
   const repositoryInspectionKey = repositoryOpen && repositoryUrl.trim() && !repositoryUrlError && repositoryBranch.trim()
     ? `${selectedProject?.name || ""}|${repositoryUrl.trim()}|${repositoryBranch.trim()}`
     : "";
@@ -3163,11 +3221,27 @@ export default function Home() {
         </aside>
 
         <section className="min-w-0 flex-1">
-          <header className="sdk-project-header border-b bg-card">
-            <div className="mx-auto flex max-w-[1500px] flex-col gap-4 px-4 py-4 xl:flex-row xl:items-start xl:justify-between">
+          <header
+            ref={projectHeaderRef}
+            className={cn(
+              "sdk-project-header border-b bg-card",
+              stickyHeader && "lg:sticky lg:top-0 lg:z-30 lg:shadow-sm",
+            )}
+          >
+            <div
+              className={cn(
+                "mx-auto flex max-w-[1500px] flex-col gap-4 px-4 py-4 transition-[padding] duration-200 motion-reduce:transition-none xl:flex-row xl:items-start xl:justify-between",
+                projectHeaderCompact && "lg:gap-3 lg:py-2 xl:items-center",
+              )}
+            >
               <div className="min-w-0 flex-1">
                 <div className="flex min-w-0 flex-wrap items-start gap-2">
-                  <h2 className="min-w-0 max-w-full break-words text-2xl font-semibold leading-tight sm:text-3xl">
+                  <h2
+                    className={cn(
+                      "min-w-0 max-w-full break-words text-2xl font-semibold leading-tight sm:text-3xl",
+                      projectHeaderCompact && "lg:text-xl",
+                    )}
+                  >
                     {pendingSelectedProjectCreation?.project || selectedProject?.name || "Aucun projet"}
                   </h2>
                   {pendingSelectedProjectCreation ? (
@@ -3181,7 +3255,7 @@ export default function Home() {
                     </Badge>
                   )}
                 </div>
-                <p className="mt-1 max-w-full break-all text-sm text-muted-foreground">
+                <p className={cn("mt-1 max-w-full break-all text-sm text-muted-foreground", projectHeaderCompact && "lg:hidden")}>
                   {pendingSelectedProjectCreation
                     ? "Préparation du projet local en arrière-plan. Le journal détaille les étapes en cours."
                     : selectedProject?.url || "Sélectionne un projet."}
@@ -3404,6 +3478,10 @@ export default function Home() {
                 setActiveTab(value);
               }}
             >
+              <div
+                className={cn(stickyHeader && "-mx-4 -my-2 px-4 py-2 lg:sticky lg:z-20 lg:bg-background/85 lg:backdrop-blur")}
+                style={stickyHeader ? { top: projectHeaderHeight } : undefined}
+              >
               <TabsList
                 className={cn(
                   "grid w-full overflow-hidden transition-[grid-template-columns] duration-200 ease-out motion-reduce:transition-none lg:w-fit",
@@ -3443,6 +3521,7 @@ export default function Home() {
                   {refinedInterface ? "Réglages" : "Actions"}
                 </TabsTrigger>
               </TabsList>
+              </div>
 
               {selectedProjectOnline && (
                 <TabsContent value="bases">
@@ -3454,6 +3533,16 @@ export default function Home() {
                         description="Sélectionne la base sur laquelle travailler."
                         actions={
                           <>
+                            {selectedProject && (
+                              <Button
+                                variant="ghost"
+                                onClick={() => openUrl(selectedProject.database_manager_url)}
+                                title="Ouvrir le gestionnaire de bases d’Odoo"
+                              >
+                                <ExternalLink className="h-4 w-4" />
+                                Gestionnaire Odoo
+                              </Button>
+                            )}
                             <Button variant="outline" disabled={!selectedProjectReady} onClick={() => setRestoreDbOpen(true)}>
                               <Upload className="h-4 w-4" />
                               Restaurer
@@ -3469,32 +3558,86 @@ export default function Home() {
                       {odooDatabases.length ? (
                         <div className="grid gap-3 sm:grid-cols-2">
                           {odooDatabases.map((db) => (
-                            <InteractiveCard
-                              key={db}
-                              aria-pressed={selectedDb === db}
-                              className={cn(
-                                "min-w-0 p-4",
-                                selectedDb === db
-                                  ? "border-primary bg-primary/[0.10] ring-2 ring-primary/35 hover:bg-primary/[0.10] dark:bg-primary/[0.16] dark:hover:bg-primary/[0.16]"
-                                  : "hover:border-primary/35 hover:bg-muted/60 dark:hover:bg-muted/40",
-                              )}
-                              onClick={() => setSelectedDb(db)}
-                            >
-                              <div className="flex min-w-0 items-start justify-between gap-2">
-                                <span className={cn("min-w-0 break-all", REFINED_IDENTIFIER)}>{db}</span>
-                                {db === selectedDb && <CheckCircle2 className="h-4 w-4 shrink-0 text-primary" />}
-                              </div>
-                              <div
+                            <div key={db} className="group relative min-w-0">
+                              <InteractiveCard
+                                aria-pressed={selectedDb === db}
                                 className={cn(
-                                  "mt-2 text-xs",
-                                  db === selectedDb ? "font-medium text-primary" : "text-muted-foreground",
+                                  "w-full min-w-0 p-4 pr-14",
+                                  selectedDb === db
+                                    ? "border-primary bg-primary/[0.10] ring-2 ring-primary/35 hover:bg-primary/[0.10] dark:bg-primary/[0.16] dark:hover:bg-primary/[0.16]"
+                                    : "hover:border-primary/35 hover:bg-muted/60 dark:hover:bg-muted/40",
                                 )}
+                                onClick={() => setSelectedDb(db)}
                               >
-                                {db === selectedDb
-                                  ? "Base de travail"
-                                  : selectedProject?.database_versions?.[db] || "Base Odoo"}
-                              </div>
-                            </InteractiveCard>
+                                <div className="flex min-w-0 items-start gap-2">
+                                  <span className={cn("min-w-0 break-all", REFINED_IDENTIFIER)}>{db}</span>
+                                  {db === selectedDb && <CheckCircle2 className="h-4 w-4 shrink-0 text-primary" />}
+                                </div>
+                                <div
+                                  className={cn(
+                                    "mt-2 text-xs",
+                                    db === selectedDb ? "font-medium text-primary" : "text-muted-foreground",
+                                  )}
+                                >
+                                  {db === selectedDb
+                                    ? "Base de travail"
+                                    : selectedProject?.database_versions?.[db] || "Base Odoo"}
+                                </div>
+                              </InteractiveCard>
+                              <DropdownMenu.Root modal={false}>
+                                <DropdownMenu.Trigger>
+                                  <Button
+                                    size="icon"
+                                    variant="ghost"
+                                    className={cn(
+                                      "absolute right-2 top-2 h-9 w-9 transition-opacity focus-visible:opacity-100 data-[state=open]:opacity-100",
+                                      db !== selectedDb && "opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100",
+                                    )}
+                                    disabled={loading}
+                                    title={`Actions sur ${db}`}
+                                    aria-label={`Actions sur ${db}`}
+                                  >
+                                    <MoreHorizontal className="h-4 w-4" />
+                                  </Button>
+                                </DropdownMenu.Trigger>
+                                <DropdownMenu.Content align="end" className="min-w-60">
+                                  <DropdownMenu.Label>Maintenance</DropdownMenu.Label>
+                                  <DropdownMenu.Item onSelect={() => runDatabaseAction(db, "regenerate_assets")}>
+                                    <Paintbrush className="h-4 w-4" />
+                                    Régénérer les assets
+                                  </DropdownMenu.Item>
+                                  <DropdownMenu.Item onSelect={() => runDatabaseAction(db, "reset_translations")}>
+                                    <Languages className="h-4 w-4" />
+                                    Réinitialiser les traductions
+                                  </DropdownMenu.Item>
+                                  <DropdownMenu.Item onSelect={() => runDatabaseAction(db, "neutralize")}>
+                                    <ShieldCheck className="h-4 w-4" />
+                                    Neutraliser et contrôler
+                                  </DropdownMenu.Item>
+                                  {settings?.show_technical_details && (
+                                    <DropdownMenu.Item onSelect={() => runDatabaseAction(db, "admin_password")}>
+                                      <KeyRound className="h-4 w-4" />
+                                      Mot de passe admin
+                                    </DropdownMenu.Item>
+                                  )}
+                                  <DropdownMenu.Separator />
+                                  <DropdownMenu.Label>Outils</DropdownMenu.Label>
+                                  <DropdownMenu.Item
+                                    disabled={selectedProject?.postgres_status !== "running" || openingPostgresql}
+                                    onSelect={() => runDatabaseAction(db, "psql")}
+                                  >
+                                    <Terminal className="h-4 w-4" />
+                                    Ouvrir psql
+                                  </DropdownMenu.Item>
+                                  <DropdownMenu.Separator />
+                                  <DropdownMenu.Label>Zone dangereuse</DropdownMenu.Label>
+                                  <DropdownMenu.Item color="red" onSelect={() => runDatabaseAction(db, "drop")}>
+                                    <Trash2 className="h-4 w-4" />
+                                    Supprimer la base
+                                  </DropdownMenu.Item>
+                                </DropdownMenu.Content>
+                              </DropdownMenu.Root>
+                            </div>
                           ))}
                         </div>
                       ) : (
@@ -3503,65 +3646,6 @@ export default function Home() {
                           <p className="mt-3 font-medium">Aucune base Odoo</p>
                           <p className="mt-1 text-sm text-muted-foreground">Crée une base pour commencer à utiliser ce projet.</p>
                         </div>
-                      )}
-
-                      <div className="grid gap-4 xl:grid-cols-2 xl:items-start">
-                      {odooDatabases.length > 0 && (
-                        <RefinedPanel className="p-4">
-                          <div className={REFINED_LABEL}>Base sélectionnée</div>
-                          <div
-                            className={cn(
-                              "mt-1.5 break-all",
-                              selectedDb ? REFINED_IDENTIFIER : "text-sm text-muted-foreground",
-                            )}
-                          >
-                            {selectedDb || "Aucune base sélectionnée"}
-                          </div>
-                          <div className="mt-3 flex flex-wrap gap-2">
-                            <Button
-                              variant="outline"
-                              disabled={!canUseDb || loading}
-                              onClick={() => setNeutralizeDbOpen(true)}
-                            >
-                              <ShieldCheck className="h-4 w-4" />
-                              Neutraliser et contrôler
-                            </Button>
-                            <Button
-                              variant="outline"
-                              disabled={!canUseDb || loading}
-                              onClick={regenerateOdooAssets}
-                              title="Supprime les bundles CSS/JS compilés ; Odoo redémarre et les reconstruit au prochain chargement."
-                            >
-                              <Paintbrush className="h-4 w-4" />
-                              Régénérer les assets
-                            </Button>
-                            <Button variant="outline" disabled={!canUseDb || loading} onClick={openAllTranslationsReset}>
-                              <Languages className="h-4 w-4" />
-                              Réinitialiser les traductions
-                            </Button>
-                            {settings?.show_technical_details && (
-                              <Button variant="outline" disabled={!canUseDb || loading} onClick={() => setAdminPasswordOpen(true)}>
-                                <KeyRound className="h-4 w-4" />
-                                Mot de passe admin
-                              </Button>
-                            )}
-                            {selectedProject && (
-                              <Button variant="outline" onClick={() => openUrl(selectedProject.database_manager_url)}>
-                                <ExternalLink className="h-4 w-4" />
-                                Gestionnaire Odoo
-                              </Button>
-                            )}
-                            <Button
-                              variant="outline"
-                              className="text-destructive hover:text-destructive"
-                              disabled={!canUseDb || loading}
-                              onClick={() => setDropDbOpen(true)}
-                            >
-                              <Trash2 className="h-4 w-4" />
-                              Supprimer la base
-                            </Button>
-                          </div>
-                        </RefinedPanel>
                       )}
 
                       <RefinedPanel>
@@ -3584,13 +3668,15 @@ export default function Home() {
                           </Badge>
                         </button>
                         {postgresDetailsOpen && (
-                          <div id="refined-postgres-details" className="space-y-3 border-t p-4">
+                          <div id="refined-postgres-details" className="grid gap-3 border-t p-4 sm:grid-cols-2">
                             <div className="min-w-0 rounded-md bg-muted/55 p-3">
                               <div className="text-xs text-muted-foreground">Conteneur</div>
                               <div className={cn("mt-1 break-all", REFINED_IDENTIFIER)}>
                                 {selectedProject ? `postgresql-${selectedProject.name}` : "-"}
                               </div>
-                              <div className="mt-3 text-xs text-muted-foreground">Base Odoo ciblée</div>
+                            </div>
+                            <div className="min-w-0 rounded-md bg-muted/55 p-3">
+                              <div className="text-xs text-muted-foreground">Base Odoo ciblée</div>
                               <div
                                 className={cn(
                                   "mt-1 break-all",
@@ -3600,19 +3686,12 @@ export default function Home() {
                                 {selectedDb || "Aucune base sélectionnée"}
                               </div>
                             </div>
-                            <Button
-                              variant="outline"
-                              disabled={!canUseDb || selectedProject?.postgres_status !== "running" || openingPostgresql}
-                              onClick={openPostgresqlConsole}
-                            >
-                              {openingPostgresql ? <Loader2 className="h-4 w-4 animate-spin" /> : <Terminal className="h-4 w-4" />}
-                              Ouvrir psql
-                            </Button>
-                            <p className="text-xs text-muted-foreground">La console s’ouvre dans le terminal du système avec la base Odoo sélectionnée.</p>
+                            <p className="text-xs text-muted-foreground sm:col-span-2">
+                              La console psql s’ouvre depuis le menu « ⋯ » d’une base, dans le terminal du système.
+                            </p>
                           </div>
                         )}
                       </RefinedPanel>
-                      </div>
                     </div>
                   ) : (
                     <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_400px] xl:items-start">
@@ -4989,6 +5068,23 @@ export default function Home() {
                     Affiche les états Odoo et PostgreSQL ainsi que le nombre de bases dans la liste des projets,
                     les emplacements des modules, et les actions de mise à jour du code et des images Docker.
                     Désactivé, le gestionnaire présente uniquement le voyant d’état des projets et une liste de modules compacte.
+                  </span>
+                </span>
+              </label>
+
+              <label className="flex cursor-pointer items-start gap-3 rounded-md border p-3 text-sm">
+                <Checkbox
+                  className="mt-0.5"
+                  checked={settingsDraft.sticky_header}
+                  onCheckedChange={(checked) =>
+                    setSettingsDraft({ ...settingsDraft, sticky_header: checked === true })
+                  }
+                />
+                <span className="min-w-0">
+                  <span className="block font-medium">En-tête fixe</span>
+                  <span className="mt-1 block text-xs font-normal leading-relaxed text-muted-foreground">
+                    Garde le nom du projet, les actions et les onglets visibles pendant le défilement.
+                    L’en-tête se compacte dès que la page défile. Sur les fenêtres étroites, il reste non fixe pour préserver la place.
                   </span>
                 </span>
               </label>

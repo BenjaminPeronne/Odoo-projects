@@ -63,6 +63,7 @@ class ManagerSettings:
     docker_poll_interval: int = 10
     api_port: int = DEFAULT_API_PORT
     show_technical_details: bool = False
+    sticky_header: bool = False
     interface_icon: str = "manager"
     interface_layout: str = "classic"
     onboarding_completed: bool = False
@@ -105,6 +106,7 @@ class ManagerSettings:
             docker_poll_interval=poll_interval,
             api_port=api_port,
             show_technical_details=bool(payload.get("show_technical_details", False)),
+            sticky_header=bool(payload.get("sticky_header", False)),
             interface_icon=interface_icon,
             interface_layout=interface_layout,
             onboarding_completed=bool(payload.get("onboarding_completed", False)),

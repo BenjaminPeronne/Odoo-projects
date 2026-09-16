@@ -43,6 +43,7 @@ class SettingsTests(unittest.TestCase):
                     "docker_poll_interval": 1,
                     "api_port": 19876,
                     "show_technical_details": True,
+                    "sticky_header": True,
                     "interface_icon": "local",
                     "interface_layout": "refined",
                     "onboarding_completed": True,
@@ -55,6 +56,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(loaded.docker_poll_interval, 3)
             self.assertEqual(loaded.api_port, 19876)
             self.assertTrue(loaded.show_technical_details)
+            self.assertTrue(loaded.sticky_header)
             self.assertEqual(loaded.interface_icon, "local")
             self.assertEqual(loaded.interface_layout, "refined")
             self.assertTrue(loaded.onboarding_completed)
@@ -63,6 +65,7 @@ class SettingsTests(unittest.TestCase):
         settings = ManagerSettings.from_dict({"start_project_before_open": True}, "/tmp/workspace")
         self.assertNotIn("start_project_before_open", settings.to_dict())
         self.assertFalse(settings.show_technical_details)
+        self.assertFalse(settings.sticky_header)
 
     def test_removed_page_layout_settings_are_ignored(self):
         settings = ManagerSettings.from_dict({"bases_layout": "compact", "modules_layout": "compact"}, "/tmp/workspace")
