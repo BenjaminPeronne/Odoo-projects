@@ -3132,7 +3132,7 @@ export default function Home() {
             </Button>
           )}
           {(installed > 0 || removable > 0) && (
-            <DropdownMenu.Root>
+            <DropdownMenu.Root modal={false}>
               <DropdownMenu.Trigger>
                 <Button size="sm" variant="outline" disabled={loading} aria-label="Autres actions sur la sélection">
                   <MoreHorizontal className="h-4 w-4" />
@@ -4027,8 +4027,9 @@ export default function Home() {
                             >
                               <RefreshCcw className={cn("h-4 w-4", loadingModules && "animate-spin")} />
                             </Button>
-                            {/* Les imports de code sont regroupés : ils mènent tous à « ajouter des modules au projet ». */}
-                            <DropdownMenu.Root>
+                            {/* Les imports de code sont regroupés : ils mènent tous à « ajouter des modules au projet ».
+                                Menus non modaux : le verrou de défilement de Radix détache l'en-tête et la barre latérale collés. */}
+                            <DropdownMenu.Root modal={false}>
                               <DropdownMenu.Trigger>
                                 <Button variant="outline" disabled={!selectedProjectReady}>
                                   <PlusCircle className="h-4 w-4" />
