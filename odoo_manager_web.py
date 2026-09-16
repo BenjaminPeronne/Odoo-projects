@@ -543,6 +543,8 @@ def run_capture(args, cwd=None, timeout=12):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             **hidden_process_kwargs(),
         )
@@ -1355,18 +1357,27 @@ def wsl_module_metadata(
     }
 
 
-def wsl_module_dirs(project):
-    context = active_workspace_wsl_context()
-    distribution = context.distribution if context else SETTINGS.wsl_distribution
-    candidates = [
+def module_parent_candidates(project):
+    """Dossiers scannés pour les addons, dans l'ordre de priorité du premier nom trouvé."""
+    base = project_odoo_root(project)
+    return [
         project_addons_link_parent(project),
         project_addons_storage_parent(project),
         project_legacy_addons_storage_parent(project),
-        project_odoo_root(project) / "odoo" / "odoo" / "addons",
-        project_odoo_root(project) / "addons-store" / "odoo_entreprise",
-        project_odoo_root(project) / "addons-store" / "odoo_enterprise",
+        base / "odoo" / "odoo" / "addons",
+        base / "addons-store" / "odoo_entreprise",
+        base / "addons-store" / "odoo_enterprise",
     ]
-    linux_candidates = [wsl_execution_path(path, distribution) for path in candidates]
+
+
+def active_wsl_distribution():
+    context = active_workspace_wsl_context()
+    return context.distribution if context else SETTINGS.wsl_distribution
+
+
+def wsl_module_dirs(project):
+    distribution = active_wsl_distribution()
+    linux_candidates = [wsl_execution_path(path, distribution) for path in module_parent_candidates(project)]
     script = (
         'found_parent=0; for parent do [ -d "$parent" ] && found_parent=1; done; '
         '[ "$found_parent" -eq 1 ] || { echo "Aucun dossier addons lisible depuis WSL." >&2; exit 3; }; '
@@ -1432,15 +1443,7 @@ def module_dirs(project):
             # Individual inaccessible WSL links are ignored below instead of
             # turning the whole modules endpoint into an HTTP 500 response.
             pass
-    base = project_odoo_root(project)
-    candidates = [
-        project_addons_link_parent(project),
-        project_addons_storage_parent(project),
-        project_legacy_addons_storage_parent(project),
-        base / "odoo" / "odoo" / "addons",
-        base / "addons-store" / "odoo_entreprise",
-        base / "addons-store" / "odoo_enterprise",
-    ]
+    candidates = module_parent_candidates(project)
     seen = set()
     readable_parent = False
     access_errors = []
@@ -2339,6 +2342,8 @@ def run_stream(job, args, cwd=None):
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         bufsize=1,
         **hidden_process_kwargs(),
     )
@@ -2349,6 +2354,10 @@ def run_stream(job, args, cwd=None):
         for line in process.stdout:
             job.add(line)
         code = process.wait()
+    except BaseException:
+        process.kill()
+        process.wait()
+        raise
     finally:
         if process.stdout is not None:
             process.stdout.close()
@@ -3068,9 +3077,103 @@ def stop_project_job(job, project):
     project_service().stop_project(project, log=job.add)
 
 
+def addon_links_wsl_distribution():
+    """Distribution WSL qui porte les liens d'addons sous Windows, sinon None.
+
+    Windows ne voit pas les liens créés par WSL : `exists()` et `is_symlink()`
+    renvoient False, puis `symlink_to` échoue (WinError 183) ou crée un lien
+    Windows que Docker ne peut pas suivre. Même règle que ProjectCreator.
+    """
+    if platform_id() != "windows":
+        return None
+    if active_workspace_wsl_context() or SETTINGS.execution_mode == "wsl":
+        return active_wsl_distribution()
+    return SETTINGS.wsl_distribution if wsl_shell_available(SETTINGS.wsl_distribution) else None
+
+
+def wsl_entry_path(path, distribution):
+    # Seul le parent est traduit : résoudre l'entrée suivrait le lien vers sa cible.
+    path = Path(path)
+    return wsl_execution_path(path.parent, distribution).rstrip("/") + "/" + path.name
+
+
+def run_wsl_script(distribution, script, arguments, error):
+    code, output = run_capture(
+        [*wsl_command_prefix(distribution), "sh", "-c", script, "odoo-manager", *arguments],
+        cwd=workspace_tool_cwd(),
+        timeout=30,
+    )
+    if code != 0:
+        raise RuntimeError(f"{error} : {output.strip()[:300] or f'code {code}'}")
+    return output
+
+
+def addon_link_status(link_path, expected_target):
+    """Retourne (état, valeur du lien) ; état : missing, matching, different ou other."""
+    distribution = addon_links_wsl_distribution()
+    if distribution is not None:
+        output = run_wsl_script(
+            distribution,
+            'if [ -L "$1" ]; then '
+            'if [ "$(readlink -f -- "$1")" = "$(readlink -f -- "$2")" ]; then state=matching; else state=different; fi; '
+            'printf "%s\\t%s" "$state" "$(readlink -- "$1")"; '
+            'elif [ -e "$1" ]; then printf other; else printf missing; fi',
+            [wsl_entry_path(link_path, distribution), wsl_entry_path(expected_target, distribution)],
+            f"Lecture du lien {link_path.name} impossible depuis WSL",
+        )
+        state, _, value = output.strip().partition("\t")
+        if state not in {"missing", "matching", "different", "other"}:
+            raise RuntimeError(f"Réponse inattendue de WSL pour le lien {link_path.name} : {output.strip()[:200]}")
+        return state, value
+    if link_path.is_symlink():
+        matching = link_path.resolve(strict=False) == Path(expected_target).resolve(strict=False)
+        return ("matching" if matching else "different"), os.readlink(link_path)
+    return ("other" if link_path.exists() else "missing"), ""
+
+
+def create_addon_link(link_path, link_value):
+    distribution = addon_links_wsl_distribution()
+    if distribution is None:
+        link_path.symlink_to(link_value, target_is_directory=True)
+        return
+    # Lien Linux relatif : c'est Odoo, dans Docker, qui le suit.
+    run_wsl_script(
+        distribution,
+        'ln -s -- "$1" "$2"',
+        [str(link_value).replace("\\", "/"), wsl_entry_path(link_path, distribution)],
+        f"Création du lien {link_path.name} impossible via WSL",
+    )
+
+
+def remove_module_entry(path):
+    distribution = addon_links_wsl_distribution()
+    if distribution is not None:
+        run_wsl_script(
+            distribution, 'rm -rf -- "$1"', [wsl_entry_path(path, distribution)],
+            f"Suppression de {path.name} impossible via WSL",
+        )
+    elif path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.exists():
+        shutil.rmtree(path)
+
+
+def move_module_entry(source, destination):
+    distribution = addon_links_wsl_distribution()
+    if distribution is None:
+        shutil.move(str(source), str(destination))
+        return
+    run_wsl_script(
+        distribution,
+        'mv -- "$1" "$2"',
+        [wsl_entry_path(source, distribution), wsl_entry_path(destination, distribution)],
+        f"Déplacement de {source.name} impossible via WSL",
+    )
+
+
 def managed_storage_link(project, module_name, storage_path):
     link_path = project_addons_link_parent(project) / module_name
-    return link_path.is_symlink() and link_path.resolve(strict=False) == storage_path.resolve(strict=False)
+    return addon_link_status(link_path, storage_path)[0] == "matching"
 
 
 def managed_module_copy_ready(project, module_name, storage_path):
@@ -3097,7 +3200,7 @@ def copy_module_to_storage(job, project, module_path, replace_existing=False):
             return storage_path
         if not replace_existing:
             raise RuntimeError(f"Le module existe déjà dans addons-store du projet: {storage_path}")
-        if not managed_storage_link(project, module_name, storage_path) and not link_path.exists() and not link_path.is_symlink():
+        if addon_link_status(link_path, storage_path)[0] == "missing":
             raise RuntimeError(
                 f"Remplacement refusé pour {module_name}: un dossier existe déjà dans odoo/addons-store sans lien géré."
             )
@@ -3115,12 +3218,12 @@ def ensure_relative_module_link(job, project, module_name, storage_path, replace
     link_path = link_parent / module_name
     link_value = Path(os.path.relpath(storage_path, start=link_parent))
 
-    if link_path.exists() or link_path.is_symlink():
-        if link_path.is_symlink() and link_path.resolve(strict=False) == storage_path.resolve(strict=False):
-            current = os.readlink(link_path)
-            if Path(current).is_absolute():
-                link_path.unlink()
-                link_path.symlink_to(link_value, target_is_directory=True)
+    link_state, current = addon_link_status(link_path, storage_path)
+    if link_state != "missing":
+        if link_state == "matching":
+            if current.startswith("/") or Path(current).is_absolute():
+                remove_module_entry(link_path)
+                create_addon_link(link_path, link_value)
                 job.add(f"Lien converti en relatif: {link_path} -> {link_value}")
                 return True
             job.add(f"Déjà lié en relatif: {module_name}")
@@ -3130,7 +3233,7 @@ def ensure_relative_module_link(job, project, module_name, storage_path, replace
             raise RuntimeError(f"Le module existe déjà dans le projet: {link_path}")
         if not info["removable"]:
             can_replace_store_link = (
-                link_path.is_symlink()
+                link_state == "different"
                 and info.get("removal_mode") == "protected_store"
                 and managed_module_copy_ready(project, module_name, storage_path)
             )
@@ -3142,7 +3245,7 @@ def ensure_relative_module_link(job, project, module_name, storage_path, replace
             )
         backup_existing_module(job, project, link_path)
 
-    link_path.symlink_to(link_value, target_is_directory=True)
+    create_addon_link(link_path, link_value)
     job.add(f"Lien relatif créé: {link_path} -> {link_value}")
     return True
 
@@ -3300,18 +3403,24 @@ def ensure_enterprise_module_links(job, project):
     link_parent.mkdir(parents=True, exist_ok=True)
     states = creator.module_link_states(candidates, link_parent)
     conflicts = [name for name, state in states.items() if state == "conflict"]
+    provided = sorted(name for name, state in states.items() if state == "provided")
     missing_before = sum(state == "missing" for state in states.values())
     if conflicts:
         raise RuntimeError(
-            "Liens Enterprise non modifiés car des modules existent déjà avec une autre source dans odoo/addons : "
-            + ", ".join(sorted(conflicts))
+            "Liens Enterprise non modifiés car des dossiers ou liens cassés d'une autre source "
+            f"occupent odoo/addons ({len(conflicts)}) : " + ", ".join(sorted(conflicts))
+        )
+    if provided:
+        job.add(
+            f"{len(provided)} module(s) Enterprise déjà fourni(s) par une autre source dans odoo/addons, conservé(s) : "
+            + ", ".join(provided[:20]) + (" …" if len(provided) > 20 else "")
         )
 
     for root in roots:
         creator.link_modules(root, link_parent, log=job.add, replace=False)
 
     states = creator.module_link_states(candidates, link_parent)
-    missing_after = [name for name, state in states.items() if state != "correct"]
+    missing_after = [name for name, state in states.items() if state not in {"correct", "provided"}]
     if missing_after:
         raise RuntimeError("Création des liens Enterprise incomplète : " + ", ".join(sorted(missing_after)))
     clear_project_module_cache(project)
@@ -3333,12 +3442,16 @@ def read_manifest_dict(path):
             text = (Path(path) / filename).read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
-        try:
-            manifest = ast.literal_eval(text)
-        except (ValueError, SyntaxError, MemoryError, RecursionError):
-            return {}
-        return manifest if isinstance(manifest, dict) else {}
+        return parse_manifest_text(text)
     return {}
+
+
+def parse_manifest_text(text):
+    try:
+        manifest = ast.literal_eval(text)
+    except (ValueError, SyntaxError, MemoryError, RecursionError):
+        return {}
+    return manifest if isinstance(manifest, dict) else {}
 
 
 def manifest_graph_entry(manifest):
@@ -3372,13 +3485,67 @@ def module_graph_from_paths(paths):
     return graph
 
 
+# Marqueur textuel : un séparateur de contrôle comme \x1e est retiré par str.strip().
+MANIFEST_RECORD_MARKER = "@@odoo-manager-manifest@@ "
+
+
+def wsl_module_graph(project):
+    """Lit tous les manifestes depuis WSL en une commande.
+
+    Windows ne traverse pas les liens symboliques créés par WSL dans odoo/addons
+    (WinError 1920) : lus depuis Windows, ces manifestes semblaient vides et le
+    graphe perdait toutes ses dépendances.
+    """
+    distribution = active_wsl_distribution()
+    linux_candidates = [wsl_execution_path(path, distribution) for path in module_parent_candidates(project)]
+    script = (
+        'found_parent=0; for parent do [ -d "$parent" ] && found_parent=1; done; '
+        '[ "$found_parent" -eq 1 ] || { echo "Aucun dossier addons lisible depuis WSL." >&2; exit 3; }; '
+        'for parent do [ -d "$parent" ] || continue; '
+        'find "$parent" -mindepth 1 -maxdepth 1 \\( -type d -o -type l \\) -print 2>/dev/null | '
+        'while IFS= read -r child; do '
+        'for manifest in "$child/__manifest__.py" "$child/__openerp__.py"; do '
+        '[ -f "$manifest" ] || continue; '
+        'printf "\\n%s%s\\n" "$marker" "${child##*/}"; cat -- "$manifest" 2>/dev/null; break; '
+        'done; done; done'
+    )
+    code, output = run_capture(
+        [*wsl_command_prefix(distribution), "sh", "-c", 'marker=$1; shift; ' + script, "odoo-manager",
+         MANIFEST_RECORD_MARKER, *linux_candidates],
+        cwd=workspace_tool_cwd(),
+        timeout=60,
+    )
+    if code != 0:
+        detail = "délai dépassé" if code == 124 else (output.strip()[:300] or f"code {code}")
+        raise RuntimeError(f"Impossible de lire les manifestes des modules depuis WSL : {detail}")
+    graph = {}
+    for record in ("\n" + output).split("\n" + MANIFEST_RECORD_MARKER)[1:]:
+        name, _, text = record.partition("\n")
+        name = name.strip()
+        if not SAFE_MODULE_RE.fullmatch(name) or name in graph:
+            continue
+        graph[name] = manifest_graph_entry(parse_manifest_text(text))
+    return graph
+
+
+def project_module_graph(project):
+    if active_workspace_wsl_context():
+        return wsl_module_graph(project)
+    if platform_id() == "windows" and wsl_shell_available(SETTINGS.wsl_distribution):
+        try:
+            return wsl_module_graph(project)
+        except RuntimeError:
+            pass  # Même repli que module_dirs lorsque WSL est momentanément indisponible.
+    return module_graph_from_paths(module_dirs(project))
+
+
 def module_dependency_graph(project):
     now = time.time()
     with MODULE_CACHE_LOCK:
         cached = MODULE_GRAPH_CACHE.get(project)
         if cached and now - cached["created_at"] < MODULE_GRAPH_TTL_SECONDS:
             return cached["graph"]
-    graph = module_graph_from_paths(module_dirs(project))
+    graph = project_module_graph(project)
     with MODULE_CACHE_LOCK:
         MODULE_GRAPH_CACHE[project] = {"created_at": now, "graph": graph}
     return graph
@@ -3509,9 +3676,8 @@ def install_socle_job(job, project, db_name, presets):
 
     job.add("Vérification et création des liens symboliques Odoo Enterprise...")
     ensure_enterprise_module_links(job, project)
-    paths = list(module_dirs(project))
-    available = {path.name for path in paths}
-    missing = [name for name in requested_modules if name not in available]
+    graph = project_module_graph(project)
+    missing = [name for name in requested_modules if name not in graph]
     if missing:
         raise RuntimeError("Modules requis absents du projet : " + ", ".join(missing))
 
@@ -3523,7 +3689,7 @@ def install_socle_job(job, project, db_name, presets):
     if not pending:
         job.add("Le socle sélectionné est déjà entièrement installé.")
         return
-    plan = module_install_plan(module_graph_from_paths(paths), states, pending)
+    plan = module_install_plan(graph, states, pending)
     blocking = plan["missing"] + plan["uninstallable"]
     if blocking:
         raise RuntimeError(
@@ -3697,7 +3863,7 @@ def backup_existing_module(job, project, target):
     while backup.exists() or backup.is_symlink():
         backup = backup_root / f"{time.strftime('%Y%m%d_%H%M%S')}_{target.name}_{suffix}"
         suffix += 1
-    shutil.move(str(target), str(backup))
+    move_module_entry(target, backup)
     job.add(f"Module existant sauvegardé: {target} -> {backup}")
     return backup
 
@@ -3907,7 +4073,7 @@ def repository_modules_job(job, project, url, branch, mode, names):
             raise ValueError("Aucun module Odoo trouvé dans le dépôt.")
         for candidate in candidates:
             target, link = storage / candidate.name, links / candidate.name
-            exists = target.exists() or target.is_symlink() or link.exists() or link.is_symlink()
+            exists = target.exists() or target.is_symlink() or addon_link_status(link, target)[0] != "missing"
             if mode == "add" and exists:
                 raise ValueError(f"Module déjà présent : {candidate.name}. Utilise la mise à jour.")
             if mode == "add" and module_provided_by_project(project, candidate.name):
@@ -3932,12 +4098,9 @@ def repository_modules_job(job, project, url, branch, mode, names):
                 ensure_relative_module_link(job, project, candidate.name, target)
         except Exception:
             for path in reversed(created):
-                if path.is_symlink():
-                    path.unlink()
-                elif path.exists():
-                    shutil.rmtree(path)
+                remove_module_entry(path)
             for target, backup in reversed(backups):
-                shutil.move(str(backup), str(target))
+                move_module_entry(backup, target)
             job.add("Import annulé ; les versions précédentes ont été restaurées.")
             raise
         finally:
@@ -4268,6 +4431,8 @@ def start_log_follow_process(project):
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         bufsize=1,
         **hidden_process_kwargs(),
     )

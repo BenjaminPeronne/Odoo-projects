@@ -2863,6 +2863,21 @@ export default function Home() {
     if (modulePage > modulePageCount) setModulePage(modulePageCount);
   }, [modulePage, modulePageCount]);
 
+  const hasModuleSelection = selectedModules.size > 0;
+  useEffect(() => {
+    if (activeTab !== "modules" || !hasModuleSelection) return;
+    function clearSelectionOnEscape(event: KeyboardEvent) {
+      // Une fenêtre ou un menu Radix consomme déjà Échap ; un champ de saisie le garde pour lui.
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (document.querySelector("[role=dialog], [role=menu]")) return;
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("input, textarea, select, [contenteditable=true]")) return;
+      setSelectedModules(new Set());
+    }
+    window.addEventListener("keydown", clearSelectionOnEscape);
+    return () => window.removeEventListener("keydown", clearSelectionOnEscape);
+  }, [activeTab, hasModuleSelection]);
+
   const toggleModuleSelection = useCallback((name: string, checked: boolean) => {
     setSelectedModules((current) => {
       const next = new Set(current);
@@ -3091,7 +3106,7 @@ export default function Home() {
             {selectedModuleList.length} sélectionné(s)
           </Badge>
           {selectedModuleList.length > 0 && (
-            <Button size="sm" variant="ghost" onClick={() => setSelectedModules(new Set())}>
+            <Button size="sm" variant="ghost" onClick={() => setSelectedModules(new Set())} title="Effacer la sélection (Échap)">
               Effacer
             </Button>
           )}
@@ -3714,12 +3729,10 @@ export default function Home() {
                                     <ShieldCheck className="h-4 w-4" />
                                     Neutraliser et contrôler
                                   </DropdownMenu.Item>
-                                  {settings?.show_technical_details && (
-                                    <DropdownMenu.Item onSelect={() => runDatabaseAction(db, "admin_password")}>
-                                      <KeyRound className="h-4 w-4" />
-                                      Mot de passe admin
-                                    </DropdownMenu.Item>
-                                  )}
+                                  <DropdownMenu.Item onSelect={() => runDatabaseAction(db, "admin_password")}>
+                                    <KeyRound className="h-4 w-4" />
+                                    Mot de passe admin
+                                  </DropdownMenu.Item>
                                   <DropdownMenu.Separator />
                                   <DropdownMenu.Label>Outils</DropdownMenu.Label>
                                   <DropdownMenu.Item
@@ -3895,12 +3908,10 @@ export default function Home() {
                               <Languages className="h-4 w-4" />
                               Réinitialiser les traductions
                             </Button>
-                            {settings?.show_technical_details && (
-                              <Button className="w-full" variant="outline" disabled={!canUseDb || loading} onClick={() => setAdminPasswordOpen(true)}>
-                                <KeyRound className="h-4 w-4" />
-                                Réinitialiser le mot de passe admin
-                              </Button>
-                            )}
+                            <Button className="w-full" variant="outline" disabled={!canUseDb || loading} onClick={() => setAdminPasswordOpen(true)}>
+                              <KeyRound className="h-4 w-4" />
+                              Réinitialiser le mot de passe admin
+                            </Button>
                             <Button
                               className="w-full text-destructive hover:text-destructive"
                               variant="outline"
@@ -6625,8 +6636,9 @@ export default function Home() {
             <span className="hidden h-6 w-px bg-border sm:block" aria-hidden="true" />
             {moduleSelectionButtons(true)}
             <span className="hidden h-6 w-px bg-border sm:block" aria-hidden="true" />
-            <Button size="sm" variant="ghost" onClick={() => setSelectedModules(new Set())} title="Effacer la sélection">
+            <Button size="sm" variant="ghost" onClick={() => setSelectedModules(new Set())} title="Effacer la sélection (Échap)">
               Effacer
+              <kbd className="ml-1 rounded border px-1 font-mono text-[10px] text-muted-foreground">Échap</kbd>
             </Button>
           </div>
         </div>

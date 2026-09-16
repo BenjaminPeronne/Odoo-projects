@@ -165,6 +165,8 @@ class ProjectService:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,
             **hidden_process_kwargs(),
         )
@@ -175,6 +177,12 @@ class ProjectService:
             for line in process.stdout:
                 self.log(log, line)
             code = process.wait()
+        except BaseException:
+            # Une commande sans lecteur continuerait en arrière-plan, par exemple
+            # un `odoo -i` concurrent du redémarrage du serveur.
+            process.kill()
+            process.wait()
+            raise
         finally:
             if process.stdout is not None:
                 process.stdout.close()
@@ -196,6 +204,8 @@ class ProjectService:
                 env=self.env(),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
                 **hidden_process_kwargs(),
             )
@@ -1079,6 +1089,14 @@ class ProjectService:
         self.wait_odoo_port(container, log=log)
         self.wait_odoo_http(container, log=log)
 
+    def restart_odoo_server_after_failure(self, project, log=None):
+        """Relance Odoo sans masquer l'erreur de l'opération qui a échoué."""
+        self.log(log, "Redémarrage du serveur Odoo...")
+        try:
+            self.start_odoo_server(project, log=log)
+        except Exception as exc:
+            self.log(log, f"Redémarrage du serveur Odoo impossible : {exc}")
+
     def stop_odoo_server(self, project, log=None, max_wait=30, sleep=None):
         sleep = sleep or time.sleep
         container = f"odoo-{project}"
@@ -1221,9 +1239,11 @@ class ProjectService:
             if was_neutralized:
                 self.log(log, "La base était neutralisée: nouvelle passe après l'opération module...")
                 self._execute_database_neutralization(project, db_name, log=log)
-        finally:
-            self.log(log, "Redémarrage du serveur Odoo...")
-            self.start_odoo_server(project, log=log)
+        except BaseException:
+            self.restart_odoo_server_after_failure(project, log=log)
+            raise
+        self.log(log, "Redémarrage du serveur Odoo...")
+        self.start_odoo_server(project, log=log)
         self.wait_project_http(project, log=log)
         self.log(log, "Opération module terminée.")
         self.log(log, f"URL Odoo: {self.project_url(project)}")
@@ -1281,9 +1301,11 @@ class ProjectService:
             if code != 0:
                 self.odoo_startup_diagnostics(container, log=log)
                 raise RuntimeError(f"{failure_message} (code {code}).")
-        finally:
-            self.log(log, "Redémarrage du serveur Odoo...")
-            self.start_odoo_server(project, log=log)
+        except BaseException:
+            self.restart_odoo_server_after_failure(project, log=log)
+            raise
+        self.log(log, "Redémarrage du serveur Odoo...")
+        self.start_odoo_server(project, log=log)
         self.wait_project_http(project, log=log)
 
     def run_odoo_update_module_list(self, project, db_name, log=None):
@@ -1602,9 +1624,11 @@ print("ODOO_MANAGER_NEUTRALIZATION_DONE")
         self.stop_odoo_server(project, log=log)
         try:
             self._execute_database_neutralization(project, db_name, log=log)
-        finally:
-            self.log(log, "Redémarrage du serveur Odoo...")
-            self.start_odoo_server(project, log=log)
+        except BaseException:
+            self.restart_odoo_server_after_failure(project, log=log)
+            raise
+        self.log(log, "Redémarrage du serveur Odoo...")
+        self.start_odoo_server(project, log=log)
         self.wait_project_http(project, log=log)
         self.log(log, "Neutralisation terminée et contrôlée.")
         self.log(log, f"URL Odoo: {self.project_url(project)}")

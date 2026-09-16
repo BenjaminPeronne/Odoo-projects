@@ -29,7 +29,7 @@ class SocleModulesTests(ModuleLayoutTests):
                     side_effect=lambda path, distribution: str(path),
                 ):
             states = creator.module_link_states(sources, addons)
-        self.assertEqual({"valid": "correct", "absent": "missing", "broken": "conflict", "other": "conflict"}, states)
+        self.assertEqual({"valid": "correct", "absent": "missing", "broken": "conflict", "other": "provided"}, states)
         self.assertEqual([], list(addons.glob(".odoo_manager_check_*")))
 
     def test_wsl_validation_does_not_use_windows_link_visibility(self):

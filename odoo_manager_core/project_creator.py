@@ -302,7 +302,12 @@ class ProjectCreator:
         return distribution, addons_wsl, source_parents
 
     def module_link_states(self, candidates, addons_dir):
-        """Inspect links in the filesystem that creates and consumes them."""
+        """Inspect links in the filesystem that creates and consumes them.
+
+        `provided` marks a link to another readable module of that name, e.g. the
+        Enterprise copy of a project repository: Odoo loads it, so it is kept.
+        Real directories and broken links remain conflicts.
+        """
         wsl_paths = self.wsl_link_paths(candidates, addons_dir)
         if wsl_paths is not None:
             distribution, addons_wsl, source_parents = wsl_paths
@@ -313,6 +318,8 @@ class ProjectCreator:
                 lines.extend([
                     f"if [ -L {link} ] && [ -d {link} ] && [ \"$(readlink -f -- {link})\" = \"$(readlink -f -- {target})\" ]; then",
                     f"printf '%s\\t%s\\n' {shlex.quote(name)} correct",
+                    f"elif [ -L {link} ] && [ -d {link} ] && {{ [ -f {link}/__manifest__.py ] || [ -f {link}/__openerp__.py ]; }}; then",
+                    f"printf '%s\\t%s\\n' {shlex.quote(name)} provided",
                     f"elif [ -e {link} ] || [ -L {link} ]; then",
                     f"printf '%s\\t%s\\n' {shlex.quote(name)} conflict",
                     "else",
@@ -338,7 +345,7 @@ class ProjectCreator:
                     script_path.unlink(missing_ok=True)
             states = dict(line.split("\t", 1) for line in output.splitlines() if "\t" in line)
             if code != 0 or set(states) != set(candidates) or any(
-                state not in {"correct", "conflict", "missing"} for state in states.values()
+                state not in {"correct", "provided", "conflict", "missing"} for state in states.values()
             ):
                 raise RuntimeError("Impossible de vérifier les liens Enterprise depuis WSL. Vérifie l'accès au workspace et réessaie.")
             return states
@@ -349,6 +356,8 @@ class ProjectCreator:
                 states[name] = "missing"
             elif link.is_symlink() and link.is_dir() and link.resolve() == source.resolve():
                 states[name] = "correct"
+            elif link.is_symlink() and link.is_dir() and ((link / "__manifest__.py").is_file() or (link / "__openerp__.py").is_file()):
+                states[name] = "provided"
             else:
                 states[name] = "conflict"
         return states
@@ -573,6 +582,7 @@ class ProjectCreator:
 
         cookies = CookieJar()
         opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookies))
+        archive_requested = False
         auth_payload = urllib.parse.urlencode({
             "name": login,
             "password": password,
@@ -599,6 +609,7 @@ class ProjectCreator:
                 timeout=300,
             ):
                 pass
+            archive_requested = True
 
             archive = Path(temporary) / f"{instance}.zip"
             self.log(log, f"Téléchargement de la copie RIKA de {instance}...")
@@ -621,8 +632,16 @@ class ProjectCreator:
         except urllib.error.HTTPError as exc:
             if exc.code in {401, 403}:
                 raise RuntimeError("RIKA a refusé l'authentification ou l'accès à cette instance.") from exc
+            if exc.code == 404 and archive_requested:
+                raise RuntimeError(
+                    f"RIKA a accepté la génération de la copie de {instance}, mais l'archive {instance}.zip "
+                    "est introuvable. Vérifie la copie dans RIKA puis réessaie."
+                ) from exc
             if exc.code == 404:
-                raise RuntimeError(f"L'instance RIKA {instance} est introuvable.") from exc
+                raise RuntimeError(
+                    f"L'instance RIKA {instance} est introuvable. Utilise le nom exact affiché dans RIKA "
+                    "(sensible à la casse, sans domaine)."
+                ) from exc
             raise RuntimeError(f"RIKA a retourné une erreur HTTP {exc.code}.") from exc
         except urllib.error.URLError as exc:
             raise RuntimeError("RIKA est inaccessible. Vérifie la connexion réseau puis réessaie.") from exc
