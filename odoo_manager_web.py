@@ -820,27 +820,61 @@ def validate_ssh_comment(value):
     return comment
 
 
-def generate_ssh_key(comment=""):
+SSH_KEY_BACKUP_DIRNAME = "odoo-manager-backups"
+
+
+def backup_native_ssh_key(ssh_dir):
+    backup_dir = ssh_dir / SSH_KEY_BACKUP_DIRNAME / time.strftime("%Y%m%d_%H%M%S")
+    suffix = 1
+    while backup_dir.exists():
+        backup_dir = backup_dir.with_name(f"{time.strftime('%Y%m%d_%H%M%S')}_{suffix}")
+        suffix += 1
+    backup_dir.mkdir(mode=0o700, parents=True)
+    for name in ("id_ed25519", "id_ed25519.pub"):
+        source = ssh_dir / name
+        if source.exists() or source.is_symlink():
+            shutil.move(str(source), str(backup_dir / name))
+    return backup_dir
+
+
+def generate_ssh_key(comment="", replace=False):
     comment = validate_ssh_comment(comment)
     existing = ssh_public_keys_snapshot()["keys"]
     default_existing = next((key for key in existing if key["name"] == "id_ed25519.pub"), None)
-    if default_existing:
+    if default_existing and not replace:
         return {**default_existing, "created": False, "message": "La clé Ed25519 existe déjà."}
 
+    backup_location = ""
     runtime = ssh_runtime()
     if runtime["kind"] == "wsl":
         comment_argument = f" -C {shlex.quote(comment)}" if comment else ""
+        if replace:
+            # L'ancienne paire est déplacée, jamais supprimée : elle peut encore servir ailleurs que sur GitLab.
+            existing_key_step = (
+                'if [ -e "$HOME/.ssh/id_ed25519" ] || [ -e "$HOME/.ssh/id_ed25519.pub" ]; then '
+                f'backup="$HOME/.ssh/{SSH_KEY_BACKUP_DIRNAME}/$(date +%Y%m%d_%H%M%S)_$$" && '
+                'mkdir -p "$backup" && chmod 700 "$backup" && '
+                'for name in id_ed25519 id_ed25519.pub; do '
+                '[ -e "$HOME/.ssh/$name" ] && mv "$HOME/.ssh/$name" "$backup/$name"; done; '
+                'echo "BACKUP:$backup"; fi; '
+            )
+        else:
+            existing_key_step = (
+                'if [ -e "$HOME/.ssh/id_ed25519" ]; then '
+                'echo "Une clé privée id_ed25519 existe déjà sans clé publique." >&2; exit 3; fi; '
+            )
         script = (
             'mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh" && '
-            'if [ -e "$HOME/.ssh/id_ed25519" ]; then '
-            'echo "Une clé privée id_ed25519 existe déjà sans clé publique." >&2; exit 3; fi; '
-            f'ssh-keygen -t ed25519 -f "$HOME/.ssh/id_ed25519" -N ""{comment_argument}'
+            + existing_key_step
+            + f'ssh-keygen -t ed25519 -f "$HOME/.ssh/id_ed25519" -N ""{comment_argument}'
         )
         code, output = run_capture(
             [*wsl_command_prefix(runtime["distribution"]), "sh", "-lc", script],
             cwd=Path.home(),
             timeout=30,
         )
+        backup_line = next((line for line in output.splitlines() if line.startswith("BACKUP:")), "")
+        backup_location = backup_line.removeprefix("BACKUP:").strip()
         if code != 0:
             raise RuntimeError(output or "Impossible de générer la clé SSH dans WSL.")
     else:
@@ -849,7 +883,9 @@ def generate_ssh_key(comment=""):
         ssh_dir = Path.home() / ".ssh"
         ssh_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         private_key = ssh_dir / "id_ed25519"
-        if private_key.exists():
+        if replace and (private_key.exists() or private_key.with_suffix(".pub").exists()):
+            backup_location = str(backup_native_ssh_key(ssh_dir))
+        elif private_key.exists():
             raise RuntimeError("Une clé privée id_ed25519 existe déjà sans clé publique. Aucun fichier n'a été écrasé.")
         command = [resolve_executable("ssh-keygen", SETTINGS), "-t", "ed25519", "-f", str(private_key), "-N", ""]
         if comment:
@@ -862,6 +898,13 @@ def generate_ssh_key(comment=""):
     public_key = next((key for key in generated if key["name"] == "id_ed25519.pub"), None)
     if not public_key:
         raise RuntimeError("La clé a été générée mais sa partie publique reste introuvable.")
+    if replace and backup_location:
+        return {
+            **public_key,
+            "created": True,
+            "backup": backup_location,
+            "message": f"Nouvelle clé SSH Ed25519 générée. L'ancienne clé est conservée dans {backup_location}.",
+        }
     return {**public_key, "created": True, "message": "Clé SSH Ed25519 générée."}
 
 
@@ -4642,7 +4685,11 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/system/ssh-key/generate":
             try:
                 payload = self.read_json()
-                return json_response(self, generate_ssh_key(payload.get("comment", "")), status=201)
+                return json_response(
+                    self,
+                    generate_ssh_key(payload.get("comment", ""), replace=truthy(payload.get("replace", False))),
+                    status=201,
+                )
             except (ValueError, RuntimeError, OSError) as exc:
                 return json_response(self, {"error": str(exc)}, status=400)
 

@@ -1010,6 +1010,55 @@ class ProjectCreationPrerequisitesTests(unittest.TestCase):
         run_capture.assert_not_called()
 
 
+    @patch("odoo_manager_web.run_capture")
+    @patch("odoo_manager_web.resolve_executable", return_value="ssh-keygen")
+    @patch("odoo_manager_web.executable_available", return_value=True)
+    @patch("odoo_manager_web.ssh_runtime", return_value={"kind": "native"})
+    @patch("odoo_manager_web.Path.home")
+    def test_regeneration_backs_up_the_previous_key_pair(self, home, _runtime, _available, _resolve, run_capture):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ssh = root / ".ssh"
+            ssh.mkdir()
+            (ssh / "id_ed25519").write_text("OLD PRIVATE", encoding="utf-8")
+            (ssh / "id_ed25519.pub").write_text("ssh-ed25519 AAAAOLD old@sudokeys.com\n", encoding="utf-8")
+            home.return_value = root
+
+            def generate(command, **_kwargs):
+                key_path = Path(command[command.index("-f") + 1])
+                self.assertFalse(key_path.exists())
+                key_path.write_text("NEW PRIVATE", encoding="utf-8")
+                key_path.with_suffix(".pub").write_text("ssh-ed25519 AAAANEW new@sudokeys.com\n", encoding="utf-8")
+                return 0, "generated"
+
+            run_capture.side_effect = generate
+            payload = web.generate_ssh_key("new@sudokeys.com", replace=True)
+
+            backup = Path(payload["backup"])
+            self.assertEqual((backup / "id_ed25519").read_text(encoding="utf-8"), "OLD PRIVATE")
+            self.assertIn("AAAAOLD", (backup / "id_ed25519.pub").read_text(encoding="utf-8"))
+            self.assertEqual(backup.parent, ssh / web.SSH_KEY_BACKUP_DIRNAME)
+
+        self.assertIn("AAAANEW", payload["public_key"])
+        self.assertNotIn("PRIVATE", str(payload))
+
+    @patch("odoo_manager_web.run_capture")
+    @patch("odoo_manager_web.ssh_runtime", return_value={"kind": "native"})
+    @patch("odoo_manager_web.Path.home")
+    def test_existing_key_is_returned_without_replace(self, home, _runtime, run_capture):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ssh = root / ".ssh"
+            ssh.mkdir()
+            (ssh / "id_ed25519.pub").write_text("ssh-ed25519 AAAAOLD old@sudokeys.com\n", encoding="utf-8")
+            home.return_value = root
+
+            payload = web.generate_ssh_key()
+
+        self.assertFalse(payload["created"])
+        run_capture.assert_not_called()
+
+
 class GitInstallationTests(unittest.TestCase):
     class LogJob:
         def __init__(self):

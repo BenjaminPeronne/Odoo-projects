@@ -963,6 +963,9 @@ export default function Home() {
   const [selectedSshKeyName, setSelectedSshKeyName] = useState("");
   const [sshComment, setSshComment] = useState("");
   const [generatingSshKey, setGeneratingSshKey] = useState(false);
+  const [sshRegenerateMode, setSshRegenerateMode] = useState(false);
+  const [sshRegenerateConfirmed, setSshRegenerateConfirmed] = useState(false);
+  const [sshKeyBackup, setSshKeyBackup] = useState("");
   const [savingSettings, setSavingSettings] = useState(false);
   const [selectingWorkspace, setSelectingWorkspace] = useState(false);
   const [projectsFilter, setProjectsFilter] = useState("");
@@ -1997,19 +2000,35 @@ export default function Home() {
     }
   }
 
-  async function openSshAssistant() {
+  async function openSshAssistant(regenerate = false) {
+    setSshRegenerateMode(false);
+    setSshRegenerateConfirmed(false);
+    setSshKeyBackup("");
     setSshDialogOpen(true);
-    await loadSshKeys();
+    const keys = await loadSshKeys();
+    if (regenerate && keys.length) startSshKeyRegeneration(keys);
   }
 
-  async function requestSshKeyGeneration() {
+  function startSshKeyRegeneration(keys: SshPublicKey[] = sshKeys) {
+    // Reprend le commentaire de la clé actuelle (souvent l'e-mail) pour identifier la nouvelle clé de la même façon.
+    const current = keys.find((key) => key.name === "id_ed25519.pub") || keys[0];
+    const currentComment = current?.public_key.split(/\s+/).slice(2).join(" ") || "";
+    if (currentComment && !sshComment.trim()) setSshComment(currentComment);
+    setSshRegenerateConfirmed(false);
+    setSshRegenerateMode(true);
+  }
+
+  async function requestSshKeyGeneration(replace = false) {
     setGeneratingSshKey(true);
     try {
-      const key = await api<SshPublicKey & { created: boolean; message: string }>("/api/system/ssh-key/generate", {
+      const key = await api<SshPublicKey & { created: boolean; message: string; backup?: string }>("/api/system/ssh-key/generate", {
         method: "POST",
-        body: JSON.stringify({ comment: sshComment }),
+        body: JSON.stringify({ comment: sshComment, replace }),
       });
       pushToast("success", key.message);
+      setSshRegenerateMode(false);
+      setSshRegenerateConfirmed(false);
+      setSshKeyBackup(key.backup || "");
       await loadSshKeys();
       setSelectedSshKeyName(key.name);
       await loadCreationPrerequisites();
@@ -4745,7 +4764,7 @@ export default function Home() {
               }
               action={
                 creationPrerequisites?.ssh_keygen_available || creationPrerequisites?.ssh_key_present ? (
-                  <Button size="sm" variant="outline" onClick={openSshAssistant}>
+                  <Button size="sm" variant="outline" onClick={() => openSshAssistant()}>
                     <KeyRound className="h-4 w-4" />
                     {creationPrerequisites.ssh_key_present ? "Voir la clé" : "Générer"}
                   </Button>
@@ -4830,13 +4849,69 @@ export default function Home() {
                 />
                 <p className="text-xs text-muted-foreground">Ce texte sert uniquement à identifier la clé dans GitLab.</p>
               </div>
-              <Button className="w-full" onClick={requestSshKeyGeneration} disabled={generatingSshKey}>
+              <Button className="w-full" onClick={() => requestSshKeyGeneration()} disabled={generatingSshKey}>
                 {generatingSshKey ? <Loader2 className="h-4 w-4 animate-spin" /> : <KeyRound className="h-4 w-4" />}
                 Générer une clé Ed25519
               </Button>
             </div>
+          ) : sshRegenerateMode ? (
+            <div className="space-y-4">
+              <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/45 dark:text-amber-100">
+                <div className="font-medium">Régénérer la clé id_ed25519</div>
+                <ul className="mt-2 list-disc space-y-1 pl-4 text-xs leading-5">
+                  <li>Une nouvelle paire de clés remplace <code>~/.ssh/id_ed25519</code> sur cette machine.</li>
+                  <li>
+                    L’ancienne paire n’est pas supprimée : elle est déplacée dans <code>~/.ssh/odoo-manager-backups</code>.
+                  </li>
+                  <li>
+                    Tant que la nouvelle clé publique n’est pas ajoutée dans GitLab, les imports et mises à jour de dépôts échoueront.
+                    Les autres services qui utilisaient l’ancienne clé (serveurs, GitHub…) devront aussi être mis à jour.
+                  </li>
+                </ul>
+              </div>
+              <div className="grid gap-1.5">
+                <label className="text-sm font-medium" htmlFor="ssh-key-regenerate-comment">E-mail professionnel ou commentaire</label>
+                <Input
+                  id="ssh-key-regenerate-comment"
+                  value={sshComment}
+                  onChange={(event) => setSshComment(event.target.value)}
+                  placeholder="prenom.nom@sudokeys.com"
+                  autoComplete="email"
+                />
+              </div>
+              <label className="flex cursor-pointer items-start gap-2 text-sm">
+                <Checkbox
+                  className="mt-0.5"
+                  checked={sshRegenerateConfirmed}
+                  onCheckedChange={(checked) => setSshRegenerateConfirmed(checked === true)}
+                />
+                J’ai compris que je devrai ajouter la nouvelle clé publique dans GitLab.
+              </label>
+              <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+                <Button variant="outline" onClick={() => setSshRegenerateMode(false)} disabled={generatingSshKey}>
+                  Annuler
+                </Button>
+                <Button
+                  variant="destructive"
+                  onClick={() => requestSshKeyGeneration(true)}
+                  disabled={!sshRegenerateConfirmed || generatingSshKey}
+                >
+                  {generatingSshKey ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
+                  Régénérer la clé
+                </Button>
+              </div>
+            </div>
           ) : (
             <div className="space-y-4">
+              {sshKeyBackup && (
+                <div className="rounded-md border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-950 dark:border-emerald-800 dark:bg-emerald-950/45 dark:text-emerald-100">
+                  <div className="font-medium">Nouvelle clé générée</div>
+                  <p className="mt-1 text-xs leading-5">
+                    Copie-la puis ajoute-la dans GitLab. Pense à retirer l’ancienne clé de GitLab ensuite.
+                    Ancienne clé conservée dans : <code className="break-all">{sshKeyBackup}</code>
+                  </p>
+                </div>
+              )}
               {sshKeys.length > 1 && (
                 <div className="grid gap-1.5">
                   <label className="text-sm font-medium" htmlFor="ssh-public-key-select">Clé publique</label>
@@ -4873,6 +4948,13 @@ export default function Home() {
               <p className="text-xs leading-5 text-muted-foreground">
                 Dans GitLab, colle cette valeur dans le champ Clé SSH, donne-lui un titre correspondant à cet ordinateur, puis valide.
               </p>
+              <div className="flex flex-col gap-2 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
+                <p className="text-xs text-muted-foreground">Clé compromise, perdue ou à renouveler ?</p>
+                <Button variant="outline" onClick={() => startSshKeyRegeneration()} disabled={generatingSshKey}>
+                  <RefreshCcw className="h-4 w-4" />
+                  Régénérer la clé
+                </Button>
+              </div>
             </div>
           )}
         </DialogContent>
@@ -5118,10 +5200,18 @@ export default function Home() {
                             </p>
                           </div>
                         </div>
-                        <Button type="button" variant="outline" onClick={openSshAssistant}>
-                          <KeyRound className="h-4 w-4" />
-                          {selectedSshKey ? "Gérer la clé SSH" : "Configurer une clé"}
-                        </Button>
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          <Button type="button" variant="outline" className={cn(!selectedSshKey && "sm:col-span-2")} onClick={() => openSshAssistant()}>
+                            <KeyRound className="h-4 w-4" />
+                            {selectedSshKey ? "Gérer la clé SSH" : "Configurer une clé"}
+                          </Button>
+                          {selectedSshKey && (
+                            <Button type="button" variant="outline" onClick={() => openSshAssistant(true)}>
+                              <RefreshCcw className="h-4 w-4" />
+                              Régénérer la clé
+                            </Button>
+                          )}
+                        </div>
                       </div>
 
                       {gitlabStatus && (
@@ -5821,7 +5911,7 @@ export default function Home() {
             )}
             <div className="flex flex-col gap-2 rounded-md border p-3 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
               <span>Le manager utilise la clé SSH de cette machine. Aucun jeton GitLab n’est demandé ni stocké.</span>
-              <Button type="button" size="sm" variant="outline" onClick={openSshAssistant}>
+              <Button type="button" size="sm" variant="outline" onClick={() => openSshAssistant()}>
                 <KeyRound className="h-4 w-4" />
                 Gérer la clé SSH
               </Button>
