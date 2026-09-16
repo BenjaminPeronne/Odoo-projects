@@ -184,7 +184,9 @@ class RepositoryModulesTests(ModuleLayoutTests):
 
         with self.assertRaisesRegex(ValueError, 'alpha : Déjà fourni par addons-store/caritel_v18/addons.'):
             self.run_import(['alpha'])
-        self.assertEqual((self.project_root / 'odoo/addons/alpha').resolve(), other.resolve())
+        # Valeur du lien et non resolve() : sur le runner Windows, resolve() du lien garde le nom
+        # court du dossier temporaire (RUNNER~1) alors que celui du dossier cible est développé.
+        self.assertEqual(Path('../addons-store/caritel_v18/addons/alpha'), Path((self.project_root / 'odoo/addons/alpha').readlink()))
 
     def test_tree_listing_follows_import_discovery_rules(self):
         tree = "\n".join([
