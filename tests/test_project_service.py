@@ -608,20 +608,6 @@ class ProjectServiceTests(unittest.TestCase):
             for line in logs
         ))
 
-    def test_module_list_update_runs_update_list_in_odoo_shell(self):
-        self.runner.statuses = {"odoo-DEMO": "running", "postgresql-DEMO": "running"}
-        self.runner.odoo_server_running = False
-        self.runner.odoo_port_ready = True
-        logs = []
-
-        self.service.run_odoo_update_module_list("DEMO", "PROTEX_20812", log=logs.append)
-
-        commands = [command for command, _cwd in self.runner.streams]
-        shell = next(command for command in commands if "odoo shell" in command[-1])
-        self.assertIn("ODOO_DB_NAME=PROTEX_20812", shell)
-        self.assertIn('env["ir.module.module"].update_list()', shell[-1])
-        self.assertTrue(any("Redémarrage du serveur Odoo" in line for line in logs))
-
     def test_asset_regeneration_unlinks_web_asset_attachments(self):
         self.runner.statuses = {"odoo-DEMO": "running", "postgresql-DEMO": "running"}
         self.runner.odoo_server_running = False

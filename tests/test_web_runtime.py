@@ -1465,21 +1465,15 @@ class DatabaseNeutralizationTests(unittest.TestCase):
             overwrite_translations=True,
         )
 
-    @patch("odoo_manager_web.clear_project_module_cache")
     @patch("odoo_manager_web.list_databases_for", return_value=["postgres", "demo"])
     @patch("odoo_manager_web.project_service")
     @patch("odoo_manager_web.validate_project", return_value="DEMO")
-    def test_module_list_and_assets_jobs_delegate_to_odoo_shell(
-        self, _validate_project, project_service, _list_databases, clear_cache,
-    ):
+    def test_assets_job_delegates_to_odoo_shell(self, _validate_project, project_service, _list_databases):
         job = self.LogJob()
 
-        web.update_module_list_job(job, "DEMO", "demo")
         web.regenerate_assets_job(job, "DEMO", "demo")
 
-        project_service.return_value.run_odoo_update_module_list.assert_called_once_with("DEMO", "demo", log=job.add)
         project_service.return_value.run_odoo_regenerate_assets.assert_called_once_with("DEMO", "demo", log=job.add)
-        clear_cache.assert_called_once_with("DEMO")
 
     @patch("odoo_manager_web.list_databases_for", return_value=["postgres", "demo"])
     @patch("odoo_manager_web.project_service")

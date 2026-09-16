@@ -2615,12 +2615,6 @@ def reset_module_translations_job(job, project, db_name, modules):
     module_command_job(job, "--update-module", project, db_name, modules, overwrite_translations=True)
 
 
-def update_module_list_job(job, project, db_name):
-    project, db_name = existing_odoo_database(project, db_name)
-    project_service().run_odoo_update_module_list(project, db_name, log=job.add)
-    clear_project_module_cache(project)
-
-
 def regenerate_assets_job(job, project, db_name):
     project, db_name = existing_odoo_database(project, db_name)
     project_service().run_odoo_regenerate_assets(project, db_name, log=job.add)
@@ -5196,15 +5190,6 @@ class Handler(BaseHTTPRequestHandler):
                     f"Réinitialiser toutes les traductions de {db_name}",
                     reset_all_translations_job,
                     (project, db_name, ",".join(languages)),
-                    project=project,
-                )
-            elif action == "update_module_list":
-                project = validate_project(payload.get("project", ""))
-                db_name = validate_odoo_db(payload.get("db", ""))
-                job = Job(
-                    f"Actualiser la liste des modules de {db_name}",
-                    update_module_list_job,
-                    (project, db_name),
                     project=project,
                 )
             elif action == "regenerate_assets":

@@ -1308,21 +1308,6 @@ class ProjectService:
         self.start_odoo_server(project, log=log)
         self.wait_project_http(project, log=log)
 
-    def run_odoo_update_module_list(self, project, db_name, log=None):
-        self.ensure_odoo_containers_ready(project, log=log)
-        self.log(log, "")
-        self.log(log, "Actualisation de la liste des modules Odoo")
-        self.log(log, f"Projet: {project}")
-        self.log(log, f"Base: {db_name}")
-        script = """updated, added = env["ir.module.module"].update_list()
-env.cr.commit()
-print(f"Liste des modules actualisée : {added} ajouté(s), {updated} mis à jour.")
-"""
-        self.run_odoo_shell_script(
-            project, db_name, script, "L'actualisation de la liste des modules a échoué", log=log,
-        )
-        self.log(log, "Liste des modules actualisée.")
-
     def run_odoo_regenerate_assets(self, project, db_name, log=None):
         self.ensure_odoo_containers_ready(project, log=log)
         self.log(log, "")

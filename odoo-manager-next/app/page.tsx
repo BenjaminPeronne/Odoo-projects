@@ -8,6 +8,7 @@ import {
   Boxes,
   Bug,
   CheckCircle2,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Circle,
@@ -23,7 +24,6 @@ import {
   Info,
   KeyRound,
   Languages,
-  ListRestart,
   Loader2,
   Logs,
   MoreHorizontal,
@@ -44,7 +44,7 @@ import {
   X,
 } from "lucide-react";
 import { DropdownMenu } from "@radix-ui/themes";
-import { type HTMLAttributes, type ReactNode, type RefObject, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { type HTMLAttributes, type MouseEvent as ReactMouseEvent, type ReactNode, type RefObject, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { Badge, type BadgeProps } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, InteractiveCard } from "@/components/ui/card";
@@ -2420,13 +2420,6 @@ export default function Home() {
     if (job) setAllTranslationsOpen(false);
   }
 
-  async function updateOdooModuleList() {
-    const db = selectedDatabaseOrNotify("l’actualisation de la liste des modules Odoo");
-    if (!db || !selectedProject) return;
-    const job = await createJob("update_module_list", { project: selectedProject.name, db });
-    if (job) schedule(refreshModules, 2500);
-  }
-
   function runDatabaseAction(db: string, action: DatabaseMenuAction) {
     if (db !== selectedDb) {
       // Les actions lisent la base sélectionnée : on attend que la sélection soit appliquée.
@@ -2896,6 +2889,19 @@ export default function Home() {
     });
   }, []);
 
+  const toggleModuleFromRow = useCallback((event: ReactMouseEvent<HTMLElement>, name: string) => {
+    const target = event.target as HTMLElement;
+    // Les contrôles gardent leur action, y compris les menus rendus en portail dont les clics remontent jusqu'ici.
+    if (target.closest("button, a, input, select, textarea, label, [role=menu], [role=menuitem], [role=dialog]")) return;
+    // Sélectionner un nom ou un chemin pour le copier ne coche pas la ligne.
+    if (window.getSelection()?.toString()) return;
+    setSelectedModules((current) => {
+      const next = new Set(current);
+      if (!next.delete(name)) next.add(name);
+      return next;
+    });
+  }, []);
+
   const toggleFilteredModules = useCallback(
     (checked: boolean) => {
       setSelectedModules((current) => {
@@ -3070,85 +3076,89 @@ export default function Home() {
     return (
       <div
         className={cn(
-          "flex flex-wrap items-center gap-2 text-sm",
+          "flex flex-wrap items-center justify-between gap-x-4 gap-y-2 text-sm",
           floating
             ? "floating-selection-bar pointer-events-auto max-w-full justify-center rounded-xl border border-primary/45 p-2 shadow-[0_18px_40px_-12px_rgb(0_0_0/0.45)] ring-1 ring-black/5 dark:ring-white/10"
             : "rounded-md border border-primary/35 bg-primary/[0.06] px-3 py-2 dark:bg-primary/[0.12]",
         )}
       >
-        <Checkbox
-          checked={allFilteredModulesSelected && count === filteredModuleNames.length ? true : "indeterminate"}
-          onCheckedChange={clearSelection}
-          aria-label="Désélectionner tous les modules"
-          title="Désélectionner tous les modules"
-        />
-        <span className="flex min-w-0 flex-wrap items-baseline gap-x-1.5 pr-1">
-          <span className="font-semibold">{count} sélectionné(s)</span>
-          {details && <span className="text-muted-foreground">· {details}</span>}
-        </span>
-        {!floating && selectAllFiltered}
-        <span className="hidden flex-1 sm:block" aria-hidden="true" />
-        {installable > 0 && (
-          <Button
-            size="sm"
-            variant="success"
-            disabled={busy}
-            onClick={() => createJob("install_module", { project: selectedProject?.name, db: selectedDb, modules: selectedInstallableModuleList.join(",") })}
-          >
-            <PlusCircle className="h-4 w-4" />
-            Installer ({installable})
+        {/* Deux groupes : en largeur réduite, les actions passent ensemble à la ligne, jamais bouton par bouton. */}
+        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+          <Checkbox
+            checked={allFilteredModulesSelected && count === filteredModuleNames.length ? true : "indeterminate"}
+            onCheckedChange={clearSelection}
+            aria-label="Désélectionner tous les modules"
+            title="Désélectionner tous les modules"
+          />
+          <span className="flex min-w-0 flex-wrap items-baseline gap-x-1.5 pr-1">
+            <span className="font-semibold">{count} sélectionné(s)</span>
+            {details && <span className="text-muted-foreground">· {details}</span>}
+          </span>
+          {!floating && selectAllFiltered}
+        </div>
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+          {installable > 0 && (
+            <Button
+              size="sm"
+              variant="success"
+              disabled={busy}
+              onClick={() => createJob("install_module", { project: selectedProject?.name, db: selectedDb, modules: selectedInstallableModuleList.join(",") })}
+            >
+              <PlusCircle className="h-4 w-4" />
+              Installer ({installable})
+            </Button>
+          )}
+          {installed > 0 && (
+            <Button
+              size="sm"
+              variant={installable > 0 ? "outline" : "default"}
+              disabled={busy}
+              onClick={() => createJob("update_module", { project: selectedProject?.name, db: selectedDb, modules: selectedInstalledModuleList.join(",") })}
+            >
+              <RefreshCcw className="h-4 w-4" />
+              Mettre à jour ({installed})
+            </Button>
+          )}
+          {installed > 0 && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="border-red-300 text-red-700 hover:border-red-400 hover:bg-red-50 hover:text-red-800 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-950/60"
+              disabled={busy}
+              onClick={() => requestUninstall(selectedInstalledModuleList)}
+            >
+              <PackageX className="h-4 w-4" />
+              Désinstaller ({installed})
+            </Button>
+          )}
+          {(installed > 0 || removable > 0) && (
+            <DropdownMenu.Root>
+              <DropdownMenu.Trigger>
+                <Button size="sm" variant="outline" disabled={loading} aria-label="Autres actions sur la sélection">
+                  <MoreHorizontal className="h-4 w-4" />
+                  Plus
+                </Button>
+              </DropdownMenu.Trigger>
+              <DropdownMenu.Content align="end" className="min-w-60">
+                <DropdownMenu.Item disabled={!installed || busy} onSelect={() => requestTranslationReset(selectedInstalledModuleList)}>
+                  <Languages className="h-4 w-4" />
+                  Réinitialiser les traductions ({installed})
+                </DropdownMenu.Item>
+                <DropdownMenu.Separator />
+                <DropdownMenu.Item color="red" disabled={!removable} onSelect={() => requestDeleteCode(selectedRemovableModuleList)}>
+                  <Trash2 className="h-4 w-4" />
+                  Supprimer le code du projet ({removable})
+                </DropdownMenu.Item>
+              </DropdownMenu.Content>
+            </DropdownMenu.Root>
+          )}
+          <span className="mx-0.5 hidden h-6 w-px bg-border sm:block" aria-hidden="true" />
+          <Button size="sm" variant="ghost" onClick={clearSelection} title="Désélectionner tous les modules (Échap)">
+            <X className="h-4 w-4" />
+            Désélectionner
+            <kbd className="ml-0.5 rounded border px-1 font-mono text-[10px] font-normal text-muted-foreground">Échap</kbd>
           </Button>
-        )}
-        {installed > 0 && (
-          <Button
-            size="sm"
-            variant={installable > 0 ? "outline" : "default"}
-            disabled={busy}
-            onClick={() => createJob("update_module", { project: selectedProject?.name, db: selectedDb, modules: selectedInstalledModuleList.join(",") })}
-          >
-            <RefreshCcw className="h-4 w-4" />
-            Mettre à jour ({installed})
-          </Button>
-        )}
-        {installed > 0 && (
-          <Button
-            size="sm"
-            variant="outline"
-            className="border-red-300 text-red-700 hover:border-red-400 hover:bg-red-50 hover:text-red-800 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-950/60"
-            disabled={busy}
-            onClick={() => requestUninstall(selectedInstalledModuleList)}
-          >
-            <PackageX className="h-4 w-4" />
-            Désinstaller ({installed})
-          </Button>
-        )}
-        {(installed > 0 || removable > 0) && (
-          <DropdownMenu.Root>
-            <DropdownMenu.Trigger>
-              <Button size="sm" variant="outline" disabled={loading} aria-label="Autres actions sur la sélection">
-                <MoreHorizontal className="h-4 w-4" />
-                Plus
-              </Button>
-            </DropdownMenu.Trigger>
-            <DropdownMenu.Content align="end" className="min-w-60">
-              <DropdownMenu.Item disabled={!installed || busy} onSelect={() => requestTranslationReset(selectedInstalledModuleList)}>
-                <Languages className="h-4 w-4" />
-                Réinitialiser les traductions ({installed})
-              </DropdownMenu.Item>
-              <DropdownMenu.Separator />
-              <DropdownMenu.Item color="red" disabled={!removable} onSelect={() => requestDeleteCode(selectedRemovableModuleList)}>
-                <Trash2 className="h-4 w-4" />
-                Supprimer le code du projet ({removable})
-              </DropdownMenu.Item>
-            </DropdownMenu.Content>
-          </DropdownMenu.Root>
-        )}
-        <span className="mx-0.5 hidden h-6 w-px bg-border sm:block" aria-hidden="true" />
-        <Button size="sm" variant="ghost" onClick={clearSelection} title="Désélectionner tous les modules (Échap)">
-          <X className="h-4 w-4" />
-          Désélectionner
-          <kbd className="ml-0.5 rounded border px-1 font-mono text-[10px] font-normal text-muted-foreground">Échap</kbd>
-        </Button>
+        </div>
       </div>
     );
   }
@@ -4017,26 +4027,29 @@ export default function Home() {
                             >
                               <RefreshCcw className={cn("h-4 w-4", loadingModules && "animate-spin")} />
                             </Button>
-                            <Button
-                              variant="outline"
-                              onClick={updateOdooModuleList}
-                              disabled={!selectedProjectReady || !canUseDb || loading}
-                              title="Odoo relit les dossiers addons et enregistre les nouveaux modules (Applications › Mettre à jour la liste)."
-                            >
-                              <ListRestart className="h-4 w-4" />
-                              Scanner les addons
-                            </Button>
+                            {/* Les imports de code sont regroupés : ils mènent tous à « ajouter des modules au projet ». */}
+                            <DropdownMenu.Root>
+                              <DropdownMenu.Trigger>
+                                <Button variant="outline" disabled={!selectedProjectReady}>
+                                  <PlusCircle className="h-4 w-4" />
+                                  Ajouter des modules
+                                  <ChevronDown className="h-4 w-4 text-muted-foreground" />
+                                </Button>
+                              </DropdownMenu.Trigger>
+                              <DropdownMenu.Content align="end" className="min-w-64">
+                                <DropdownMenu.Item disabled={loading} onSelect={() => setRepositoryOpen(true)}>
+                                  <CloudDownload className="h-4 w-4" />
+                                  Depuis un dépôt Git (SSH)
+                                </DropdownMenu.Item>
+                                <DropdownMenu.Item onSelect={() => setZipDialogOpen(true)}>
+                                  <FileArchive className="h-4 w-4" />
+                                  Depuis une archive ZIP
+                                </DropdownMenu.Item>
+                              </DropdownMenu.Content>
+                            </DropdownMenu.Root>
                             <Button variant="outline" onClick={openSocleDialog} disabled={!selectedProjectReady || loading}>
                               <Boxes className="h-4 w-4" />
                               Installer un socle
-                            </Button>
-                            <Button variant="outline" onClick={() => setRepositoryOpen(true)} disabled={!selectedProjectReady || loading}>
-                              <CloudDownload className="h-4 w-4" />
-                              Dépôt SSH
-                            </Button>
-                            <Button variant="outline" onClick={() => setZipDialogOpen(true)} disabled={!selectedProjectReady}>
-                              <FileArchive className="h-4 w-4" />
-                              Importer un ZIP
                             </Button>
                             <Button
                               disabled={!selectedProjectReady || loading || checkingUpdatePrerequisites}
@@ -4050,13 +4063,15 @@ export default function Home() {
                       />
                       {moduleFiltersBlock}
                       {moduleSelectionBlock}
-                      {/* Sans overflow-hidden sur le panneau : il empêcherait l'en-tête de colonnes de rester collé. */}
-                      <RefinedPanel>
+                      {/* overflow-clip arrondit les coins sans créer de conteneur de défilement, contrairement à
+                          overflow-hidden qui empêcherait l'en-tête de rester collé. L'en-tête reste donc un bandeau droit :
+                          des coins arrondis collés en haut laisseraient voir les lignes qui défilent derrière. */}
+                      <RefinedPanel className="overflow-clip">
                         <div
-                          className="z-10 hidden rounded-t-md border-b bg-card xl:sticky xl:block"
+                          className="z-10 hidden border-b bg-card xl:sticky xl:block"
                           style={{ top: stickyHeader ? projectHeaderHeight + projectTabsHeight : 0 }}
                         >
-                          <div className={cn("grid items-center gap-3 rounded-t-md bg-muted/60 px-3 py-2", REFINED_LABEL, REFINED_MODULE_COLUMNS)}>
+                          <div className={cn("grid items-center gap-3 bg-muted/60 px-3 py-2", REFINED_LABEL, REFINED_MODULE_COLUMNS)}>
                             <div>Module</div>
                             <div>État</div>
                             <div>Version</div>
@@ -4064,7 +4079,7 @@ export default function Home() {
                             <div className="text-right">Actions</div>
                           </div>
                         </div>
-                        <div className="min-w-0 overflow-hidden rounded-b-md">
+                        <div className="min-w-0">
                           {visibleModules.length ? (
                             visibleModules.map((module) => {
                               const sourcePath = module.source_path || module.path;
@@ -4080,12 +4095,13 @@ export default function Home() {
                                 <div
                                   key={module.name}
                                   className={cn(
-                                    "grid min-w-0 gap-3 border-t p-3 transition-colors first:border-t-0 xl:items-center",
+                                    "grid min-w-0 cursor-pointer gap-3 border-t p-3 transition-colors first:border-t-0 xl:items-center",
                                     REFINED_MODULE_COLUMNS,
                                     moduleSelected
                                       ? "bg-primary/[0.08] dark:bg-primary/[0.14]"
                                       : "hover:bg-muted/60 dark:hover:bg-muted/40",
                                   )}
+                                  onClick={(event) => toggleModuleFromRow(event, module.name)}
                                 >
                                   <label className="flex min-w-0 cursor-pointer items-start gap-3 rounded-sm has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-ring">
                                     <Checkbox
@@ -4247,16 +4263,6 @@ export default function Home() {
                           <FileArchive className="h-4 w-4" />
                           Ajouter un pauvre zip
                         </Button>
-                        <Button
-                          className="w-full"
-                          variant="outline"
-                          onClick={updateOdooModuleList}
-                          disabled={!selectedProjectReady || !canUseDb || loading}
-                          title="Odoo relit les dossiers addons et enregistre les nouveaux modules (Applications › Mettre à jour la liste)."
-                        >
-                          <ListRestart className="h-4 w-4" />
-                          Scanner les addons
-                        </Button>
                       </div>
                     </CardHeader>
                     <CardContent>
@@ -4284,10 +4290,11 @@ export default function Home() {
                                 <div
                                   key={module.name}
                                   className={cn(
-                                    "grid min-w-0 gap-3 border-t p-3 transition-colors first:border-t-0 hover:bg-muted/35 xl:items-center",
+                                    "grid min-w-0 cursor-pointer gap-3 border-t p-3 transition-colors first:border-t-0 hover:bg-muted/35 xl:items-center",
                                     moduleTableGridColumns,
                                     selectedModules.has(module.name) && "bg-primary/[0.06] dark:bg-primary/[0.12]",
                                   )}
+                                  onClick={(event) => toggleModuleFromRow(event, module.name)}
                                 >
                                   <label className="flex min-w-0 cursor-pointer items-start gap-3 rounded-sm has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-ring">
                                     <Checkbox
