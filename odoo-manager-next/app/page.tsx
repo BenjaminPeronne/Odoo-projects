@@ -4118,7 +4118,7 @@ export default function Home() {
                                 </DropdownMenu.Item>
                                 <DropdownMenu.Item onSelect={() => setZipDialogOpen(true)}>
                                   <FileArchive className="h-4 w-4" />
-                                  Depuis une archive ZIP
+                                  Depuis un pauvre zip
                                 </DropdownMenu.Item>
                               </DropdownMenu.Content>
                             </DropdownMenu.Root>
