@@ -326,7 +326,9 @@ class RikaErrorMessageTests(unittest.TestCase):
             name = "sessionId"
             value = "token"
 
-        creator = ProjectCreator(mock.Mock(), ROOT, mock.Mock())
+        # Sous Windows, le constructeur cherche git dans WSL avec les réglages : un Mock n'y a pas sa place.
+        with mock.patch("odoo_manager_core.project_creator.platform_id", return_value="linux"):
+            creator = ProjectCreator(mock.Mock(), ROOT, mock.Mock())
         with mock.patch("odoo_manager_core.project_creator.CookieJar", return_value=[SessionCookie()]), \
                 mock.patch("urllib.request.build_opener", return_value=Opener()):
             return creator.download_rika_project("dev06", "login", "secret", ROOT)

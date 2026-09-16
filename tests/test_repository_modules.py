@@ -17,9 +17,15 @@ class RepositoryModulesTests(ModuleLayoutTests):
 
     def setUp(self):
         super().setUp()
-        patcher = mock.patch.object(web, 'project_odoo_version', return_value='18.0')
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        # Les faux subprocess.run ne simulent que git : sur un runner Windows avec wsl.exe,
+        # les sondes WSL leur parvenaient et créaient des dossiers `sh` ou `git` à la racine.
+        for patcher in (
+            mock.patch.object(web, 'project_odoo_version', return_value='18.0'),
+            mock.patch.object(web, 'addon_links_wsl_distribution', return_value=None),
+            mock.patch('odoo_manager_core.project_creator.platform_id', return_value='linux'),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def clone(self, command, **kwargs):
         if 'rev-parse' in command:
@@ -72,8 +78,7 @@ class RepositoryModulesTests(ModuleLayoutTests):
             self.assertNotIn('credential.helper', rendered_command)
             return self.clone(command, **kwargs)
 
-        with mock.patch('odoo_manager_core.project_creator.platform_id', return_value='linux'), \
-                mock.patch.object(web.subprocess, 'run', side_effect=ssh_clone):
+        with mock.patch.object(web.subprocess, 'run', side_effect=ssh_clone):
             web.repository_modules_job(DummyJob(), self.project, URL, '18.0', ['alpha'])
 
     def test_new_module_is_copied_and_linked(self):
