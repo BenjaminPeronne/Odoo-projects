@@ -3406,7 +3406,7 @@ export default function Home() {
             </div>
           </header>
 
-          <div className="mx-auto max-w-[1500px] px-4 py-4">
+          <div className={cn("mx-auto max-w-[1500px] px-4 py-4", showFloatingModuleActions && "pb-32 xl:pb-24")}>
             {apiUnavailable && (
               <div className="mb-4 flex flex-col gap-3 border-y border-red-300 bg-red-50 px-4 py-3 text-sm text-red-950 dark:border-red-800 dark:bg-red-950/45 dark:text-red-100 sm:flex-row sm:items-center sm:justify-between">
                 <div className="flex min-w-0 items-start gap-3">
@@ -6612,13 +6612,19 @@ export default function Home() {
 
       {showFloatingModuleActions && (
         <div
-          className="pointer-events-none fixed inset-x-4 bottom-4 z-40 flex justify-center lg:left-[calc(20rem+1rem)]"
+          className="pointer-events-none fixed inset-x-0 bottom-0 z-40 flex justify-center bg-gradient-to-t from-background via-background/85 to-transparent px-4 pb-4 pt-12 lg:left-80"
           role="region"
           aria-label="Actions sur les modules sélectionnés"
         >
-          <div className="pointer-events-auto flex max-w-full flex-wrap items-center justify-center gap-2 rounded-lg border border-primary/30 bg-card/95 p-2 shadow-xl backdrop-blur">
-            <Badge variant="default" className="shrink-0">{selectedModuleList.length} module(s)</Badge>
+          {/* Le dégradé estompe les lignes qui passent sous la barre ; la surface teintée la distingue du tableau. */}
+          <div className="floating-selection-bar pointer-events-auto flex max-w-full flex-wrap items-center justify-center gap-2 rounded-xl border border-primary/45 p-2 shadow-[0_18px_40px_-12px_rgb(0_0_0/0.45)] ring-1 ring-black/5 dark:ring-white/10">
+            <span className="flex shrink-0 items-center gap-2 pl-1 pr-1 text-sm font-semibold">
+              <CheckCircle2 className="h-4 w-4 text-primary" />
+              {selectedModuleList.length} sélectionné(s)
+            </span>
+            <span className="hidden h-6 w-px bg-border sm:block" aria-hidden="true" />
             {moduleSelectionButtons(true)}
+            <span className="hidden h-6 w-px bg-border sm:block" aria-hidden="true" />
             <Button size="sm" variant="ghost" onClick={() => setSelectedModules(new Set())} title="Effacer la sélection">
               Effacer
             </Button>

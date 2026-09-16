@@ -320,3 +320,16 @@ textarea {
     transition-duration: 0.01ms;
   }
 }
+
+/* Barre d'actions flottante : surface opaque et teintée, plus claire que les lignes en thème sombre. */
+.floating-selection-bar {
+  background:
+    linear-gradient(hsl(var(--primary) / 0.10), hsl(var(--primary) / 0.10)),
+    hsl(var(--card));
+}
+
+.dark .floating-selection-bar {
+  background:
+    linear-gradient(hsl(var(--primary) / 0.16), hsl(var(--primary) / 0.16)),
+    hsl(var(--muted));
+}
