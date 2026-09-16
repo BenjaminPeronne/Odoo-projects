@@ -1201,6 +1201,8 @@ export default function Home() {
   const stickyHeader = settings?.sticky_header ?? false;
   const projectHeaderRef = useRef<HTMLElement>(null);
   const [projectHeaderHeight, setProjectHeaderHeight] = useState(0);
+  const projectTabsRef = useRef<HTMLDivElement>(null);
+  const [projectTabsHeight, setProjectTabsHeight] = useState(0);
   const [projectHeaderCompact, setProjectHeaderCompact] = useState(false);
 
   useEffect(() => {
@@ -1226,21 +1228,27 @@ export default function Home() {
       return;
     }
     // Avec l'en-tête fixe, le bandeau passé sous l'en-tête et les onglets est considéré comme masqué.
-    const hiddenTop = stickyHeader && window.matchMedia("(min-width: 1024px)").matches ? projectHeaderHeight + 72 : 0;
+    const hiddenTop = stickyHeader && window.matchMedia("(min-width: 1024px)").matches ? projectHeaderHeight + (projectTabsHeight || 72) : 0;
     const observer = new IntersectionObserver(
       ([entry]) => setModuleSelectionBannerVisible(entry.isIntersecting),
       { rootMargin: `-${hiddenTop}px 0px 0px 0px` },
     );
     observer.observe(moduleSelectionBanner);
     return () => observer.disconnect();
-  }, [moduleSelectionBanner, stickyHeader, projectHeaderHeight]);
+  }, [moduleSelectionBanner, stickyHeader, projectHeaderHeight, projectTabsHeight]);
 
   useEffect(() => {
     const header = projectHeaderRef.current;
+    const tabs = projectTabsRef.current;
     if (!stickyHeader || !header) return;
-    const observer = new ResizeObserver(() => setProjectHeaderHeight(header.offsetHeight));
+    const measure = () => {
+      setProjectHeaderHeight(header.offsetHeight);
+      setProjectTabsHeight(tabs?.offsetHeight ?? 0);
+    };
+    const observer = new ResizeObserver(measure);
     observer.observe(header);
-    setProjectHeaderHeight(header.offsetHeight);
+    if (tabs) observer.observe(tabs);
+    measure();
     return () => observer.disconnect();
   }, [stickyHeader]);
   const modulesPerPage = 50;
@@ -3594,6 +3602,7 @@ export default function Home() {
               }}
             >
               <div
+                ref={projectTabsRef}
                 className={cn(stickyHeader && "-mx-4 -my-2 px-4 py-2 lg:sticky lg:z-20 lg:bg-background/85 lg:backdrop-blur")}
                 style={stickyHeader ? { top: projectHeaderHeight } : undefined}
               >
@@ -4017,15 +4026,21 @@ export default function Home() {
                       />
                       {moduleFiltersBlock}
                       {moduleSelectionBlock}
-                      <RefinedPanel className="overflow-hidden">
-                        <div className={cn("hidden border-b bg-muted/60 px-3 py-2 xl:grid xl:items-center xl:gap-3", REFINED_LABEL, REFINED_MODULE_COLUMNS)}>
-                          <div>Module</div>
-                          <div>État</div>
-                          <div>Version</div>
-                          <div>Origine</div>
-                          <div className="text-right">Actions</div>
+                      {/* Sans overflow-hidden sur le panneau : il empêcherait l'en-tête de colonnes de rester collé. */}
+                      <RefinedPanel>
+                        <div
+                          className="z-10 hidden rounded-t-md border-b bg-card xl:sticky xl:block"
+                          style={{ top: stickyHeader ? projectHeaderHeight + projectTabsHeight : 0 }}
+                        >
+                          <div className={cn("grid items-center gap-3 rounded-t-md bg-muted/60 px-3 py-2", REFINED_LABEL, REFINED_MODULE_COLUMNS)}>
+                            <div>Module</div>
+                            <div>État</div>
+                            <div>Version</div>
+                            <div>Origine</div>
+                            <div className="text-right">Actions</div>
+                          </div>
                         </div>
-                        <div className="min-w-0">
+                        <div className="min-w-0 overflow-hidden rounded-b-md">
                           {visibleModules.length ? (
                             visibleModules.map((module) => {
                               const sourcePath = module.source_path || module.path;
