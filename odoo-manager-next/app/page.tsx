@@ -4037,7 +4037,7 @@ export default function Home() {
                                       : "hover:bg-muted/60 dark:hover:bg-muted/40",
                                   )}
                                 >
-                                  <label className="flex min-w-0 cursor-pointer items-start gap-3 rounded-sm focus-within:ring-2 focus-within:ring-ring">
+                                  <label className="flex min-w-0 cursor-pointer items-start gap-3 rounded-sm has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-ring">
                                     <Checkbox
                                       className="mt-1"
                                       aria-label={`Sélectionner ${module.name}`}
@@ -4239,7 +4239,7 @@ export default function Home() {
                                     selectedModules.has(module.name) && "bg-primary/[0.06] dark:bg-primary/[0.12]",
                                   )}
                                 >
-                                  <label className="flex min-w-0 cursor-pointer items-start gap-3 rounded-sm focus-within:ring-2 focus-within:ring-ring">
+                                  <label className="flex min-w-0 cursor-pointer items-start gap-3 rounded-sm has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-ring">
                                     <Checkbox
                                       className="mt-1"
                                       aria-label={`Sélectionner ${module.name}`}
