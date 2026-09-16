@@ -6,6 +6,7 @@ import {
   Activity,
   AlertTriangle,
   Boxes,
+  Bug,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
@@ -27,6 +28,7 @@ import {
   Logs,
   MoreHorizontal,
   PackageX,
+  Palette,
   Paintbrush,
   Play,
   PlusCircle,
@@ -34,6 +36,7 @@ import {
   Search,
   Settings,
   ShieldCheck,
+  SlidersHorizontal,
   Square,
   Terminal,
   Trash2,
@@ -901,12 +904,51 @@ function JobOutputPre({
   );
 }
 
+const SETTINGS_SECTIONS = [
+  { id: "general", label: "Général", icon: FolderOpen },
+  { id: "appearance", label: "Apparence", icon: Palette },
+  { id: "accounts", label: "Comptes et accès", icon: KeyRound },
+  { id: "advanced", label: "Avancé", icon: SlidersHorizontal },
+  { id: "diagnostic", label: "Diagnostic", icon: Bug },
+] as const;
+
+type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]["id"];
+
+const SETTINGS_SAVED_KEYS = [
+  "workspace",
+  "docker_executable",
+  "traefik_directory",
+  "docker_poll_interval",
+  "api_port",
+  "show_technical_details",
+  "sticky_header",
+  "interface_icon",
+  "interface_layout",
+] as const;
+
+function SettingsSection({ title, description, children }: { title: string; description: string; children: ReactNode }) {
+  return (
+    <section className="grid gap-4">
+      <div>
+        <h3 className="text-base font-semibold">{title}</h3>
+        <p className="mt-1 text-sm text-muted-foreground">{description}</p>
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function SettingsGroup({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
+  return <div className={cn("grid gap-4 rounded-md border bg-card p-4", className)} {...props} />;
+}
+
 export default function Home() {
   const [overview, setOverview] = useState<Overview | null>(null);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [settings, setSettings] = useState<ManagerSettings | null>(null);
   const [settingsDraft, setSettingsDraft] = useState<ManagerSettings | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<SettingsSectionId>("general");
   const [managerErrors, setManagerErrors] = useState<ManagerErrorEntry[]>([]);
   const [managerErrorLogPath, setManagerErrorLogPath] = useState("");
   const [loadingManagerErrors, setLoadingManagerErrors] = useState(false);
@@ -1171,6 +1213,24 @@ export default function Home() {
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
   }, [stickyHeader]);
+
+  const [moduleSelectionBanner, setModuleSelectionBanner] = useState<HTMLDivElement | null>(null);
+  const [moduleSelectionBannerVisible, setModuleSelectionBannerVisible] = useState(true);
+
+  useEffect(() => {
+    if (!moduleSelectionBanner) {
+      setModuleSelectionBannerVisible(true);
+      return;
+    }
+    // Avec l'en-tête fixe, le bandeau passé sous l'en-tête et les onglets est considéré comme masqué.
+    const hiddenTop = stickyHeader && window.matchMedia("(min-width: 1024px)").matches ? projectHeaderHeight + 72 : 0;
+    const observer = new IntersectionObserver(
+      ([entry]) => setModuleSelectionBannerVisible(entry.isIntersecting),
+      { rootMargin: `-${hiddenTop}px 0px 0px 0px` },
+    );
+    observer.observe(moduleSelectionBanner);
+    return () => observer.disconnect();
+  }, [moduleSelectionBanner, stickyHeader, projectHeaderHeight]);
 
   useEffect(() => {
     const header = projectHeaderRef.current;
@@ -2930,6 +2990,66 @@ export default function Home() {
     </div>
   );
 
+  function moduleSelectionButtons(compact = false) {
+    const size = compact ? "sm" : "default";
+    return (
+      <>
+        <Button
+          size={size}
+          variant="success"
+          disabled={!selectedInstallableModuleList.length || !canUseDb || loading}
+          onClick={() => createJob("install_module", { project: selectedProject?.name, db: selectedDb, modules: selectedInstallableModuleList.join(",") })}
+        >
+          <PlusCircle className="h-4 w-4" />
+          Installer ({selectedInstallableModuleList.length})
+        </Button>
+        <Button
+          size={size}
+          disabled={!selectedInstalledModuleList.length || !canUseDb || loading}
+          onClick={() => createJob("update_module", { project: selectedProject?.name, db: selectedDb, modules: selectedInstalledModuleList.join(",") })}
+        >
+          <RefreshCcw className="h-4 w-4" />
+          Mettre à jour ({selectedInstalledModuleList.length})
+        </Button>
+        <Button
+          size={size}
+          variant="outline"
+          disabled={!selectedInstalledModuleList.length || !canUseDb || loading}
+          onClick={() => requestTranslationReset(selectedInstalledModuleList)}
+        >
+          <Languages className="h-4 w-4" />
+          Traductions ({selectedInstalledModuleList.length})
+        </Button>
+        <Button
+          size={size}
+          className="border-red-300 text-red-700 hover:border-red-400 hover:bg-red-50 hover:text-red-800 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-950/60"
+          variant="outline"
+          disabled={!selectedInstalledModuleList.length || !canUseDb || loading}
+          onClick={() => requestUninstall(selectedInstalledModuleList)}
+        >
+          <PackageX className="h-4 w-4" />
+          Désinstaller ({selectedInstalledModuleList.length})
+        </Button>
+        <Button
+          size={size}
+          variant="destructive"
+          disabled={!selectedRemovableModuleList.length || loading}
+          onClick={() => requestDeleteCode(selectedRemovableModuleList)}
+        >
+          <Trash2 className="h-4 w-4" />
+          Supprimer ({selectedRemovableModuleList.length})
+        </Button>
+      </>
+    );
+  }
+
+  const settingsDirty = Boolean(
+    settingsDraft && SETTINGS_SAVED_KEYS.some((key) => settingsDraft[key] !== (settings ? settings[key] : undefined)),
+  );
+
+  const showFloatingModuleActions =
+    activeTab === "modules" && selectedModuleList.length > 0 && Boolean(moduleSelectionBanner) && !moduleSelectionBannerVisible;
+
   const moduleSelectionBlock = (
     <>
       <div className="flex flex-col gap-3 rounded-md border bg-muted/45 p-3 text-sm sm:flex-row sm:items-center sm:justify-between">
@@ -2959,7 +3079,7 @@ export default function Home() {
         </div>
       </div>
       {selectedModuleList.length > 0 && (
-        <div className="rounded-md border border-primary/25 bg-primary/[0.06] p-3 dark:bg-primary/[0.12]">
+        <div ref={setModuleSelectionBanner} className="rounded-md border border-primary/25 bg-primary/[0.06] p-3 dark:bg-primary/[0.12]">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <div>
               <div className="text-sm font-semibold">Actions sur la sélection</div>
@@ -2970,46 +3090,7 @@ export default function Home() {
             <Badge variant="default">{selectedModuleList.length} module(s)</Badge>
           </div>
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-5">
-            <Button
-              variant="success"
-              disabled={!selectedInstallableModuleList.length || !canUseDb || loading}
-              onClick={() => createJob("install_module", { project: selectedProject?.name, db: selectedDb, modules: selectedInstallableModuleList.join(",") })}
-            >
-              <PlusCircle className="h-4 w-4" />
-              Installer ({selectedInstallableModuleList.length})
-            </Button>
-            <Button
-              disabled={!selectedInstalledModuleList.length || !canUseDb || loading}
-              onClick={() => createJob("update_module", { project: selectedProject?.name, db: selectedDb, modules: selectedInstalledModuleList.join(",") })}
-            >
-              <RefreshCcw className="h-4 w-4" />
-              Mettre à jour ({selectedInstalledModuleList.length})
-            </Button>
-            <Button
-              variant="outline"
-              disabled={!selectedInstalledModuleList.length || !canUseDb || loading}
-              onClick={() => requestTranslationReset(selectedInstalledModuleList)}
-            >
-              <Languages className="h-4 w-4" />
-              Traductions ({selectedInstalledModuleList.length})
-            </Button>
-            <Button
-              className="border-red-300 text-red-700 hover:border-red-400 hover:bg-red-50 hover:text-red-800 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-950/60"
-              variant="outline"
-              disabled={!selectedInstalledModuleList.length || !canUseDb || loading}
-              onClick={() => requestUninstall(selectedInstalledModuleList)}
-            >
-              <PackageX className="h-4 w-4" />
-              Désinstaller ({selectedInstalledModuleList.length})
-            </Button>
-            <Button
-              variant="destructive"
-              disabled={!selectedRemovableModuleList.length || loading}
-              onClick={() => requestDeleteCode(selectedRemovableModuleList)}
-            >
-              <Trash2 className="h-4 w-4" />
-              Supprimer ({selectedRemovableModuleList.length})
-            </Button>
+            {moduleSelectionButtons()}
           </div>
         </div>
       )}
@@ -4808,411 +4889,488 @@ export default function Home() {
       />
 
       <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
-        <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
-          <DialogHeader>
+        <DialogContent className="flex h-[min(820px,calc(100dvh-4rem))] max-h-[calc(100dvh-4rem)] max-w-5xl flex-col overflow-hidden !p-0">
+          <DialogHeader className="border-b px-5 py-4 sm:px-6">
             <DialogTitle>Paramètres du gestionnaire</DialogTitle>
-            <DialogDescription>
-              Le workspace est le dossier analysé pour lister les projets et celui utilisé lors des prochaines créations.
-            </DialogDescription>
+            <DialogDescription>Réglages communs à tous les projets du workspace.</DialogDescription>
           </DialogHeader>
           {settingsDraft ? (
-            <div className="grid gap-4">
-              <div className="grid min-w-0 gap-1.5 text-sm font-medium">
-                <label htmlFor="projects-workspace">Dossier des projets</label>
-                <div className="flex min-w-0 flex-col gap-2 sm:flex-row">
-                  <Input
-                    id="projects-workspace"
-                    className="min-w-0 flex-1"
-                    value={settingsDraft.workspace}
-                    onChange={(event) => setSettingsDraft({ ...settingsDraft, workspace: event.target.value })}
-                    placeholder="/chemin/vers/Odoo-projects"
-                  />
-                  <Button
-                    className="shrink-0"
-                    type="button"
-                    variant="outline"
-                    disabled={!desktopRuntime || selectingWorkspace}
-                    title={desktopRuntime ? "Choisir un dossier" : "Disponible dans l’application installée"}
-                    onClick={selectWorkspaceDirectory}
-                  >
-                    {selectingWorkspace ? <Loader2 className="h-4 w-4 animate-spin" /> : <FolderOpen className="h-4 w-4" />}
-                    Choisir
-                  </Button>
-                </div>
-                <span className="text-xs font-normal leading-relaxed text-muted-foreground">
-                  Le dossier est créé s’il n’existe pas encore. Dans l’application installée, « Choisir » ouvre le sélecteur du système.
-                </span>
-              </div>
-
-              <div className="rounded-md border bg-muted/40 p-3">
-                <div className="text-sm font-medium">Exécution automatique</div>
-                <p className="mt-1 text-xs font-normal leading-relaxed text-muted-foreground">
-                  Le gestionnaire choisit automatiquement les outils adaptés au système. Sous Windows, Docker,
-                  Git et les chemins sont exécutés dans l’environnement compatible avec le workspace. Les chemins Windows
-                  sont traduits automatiquement lorsque Docker ou Git passe par WSL.
-                </p>
-              </div>
-
-              <div className="grid gap-3 rounded-md border p-3">
-                <div className="flex min-w-0 items-start gap-3">
-                  <KeyRound className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
-                  <div className="min-w-0 flex-1">
-                    <div className="text-sm font-medium">Clé SSH GitLab</div>
-                    <p className="mt-1 break-words text-xs leading-relaxed text-muted-foreground">
-                      {selectedSshKey
-                        ? `${selectedSshKey.name} · ${selectedSshKey.public_key}`
-                        : "Aucune clé publique détectée dans l’environnement Git utilisé par le gestionnaire."}
-                    </p>
-                  </div>
-                </div>
-                <Button type="button" variant="outline" onClick={openSshAssistant}>
-                  <KeyRound className="h-4 w-4" />
-                  {selectedSshKey ? "Gérer la clé SSH" : "Configurer une clé"}
-                </Button>
-              </div>
-
-              <div className="grid gap-3 rounded-md border p-3">
-                <div>
-                  <div className="text-sm font-medium">Configuration initiale</div>
-                  <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                    Rouvre l’assistant du premier démarrage pour vérifier le workspace, Docker, Git, SSH et Traefik.
-                  </p>
-                </div>
-                <Button type="button" variant="outline" onClick={reopenInitialConfiguration}>
-                  <Settings className="h-4 w-4" />
-                  Ouvrir l’assistant de configuration
-                </Button>
-              </div>
-
-              {gitlabStatus && (
-                <div className="grid gap-3 rounded-md border p-3">
-                  <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                    <div className="min-w-0">
-                      <div className="text-sm font-medium">Recherche de dépôts GitLab</div>
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        {gitlabStatus.connected
-                          ? `Connecté à gitlab.sudokeys.com${gitlabStatus.username ? ` en tant que @${gitlabStatus.username}` : ""}. « Dépôt SSH » propose la recherche de dépôts et de branches ; le lien SSH reste le mode par défaut.`
-                          : "Désactivée : « Dépôt SSH » utilise le lien SSH. Connecte un jeton personnel en lecture seule (portée read_api) pour chercher un dépôt et choisir sa branche."}
-                      </p>
-                    </div>
-                    {gitlabStatus.connected && (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        className="shrink-0"
-                        onClick={async () => {
-                          try {
-                            setGitlabStatus(await window.sdkDesktop!.gitlabDisconnect());
-                            pushToast("success", "GitLab déconnecté.");
-                          } catch {
-                            pushToast("error", "Impossible de déconnecter GitLab.");
-                          }
-                        }}
-                      >
-                        <Trash2 className="h-4 w-4" />
-                        Déconnecter
-                      </Button>
-                    )}
-                  </div>
-                  {!gitlabStatus.available && <p className="text-xs text-amber-700 dark:text-amber-300">{gitlabStatus.reason}</p>}
-                  {gitlabStatus.available && !gitlabStatus.connected && (
-                    <form
-                      className="flex flex-col gap-2 sm:flex-row"
-                      onSubmit={async (event) => {
-                        event.preventDefault();
-                        if (!gitlabTokenDraft.trim()) return;
-                        setGitlabConnecting(true);
-                        try {
-                          setGitlabStatus(await window.sdkDesktop!.gitlabConnect(gitlabTokenDraft));
-                          setGitlabTokenDraft("");
-                          pushToast("success", "GitLab connecté : la recherche de dépôts est activée.");
-                        } catch (err) {
-                          pushToast("error", err instanceof Error ? err.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, "") : "Connexion GitLab impossible.");
-                        } finally {
-                          setGitlabConnecting(false);
-                        }
-                      }}
-                    >
-                      <Input
-                        type="password"
-                        autoComplete="off"
-                        value={gitlabTokenDraft}
-                        onChange={(event) => setGitlabTokenDraft(event.target.value)}
-                        placeholder="Jeton personnel GitLab (glpat-…)"
-                        aria-label="Jeton personnel GitLab"
-                      />
-                      <Button type="submit" className="shrink-0" disabled={gitlabConnecting || !gitlabTokenDraft.trim()}>
-                        {gitlabConnecting ? <Loader2 className="h-4 w-4 animate-spin" /> : <KeyRound className="h-4 w-4" />}
-                        Activer
-                      </Button>
-                      <Button type="button" variant="ghost" className="shrink-0" onClick={() => void openExternalUrl(GITLAB_TOKEN_URL)}>
-                        <ExternalLink className="h-4 w-4" />
-                        Créer un jeton
-                      </Button>
-                    </form>
-                  )}
-                </div>
-              )}
-
-              {storedRikaCredentials?.available && (
-                <div className="flex flex-col gap-3 rounded-md border p-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="min-w-0">
-                    <div className="text-sm font-medium">Identifiants RIKA</div>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      {storedRikaCredentials.login
-                        ? `${storedRikaCredentials.login} · ${storedRikaCredentials.password ? "identifiant et mot de passe" : "identifiant seul"} dans le coffre-fort du système.`
-                        : "Aucun identifiant mémorisé sur cet ordinateur."}
-                    </p>
-                  </div>
-                  {storedRikaCredentials.login && (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      onClick={async () => {
-                        try {
-                          await window.sdkDesktop?.clearRikaCredentials();
-                          setStoredRikaCredentials({ ...storedRikaCredentials, login: "", password: "" });
-                          pushToast("success", "Identifiants RIKA oubliés.");
-                        } catch {
-                          pushToast("error", "Impossible d’effacer les identifiants RIKA.");
-                        }
-                      }}
-                    >
-                      <Trash2 className="h-4 w-4" />
-                      Oublier
-                    </Button>
-                  )}
-                </div>
-              )}
-
-              <div className="grid gap-3 rounded-md border p-3">
-                <div className="text-sm font-medium">Interface</div>
-                <p className="text-xs text-muted-foreground">
-                  L’interface affinée réorganise Bases, Modules, Activité et Réglages du projet : moins de vide, colonnes
-                  alignées, survols et focus plus visibles, sortie technique dépliée à la demande. Aucune action ni
-                  information n’est retirée.
-                </p>
-                <div className="grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Interface">
-                  {([
-                    ["classic", "Classique", "Interface actuelle, inchangée."],
-                    ["refined", "Affinée (bêta)", "Nouvelle organisation des écrans Bases, Modules, Activité et Réglages."],
-                  ] as const).map(([value, title, description]) => (
-                    <InteractiveCard
-                      key={value}
-                      role="radio"
-                      aria-checked={(settingsDraft.interface_layout ?? "classic") === value}
-                      className={cn("p-3 text-left", (settingsDraft.interface_layout ?? "classic") === value && "border-primary bg-primary/10")}
-                      onClick={() => setSettingsDraft({ ...settingsDraft, interface_layout: value })}
-                    >
-                      <span className="block text-sm font-medium">{title}</span>
-                      <span className="mt-1 block text-xs text-muted-foreground">{description}</span>
-                    </InteractiveCard>
-                  ))}
-                </div>
-              </div>
-
-              <div className="grid gap-2">
-                <div>
-                  <div className="text-sm font-medium">Icône affichée</div>
-                  <p className="mt-1 text-xs font-normal text-muted-foreground">
-                    Choisis l’identité visuelle utilisée dans le gestionnaire.
-                  </p>
-                </div>
-                <div className="grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Icône affichée">
-                  <InteractiveCard
-                    className={cn(
-                      "flex min-h-24 items-center gap-3 p-3",
-                      settingsDraft.interface_icon === "manager" && "border-primary bg-primary/[0.08] ring-1 ring-primary/25 dark:bg-primary/[0.14]",
-                    )}
-                    role="radio"
-                    aria-checked={settingsDraft.interface_icon === "manager"}
-                    onClick={() => setSettingsDraft({ ...settingsDraft, interface_icon: "manager" })}
-                  >
-                    <img src={appIcon.src} alt="" aria-hidden="true" className="h-14 w-14 shrink-0 rounded-[13px] object-cover" />
-                    <span className="min-w-0 flex-1">
-                      <span className="block text-sm font-semibold">SDK Local Manager</span>
-                      <span className="mt-1 block text-xs text-muted-foreground">Logo Sudokeys</span>
-                    </span>
-                    {settingsDraft.interface_icon === "manager" && <CheckCircle2 className="h-5 w-5 shrink-0 text-primary" aria-hidden="true" />}
-                  </InteractiveCard>
-                  <InteractiveCard
-                    className={cn(
-                      "flex min-h-24 items-center gap-3 p-3",
-                      settingsDraft.interface_icon === "local" && "border-primary bg-primary/[0.08] ring-1 ring-primary/25 dark:bg-primary/[0.14]",
-                    )}
-                    role="radio"
-                    aria-checked={settingsDraft.interface_icon === "local"}
-                    onClick={() => setSettingsDraft({ ...settingsDraft, interface_icon: "local" })}
-                  >
-                    <img src={localIcon.src} alt="" aria-hidden="true" className="h-14 w-14 shrink-0 rounded-full object-cover" />
-                    <span className="min-w-0 flex-1">
-                      <span className="block text-sm font-semibold">Logo Local</span>
-                      <span className="mt-1 block text-xs text-muted-foreground">Nouvelle icône</span>
-                    </span>
-                    {settingsDraft.interface_icon === "local" && <CheckCircle2 className="h-5 w-5 shrink-0 text-primary" aria-hidden="true" />}
-                  </InteractiveCard>
-                </div>
-              </div>
-
-              <label className="flex cursor-pointer items-start gap-3 rounded-md border p-3 text-sm">
-                <Checkbox
-                  className="mt-0.5"
-                  checked={settingsDraft.show_technical_details}
-                  onCheckedChange={(checked) =>
-                    setSettingsDraft({ ...settingsDraft, show_technical_details: checked === true })
-                  }
-                />
-                <span className="min-w-0">
-                  <span className="block font-medium">Afficher les détails techniques</span>
-                  <span className="mt-1 block text-xs font-normal leading-relaxed text-muted-foreground">
-                    Affiche les états Odoo et PostgreSQL ainsi que le nombre de bases dans la liste des projets,
-                    les emplacements des modules, et les actions de mise à jour du code et des images Docker.
-                    Désactivé, le gestionnaire présente uniquement le voyant d’état des projets et une liste de modules compacte.
-                  </span>
-                </span>
-              </label>
-
-              <label className="flex cursor-pointer items-start gap-3 rounded-md border p-3 text-sm">
-                <Checkbox
-                  className="mt-0.5"
-                  checked={settingsDraft.sticky_header}
-                  onCheckedChange={(checked) =>
-                    setSettingsDraft({ ...settingsDraft, sticky_header: checked === true })
-                  }
-                />
-                <span className="min-w-0">
-                  <span className="block font-medium">En-tête fixe</span>
-                  <span className="mt-1 block text-xs font-normal leading-relaxed text-muted-foreground">
-                    Garde le nom du projet, les actions et les onglets visibles pendant le défilement.
-                    L’en-tête se compacte dès que la page défile. Sur les fenêtres étroites, il reste non fixe pour préserver la place.
-                  </span>
-                </span>
-              </label>
-
-              <label className="grid gap-1.5 text-sm font-medium">
-                Commande Docker
-                <Input
-                  value={settingsDraft.docker_executable}
-                  onChange={(event) => setSettingsDraft({ ...settingsDraft, docker_executable: event.target.value })}
-                  placeholder="docker"
-                />
-              </label>
-
-              <label className="grid min-w-0 gap-1.5 text-sm font-medium">
-                Dossier Traefik
-                <Input
-                  value={settingsDraft.traefik_directory}
-                  onChange={(event) => setSettingsDraft({ ...settingsDraft, traefik_directory: event.target.value })}
-                  placeholder="Détection automatique si vide"
-                />
-              </label>
-
-              <label className="grid gap-1.5 text-sm font-medium">
-                Vérification Docker (secondes)
-                <Input
-                  type="number"
-                  min={3}
-                  max={60}
-                  value={settingsDraft.docker_poll_interval}
-                  onChange={(event) => setSettingsDraft({ ...settingsDraft, docker_poll_interval: Number(event.target.value) })}
-                />
-              </label>
-
-              <label className="grid gap-1.5 text-sm font-medium">
-                Port local du gestionnaire
-                <Input
-                  type="number"
-                  min={1024}
-                  max={65535}
-                  value={settingsDraft.api_port}
-                  onChange={(event) => setSettingsDraft({ ...settingsDraft, api_port: Number(event.target.value) })}
-                />
-                <span className="text-xs font-normal leading-relaxed text-muted-foreground">
-                  Port préféré de l’API locale. Un redémarrage est nécessaire après modification. S’il est occupé, notamment par Docker, le gestionnaire choisit automatiquement un port libre.
-                </span>
-              </label>
-
-              <div className="grid gap-3 rounded-md border p-3">
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                  <div className="min-w-0">
-                    <div className="text-sm font-medium">Journal d’erreurs du gestionnaire</div>
-                    <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                      Les erreurs d’API, de jobs et d’interface sont conservées localement. Les mots de passe, jetons et secrets détectés sont masqués.
-                    </p>
-                    {managerErrorLogPath && <p className="mt-1 break-all text-xs text-muted-foreground">Fichier : {managerErrorLogPath}</p>}
-                  </div>
-                  <Badge className="shrink-0" variant={managerErrors.length ? "warning" : "secondary"}>
-                    {managerErrors.length} erreur(s)
-                  </Badge>
-                </div>
-                <div className="max-h-72 space-y-2 overflow-y-auto rounded-md border bg-muted/30 p-2">
-                  {loadingManagerErrors ? (
-                    <div className="flex items-center gap-2 p-2 text-xs text-muted-foreground">
-                      <Loader2 className="h-4 w-4 animate-spin" /> Chargement…
-                    </div>
-                  ) : managerErrors.length ? managerErrors.map((entry) => (
-                    <details key={entry.id} className="rounded-md border bg-card p-2 text-xs">
-                      <summary className="cursor-pointer break-words font-medium">
-                        {entry.timestamp} · {entry.source}{entry.project ? ` · ${entry.project}` : ""}
-                      </summary>
-                      <p className="mt-2 whitespace-pre-wrap break-words text-destructive">{entry.message}</p>
-                      {entry.details && <pre className="log-terminal mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-slate-950 p-2 text-[11px] text-slate-100">{entry.details}</pre>}
-                    </details>
-                  )) : (
-                    <p className="p-2 text-xs text-muted-foreground">Aucune erreur enregistrée.</p>
-                  )}
-                </div>
-                <div className="grid gap-2 sm:grid-cols-3">
-                  <Button type="button" variant="outline" onClick={loadManagerErrors} disabled={loadingManagerErrors}>
-                    <RefreshCcw className="h-4 w-4" /> Actualiser
-                  </Button>
-                  <Button type="button" variant="outline" onClick={copyManagerErrors} disabled={!managerErrors.length}>
-                    <Copy className="h-4 w-4" /> Copier
-                  </Button>
-                  <Button type="button" variant="outline" onClick={clearManagerErrors} disabled={!managerErrors.length}>
-                    <Trash2 className="h-4 w-4" /> Effacer
-                  </Button>
-                </div>
-              </div>
-
-              <div className="grid gap-3 rounded-md border bg-muted/40 p-3 text-sm">
-                <div>
-                  <div className="font-medium">Ports utilisés ou contactés</div>
-                  <p className="mt-1 text-xs text-muted-foreground">Les ports internes Docker ne sont pas réservés sur Windows sauf publication explicite du projet.</p>
-                </div>
-                <div className="grid gap-x-4 gap-y-2 text-xs sm:grid-cols-[100px_minmax(0,1fr)]">
-                  <code>{settingsDraft.api_port_actual || settingsDraft.api_port}</code><span>API locale du gestionnaire, sur <code>127.0.0.1</code> uniquement</span>
-                  <code>80 / 443</code><span>Traefik, accès HTTP/HTTPS aux projets</span>
-                  <code>8069</code><span>Odoo à l’intérieur de chaque conteneur</span>
-                  <code>5432</code><span>PostgreSQL à l’intérieur de chaque conteneur</span>
-                  <code>10022</code><span>Connexion SSH sortante vers GitLab Sudokeys</span>
-                  <code>3000</code><span>Interface Next.js, uniquement en mode développement</span>
-                </div>
-                {settingsDraft.api_port_actual && settingsDraft.api_port_actual !== settingsDraft.api_port && (
-                  <p className="text-xs text-amber-700 dark:text-amber-300">
-                    Le port {settingsDraft.api_port} était occupé au démarrage. Cette session utilise automatiquement le port {settingsDraft.api_port_actual}.
-                  </p>
-                )}
-              </div>
-
-              <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
-                <div>Plateforme : {settingsDraft.platform || systemStatus?.docker.platform || "-"}</div>
-                <div className="mt-1 break-all">Configuration : {settingsDraft.config_file || "-"}</div>
-              </div>
-
-              <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-                <Button variant="outline" onClick={() => setSettingsOpen(false)}>Annuler</Button>
-                <Button
-                  disabled={savingSettings || !settingsDraft.workspace.trim() || settingsDraft.api_port < 1024 || settingsDraft.api_port > 65535}
-                  onClick={saveSettings}
+            <>
+              <div className="flex min-h-0 flex-1 flex-col md:flex-row">
+                <nav
+                  className="flex shrink-0 gap-1 overflow-x-auto border-b p-2 md:w-60 md:flex-col md:overflow-x-visible md:border-b-0 md:border-r md:p-3"
+                  aria-label="Sections des paramètres"
                 >
-                  {savingSettings && <Loader2 className="h-4 w-4 animate-spin" />}
-                  Enregistrer
-                </Button>
+                  {SETTINGS_SECTIONS.map((section) => {
+                    const Icon = section.icon;
+                    const active = settingsSection === section.id;
+                    return (
+                      <button
+                        key={section.id}
+                        type="button"
+                        aria-current={active ? "page" : undefined}
+                        className={cn(
+                          "flex shrink-0 items-center gap-2.5 rounded-md px-3 py-2 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                          active ? "bg-primary/[0.10] font-medium text-primary dark:bg-primary/[0.16]" : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                        )}
+                        onClick={() => setSettingsSection(section.id)}
+                      >
+                        <Icon className="h-4 w-4 shrink-0" />
+                        <span className="min-w-0 flex-1 whitespace-nowrap">{section.label}</span>
+                        {section.id === "diagnostic" && managerErrors.length > 0 && (
+                          <Badge variant="warning" className="shrink-0">{managerErrors.length}</Badge>
+                        )}
+                      </button>
+                    );
+                  })}
+                </nav>
+
+                <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5 sm:px-6">
+                  {settingsSection === "general" && (
+                    <SettingsSection title="Général" description="Emplacement des projets et configuration de base du poste.">
+                      <SettingsGroup>
+                        <div className="grid min-w-0 gap-1.5 text-sm font-medium">
+                          <label htmlFor="projects-workspace">Dossier des projets</label>
+                          <div className="flex min-w-0 flex-col gap-2 sm:flex-row">
+                            <Input
+                              id="projects-workspace"
+                              className="min-w-0 flex-1"
+                              value={settingsDraft.workspace}
+                              onChange={(event) => setSettingsDraft({ ...settingsDraft, workspace: event.target.value })}
+                              placeholder="/chemin/vers/Odoo-projects"
+                            />
+                            <Button
+                              className="shrink-0"
+                              type="button"
+                              variant="outline"
+                              disabled={!desktopRuntime || selectingWorkspace}
+                              title={desktopRuntime ? "Choisir un dossier" : "Disponible dans l’application installée"}
+                              onClick={selectWorkspaceDirectory}
+                            >
+                              {selectingWorkspace ? <Loader2 className="h-4 w-4 animate-spin" /> : <FolderOpen className="h-4 w-4" />}
+                              Choisir
+                            </Button>
+                          </div>
+                          <span className="text-xs font-normal leading-relaxed text-muted-foreground">
+                            Le dossier est créé s’il n’existe pas encore. Dans l’application installée, « Choisir » ouvre le sélecteur du système.
+                          </span>
+                        </div>
+
+                      </SettingsGroup>
+                      <div className="rounded-md border bg-muted/40 p-3">
+                        <div className="text-sm font-medium">Exécution automatique</div>
+                        <p className="mt-1 text-xs font-normal leading-relaxed text-muted-foreground">
+                          Le gestionnaire choisit automatiquement les outils adaptés au système. Sous Windows, Docker,
+                          Git et les chemins sont exécutés dans l’environnement compatible avec le workspace. Les chemins Windows
+                          sont traduits automatiquement lorsque Docker ou Git passe par WSL.
+                        </p>
+                      </div>
+
+                      <SettingsGroup>
+                        <div className="grid gap-3">
+                          <div>
+                            <div className="text-sm font-medium">Configuration initiale</div>
+                            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                              Rouvre l’assistant du premier démarrage pour vérifier le workspace, Docker, Git, SSH et Traefik.
+                            </p>
+                          </div>
+                          <Button type="button" variant="outline" onClick={reopenInitialConfiguration}>
+                            <Settings className="h-4 w-4" />
+                            Ouvrir l’assistant de configuration
+                          </Button>
+                        </div>
+
+                      </SettingsGroup>
+                    </SettingsSection>
+                  )}
+
+                  {settingsSection === "appearance" && (
+                    <SettingsSection title="Apparence" description="Organisation des écrans et éléments affichés.">
+                      <SettingsGroup>
+                        <div className="grid gap-3">
+                          <div>
+                          <div className="text-sm font-medium">Mise en page</div>
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            L’interface affinée réorganise Bases, Modules, Activité et Réglages du projet : moins de vide, colonnes
+                            alignées, survols et focus plus visibles, sortie technique dépliée à la demande. Aucune action ni
+                            information n’est retirée.
+                          </p>
+                          </div>
+                          <div className="grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Interface">
+                            {([
+                              ["classic", "Classique", "Interface actuelle, inchangée."],
+                              ["refined", "Affinée (bêta)", "Nouvelle organisation des écrans Bases, Modules, Activité et Réglages."],
+                            ] as const).map(([value, title, description]) => (
+                              <InteractiveCard
+                                key={value}
+                                role="radio"
+                                aria-checked={(settingsDraft.interface_layout ?? "classic") === value}
+                                className={cn("p-3 text-left", (settingsDraft.interface_layout ?? "classic") === value && "border-primary bg-primary/10")}
+                                onClick={() => setSettingsDraft({ ...settingsDraft, interface_layout: value })}
+                              >
+                                <span className="block text-sm font-medium">{title}</span>
+                                <span className="mt-1 block text-xs text-muted-foreground">{description}</span>
+                              </InteractiveCard>
+                            ))}
+                          </div>
+                        </div>
+
+                      </SettingsGroup>
+                      <SettingsGroup>
+                        <div className="grid gap-2">
+                          <div>
+                            <div className="text-sm font-medium">Icône affichée</div>
+                            <p className="mt-1 text-xs font-normal text-muted-foreground">
+                              Choisis l’identité visuelle utilisée dans le gestionnaire.
+                            </p>
+                          </div>
+                          <div className="grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Icône affichée">
+                            <InteractiveCard
+                              className={cn(
+                                "flex min-h-24 items-center gap-3 p-3",
+                                settingsDraft.interface_icon === "manager" && "border-primary bg-primary/[0.08] ring-1 ring-primary/25 dark:bg-primary/[0.14]",
+                              )}
+                              role="radio"
+                              aria-checked={settingsDraft.interface_icon === "manager"}
+                              onClick={() => setSettingsDraft({ ...settingsDraft, interface_icon: "manager" })}
+                            >
+                              <img src={appIcon.src} alt="" aria-hidden="true" className="h-14 w-14 shrink-0 rounded-[13px] object-cover" />
+                              <span className="min-w-0 flex-1">
+                                <span className="block text-sm font-semibold">SDK Local Manager</span>
+                                <span className="mt-1 block text-xs text-muted-foreground">Logo Sudokeys</span>
+                              </span>
+                              {settingsDraft.interface_icon === "manager" && <CheckCircle2 className="h-5 w-5 shrink-0 text-primary" aria-hidden="true" />}
+                            </InteractiveCard>
+                            <InteractiveCard
+                              className={cn(
+                                "flex min-h-24 items-center gap-3 p-3",
+                                settingsDraft.interface_icon === "local" && "border-primary bg-primary/[0.08] ring-1 ring-primary/25 dark:bg-primary/[0.14]",
+                              )}
+                              role="radio"
+                              aria-checked={settingsDraft.interface_icon === "local"}
+                              onClick={() => setSettingsDraft({ ...settingsDraft, interface_icon: "local" })}
+                            >
+                              <img src={localIcon.src} alt="" aria-hidden="true" className="h-14 w-14 shrink-0 rounded-full object-cover" />
+                              <span className="min-w-0 flex-1">
+                                <span className="block text-sm font-semibold">Logo Local</span>
+                                <span className="mt-1 block text-xs text-muted-foreground">Nouvelle icône</span>
+                              </span>
+                              {settingsDraft.interface_icon === "local" && <CheckCircle2 className="h-5 w-5 shrink-0 text-primary" aria-hidden="true" />}
+                            </InteractiveCard>
+                          </div>
+                        </div>
+
+                      </SettingsGroup>
+                      <div className="divide-y overflow-hidden rounded-md border bg-card">
+                      <label className="flex cursor-pointer items-start gap-3 p-3 text-sm transition-colors hover:bg-muted/40">
+                        <Checkbox
+                          className="mt-0.5"
+                          checked={settingsDraft.show_technical_details}
+                          onCheckedChange={(checked) =>
+                            setSettingsDraft({ ...settingsDraft, show_technical_details: checked === true })
+                          }
+                        />
+                        <span className="min-w-0">
+                          <span className="block font-medium">Afficher les détails techniques</span>
+                          <span className="mt-1 block text-xs font-normal leading-relaxed text-muted-foreground">
+                            Affiche les états Odoo et PostgreSQL ainsi que le nombre de bases dans la liste des projets,
+                            les emplacements des modules, et les actions de mise à jour du code et des images Docker.
+                            Désactivé, le gestionnaire présente uniquement le voyant d’état des projets et une liste de modules compacte.
+                          </span>
+                        </span>
+                      </label>
+
+                      <label className="flex cursor-pointer items-start gap-3 p-3 text-sm transition-colors hover:bg-muted/40">
+                        <Checkbox
+                          className="mt-0.5"
+                          checked={settingsDraft.sticky_header}
+                          onCheckedChange={(checked) =>
+                            setSettingsDraft({ ...settingsDraft, sticky_header: checked === true })
+                          }
+                        />
+                        <span className="min-w-0">
+                          <span className="block font-medium">En-tête fixe</span>
+                          <span className="mt-1 block text-xs font-normal leading-relaxed text-muted-foreground">
+                            Garde le nom du projet, les actions et les onglets visibles pendant le défilement.
+                            L’en-tête se compacte dès que la page défile. Sur les fenêtres étroites, il reste non fixe pour préserver la place.
+                          </span>
+                        </span>
+                      </label>
+
+                      </div>
+                    </SettingsSection>
+                  )}
+
+                  {settingsSection === "accounts" && (
+                    <SettingsSection
+                      title="Comptes et accès"
+                      description="Clé SSH, GitLab et identifiants mémorisés. Ces réglages s’appliquent immédiatement, sans enregistrement."
+                    >
+                      <div className="grid gap-3 rounded-md border p-3">
+                        <div className="flex min-w-0 items-start gap-3">
+                          <KeyRound className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
+                          <div className="min-w-0 flex-1">
+                            <div className="text-sm font-medium">Clé SSH GitLab</div>
+                            <p className="mt-1 break-words text-xs leading-relaxed text-muted-foreground">
+                              {selectedSshKey
+                                ? `${selectedSshKey.name} · ${selectedSshKey.public_key}`
+                                : "Aucune clé publique détectée dans l’environnement Git utilisé par le gestionnaire."}
+                            </p>
+                          </div>
+                        </div>
+                        <Button type="button" variant="outline" onClick={openSshAssistant}>
+                          <KeyRound className="h-4 w-4" />
+                          {selectedSshKey ? "Gérer la clé SSH" : "Configurer une clé"}
+                        </Button>
+                      </div>
+
+                      {gitlabStatus && (
+                        <div className="grid gap-3 rounded-md border p-3">
+                          <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                            <div className="min-w-0">
+                              <div className="text-sm font-medium">Recherche de dépôts GitLab</div>
+                              <p className="mt-1 text-xs text-muted-foreground">
+                                {gitlabStatus.connected
+                                  ? `Connecté à gitlab.sudokeys.com${gitlabStatus.username ? ` en tant que @${gitlabStatus.username}` : ""}. « Dépôt SSH » propose la recherche de dépôts et de branches ; le lien SSH reste le mode par défaut.`
+                                  : "Désactivée : « Dépôt SSH » utilise le lien SSH. Connecte un jeton personnel en lecture seule (portée read_api) pour chercher un dépôt et choisir sa branche."}
+                              </p>
+                            </div>
+                            {gitlabStatus.connected && (
+                              <Button
+                                type="button"
+                                variant="outline"
+                                className="shrink-0"
+                                onClick={async () => {
+                                  try {
+                                    setGitlabStatus(await window.sdkDesktop!.gitlabDisconnect());
+                                    pushToast("success", "GitLab déconnecté.");
+                                  } catch {
+                                    pushToast("error", "Impossible de déconnecter GitLab.");
+                                  }
+                                }}
+                              >
+                                <Trash2 className="h-4 w-4" />
+                                Déconnecter
+                              </Button>
+                            )}
+                          </div>
+                          {!gitlabStatus.available && <p className="text-xs text-amber-700 dark:text-amber-300">{gitlabStatus.reason}</p>}
+                          {gitlabStatus.available && !gitlabStatus.connected && (
+                            <form
+                              className="flex flex-col gap-2 sm:flex-row"
+                              onSubmit={async (event) => {
+                                event.preventDefault();
+                                if (!gitlabTokenDraft.trim()) return;
+                                setGitlabConnecting(true);
+                                try {
+                                  setGitlabStatus(await window.sdkDesktop!.gitlabConnect(gitlabTokenDraft));
+                                  setGitlabTokenDraft("");
+                                  pushToast("success", "GitLab connecté : la recherche de dépôts est activée.");
+                                } catch (err) {
+                                  pushToast("error", err instanceof Error ? err.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, "") : "Connexion GitLab impossible.");
+                                } finally {
+                                  setGitlabConnecting(false);
+                                }
+                              }}
+                            >
+                              <Input
+                                type="password"
+                                autoComplete="off"
+                                value={gitlabTokenDraft}
+                                onChange={(event) => setGitlabTokenDraft(event.target.value)}
+                                placeholder="Jeton personnel GitLab (glpat-…)"
+                                aria-label="Jeton personnel GitLab"
+                              />
+                              <Button type="submit" className="shrink-0" disabled={gitlabConnecting || !gitlabTokenDraft.trim()}>
+                                {gitlabConnecting ? <Loader2 className="h-4 w-4 animate-spin" /> : <KeyRound className="h-4 w-4" />}
+                                Activer
+                              </Button>
+                              <Button type="button" variant="ghost" className="shrink-0" onClick={() => void openExternalUrl(GITLAB_TOKEN_URL)}>
+                                <ExternalLink className="h-4 w-4" />
+                                Créer un jeton
+                              </Button>
+                            </form>
+                          )}
+                        </div>
+                      )}
+
+                      {storedRikaCredentials?.available && (
+                        <div className="flex flex-col gap-3 rounded-md border p-3 sm:flex-row sm:items-center sm:justify-between">
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium">Identifiants RIKA</div>
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              {storedRikaCredentials.login
+                                ? `${storedRikaCredentials.login} · ${storedRikaCredentials.password ? "identifiant et mot de passe" : "identifiant seul"} dans le coffre-fort du système.`
+                                : "Aucun identifiant mémorisé sur cet ordinateur."}
+                            </p>
+                          </div>
+                          {storedRikaCredentials.login && (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              onClick={async () => {
+                                try {
+                                  await window.sdkDesktop?.clearRikaCredentials();
+                                  setStoredRikaCredentials({ ...storedRikaCredentials, login: "", password: "" });
+                                  pushToast("success", "Identifiants RIKA oubliés.");
+                                } catch {
+                                  pushToast("error", "Impossible d’effacer les identifiants RIKA.");
+                                }
+                              }}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                              Oublier
+                            </Button>
+                          )}
+                        </div>
+                      )}
+
+                    </SettingsSection>
+                  )}
+
+                  {settingsSection === "advanced" && (
+                    <SettingsSection title="Avancé" description="Outils système, détection de Docker et réseau local.">
+                      <SettingsGroup className="items-start sm:grid-cols-2">
+                        <label className="grid gap-1.5 text-sm font-medium">
+                          Commande Docker
+                          <Input
+                            value={settingsDraft.docker_executable}
+                            onChange={(event) => setSettingsDraft({ ...settingsDraft, docker_executable: event.target.value })}
+                            placeholder="docker"
+                          />
+                        </label>
+
+                        <label className="grid min-w-0 gap-1.5 text-sm font-medium">
+                          Dossier Traefik
+                          <Input
+                            value={settingsDraft.traefik_directory}
+                            onChange={(event) => setSettingsDraft({ ...settingsDraft, traefik_directory: event.target.value })}
+                            placeholder="Détection automatique si vide"
+                          />
+                        </label>
+
+                        <label className="grid gap-1.5 text-sm font-medium">
+                          Vérification Docker (secondes)
+                          <Input
+                            type="number"
+                            min={3}
+                            max={60}
+                            value={settingsDraft.docker_poll_interval}
+                            onChange={(event) => setSettingsDraft({ ...settingsDraft, docker_poll_interval: Number(event.target.value) })}
+                          />
+                        </label>
+
+                        <label className="grid gap-1.5 text-sm font-medium">
+                          Port local du gestionnaire
+                          <Input
+                            type="number"
+                            min={1024}
+                            max={65535}
+                            value={settingsDraft.api_port}
+                            onChange={(event) => setSettingsDraft({ ...settingsDraft, api_port: Number(event.target.value) })}
+                          />
+                          <span className="text-xs font-normal leading-relaxed text-muted-foreground">
+                            Port préféré de l’API locale. Un redémarrage est nécessaire après modification. S’il est occupé, notamment par Docker, le gestionnaire choisit automatiquement un port libre.
+                          </span>
+                        </label>
+
+                      </SettingsGroup>
+                      <div className="grid gap-3 rounded-md border bg-muted/40 p-3 text-sm">
+                        <div>
+                          <div className="font-medium">Ports utilisés ou contactés</div>
+                          <p className="mt-1 text-xs text-muted-foreground">Les ports internes Docker ne sont pas réservés sur Windows sauf publication explicite du projet.</p>
+                        </div>
+                        <div className="grid gap-x-4 gap-y-2 text-xs sm:grid-cols-[100px_minmax(0,1fr)]">
+                          <code>{settingsDraft.api_port_actual || settingsDraft.api_port}</code><span>API locale du gestionnaire, sur <code>127.0.0.1</code> uniquement</span>
+                          <code>80 / 443</code><span>Traefik, accès HTTP/HTTPS aux projets</span>
+                          <code>8069</code><span>Odoo à l’intérieur de chaque conteneur</span>
+                          <code>5432</code><span>PostgreSQL à l’intérieur de chaque conteneur</span>
+                          <code>10022</code><span>Connexion SSH sortante vers GitLab Sudokeys</span>
+                          <code>3000</code><span>Interface Next.js, uniquement en mode développement</span>
+                        </div>
+                        {settingsDraft.api_port_actual && settingsDraft.api_port_actual !== settingsDraft.api_port && (
+                          <p className="text-xs text-amber-700 dark:text-amber-300">
+                            Le port {settingsDraft.api_port} était occupé au démarrage. Cette session utilise automatiquement le port {settingsDraft.api_port_actual}.
+                          </p>
+                        )}
+                      </div>
+
+                      <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
+                        <div>Plateforme : {settingsDraft.platform || systemStatus?.docker.platform || "-"}</div>
+                        <div className="mt-1 break-all">Configuration : {settingsDraft.config_file || "-"}</div>
+                      </div>
+
+                    </SettingsSection>
+                  )}
+
+                  {settingsSection === "diagnostic" && (
+                    <SettingsSection title="Diagnostic" description="Erreurs enregistrées localement pour le support.">
+                      <div className="grid gap-3 rounded-md border p-3">
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium">Journal d’erreurs du gestionnaire</div>
+                            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                              Les erreurs d’API, de jobs et d’interface sont conservées localement. Les mots de passe, jetons et secrets détectés sont masqués.
+                            </p>
+                            {managerErrorLogPath && <p className="mt-1 break-all text-xs text-muted-foreground">Fichier : {managerErrorLogPath}</p>}
+                          </div>
+                          <Badge className="shrink-0" variant={managerErrors.length ? "warning" : "secondary"}>
+                            {managerErrors.length} erreur(s)
+                          </Badge>
+                        </div>
+                        <div className="max-h-72 space-y-2 overflow-y-auto rounded-md border bg-muted/30 p-2">
+                          {loadingManagerErrors ? (
+                            <div className="flex items-center gap-2 p-2 text-xs text-muted-foreground">
+                              <Loader2 className="h-4 w-4 animate-spin" /> Chargement…
+                            </div>
+                          ) : managerErrors.length ? managerErrors.map((entry) => (
+                            <details key={entry.id} className="rounded-md border bg-card p-2 text-xs">
+                              <summary className="cursor-pointer break-words font-medium">
+                                {entry.timestamp} · {entry.source}{entry.project ? ` · ${entry.project}` : ""}
+                              </summary>
+                              <p className="mt-2 whitespace-pre-wrap break-words text-destructive">{entry.message}</p>
+                              {entry.details && <pre className="log-terminal mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-slate-950 p-2 text-[11px] text-slate-100">{entry.details}</pre>}
+                            </details>
+                          )) : (
+                            <p className="p-2 text-xs text-muted-foreground">Aucune erreur enregistrée.</p>
+                          )}
+                        </div>
+                        <div className="grid gap-2 sm:grid-cols-3">
+                          <Button type="button" variant="outline" onClick={loadManagerErrors} disabled={loadingManagerErrors}>
+                            <RefreshCcw className="h-4 w-4" /> Actualiser
+                          </Button>
+                          <Button type="button" variant="outline" onClick={copyManagerErrors} disabled={!managerErrors.length}>
+                            <Copy className="h-4 w-4" /> Copier
+                          </Button>
+                          <Button type="button" variant="outline" onClick={clearManagerErrors} disabled={!managerErrors.length}>
+                            <Trash2 className="h-4 w-4" /> Effacer
+                          </Button>
+                        </div>
+                      </div>
+
+                    </SettingsSection>
+                  )}
+                </div>
               </div>
-            </div>
+
+              <div className="flex flex-col-reverse gap-3 border-t px-5 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+                <p className={cn("text-xs", settingsDirty ? "font-medium text-amber-700 dark:text-amber-300" : "text-muted-foreground")}>
+                  {settingsDirty ? "Modifications non enregistrées." : "Aucune modification en attente."}
+                </p>
+                <div className="flex flex-col-reverse gap-2 sm:flex-row">
+                  <Button variant="outline" onClick={() => setSettingsOpen(false)}>Annuler</Button>
+                  <Button
+                    disabled={savingSettings || !settingsDirty || !settingsDraft.workspace.trim() || settingsDraft.api_port < 1024 || settingsDraft.api_port > 65535}
+                    onClick={saveSettings}
+                  >
+                    {savingSettings && <Loader2 className="h-4 w-4 animate-spin" />}
+                    Enregistrer
+                  </Button>
+                </div>
+              </div>
+            </>
           ) : (
-            <div className="flex items-center gap-2 rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
+            <div className="m-5 flex items-center gap-2 rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
               <Loader2 className="h-4 w-4 animate-spin" />
               Chargement des paramètres...
             </div>
@@ -6362,7 +6520,23 @@ export default function Home() {
         </DialogContent>
       </Dialog>
 
-      <div className="fixed bottom-4 left-4 right-4 z-50 grid gap-2 sm:left-auto sm:w-96">
+      {showFloatingModuleActions && (
+        <div
+          className="pointer-events-none fixed inset-x-4 bottom-4 z-40 flex justify-center lg:left-[calc(20rem+1rem)]"
+          role="region"
+          aria-label="Actions sur les modules sélectionnés"
+        >
+          <div className="pointer-events-auto flex max-w-full flex-wrap items-center justify-center gap-2 rounded-lg border border-primary/30 bg-card/95 p-2 shadow-xl backdrop-blur">
+            <Badge variant="default" className="shrink-0">{selectedModuleList.length} module(s)</Badge>
+            {moduleSelectionButtons(true)}
+            <Button size="sm" variant="ghost" onClick={() => setSelectedModules(new Set())} title="Effacer la sélection">
+              Effacer
+            </Button>
+          </div>
+        </div>
+      )}
+
+      <div className={cn("fixed bottom-4 left-4 right-4 z-50 grid gap-2 sm:left-auto sm:w-96", showFloatingModuleActions && "bottom-28 xl:bottom-20")}>
         {toasts.map((toast) => (
           <div
             key={toast.id}
