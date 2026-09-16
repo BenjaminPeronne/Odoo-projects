@@ -3451,7 +3451,8 @@ export default function Home() {
           </div>
         </aside>
 
-        <section className="min-w-0 flex-1">
+        {/* overflow-x-clip borne le bandeau pleine largeur des onglets sans casser les éléments collés. */}
+        <section className="min-w-0 flex-1 overflow-x-clip">
           <header
             ref={projectHeaderRef}
             className={cn(
@@ -3711,7 +3712,12 @@ export default function Home() {
             >
               <div
                 ref={projectTabsRef}
-                className={cn(stickyHeader && "-mx-4 -my-2 px-4 py-2 lg:sticky lg:z-20 lg:bg-background/85 lg:backdrop-blur")}
+                className={cn(
+                  // Fond transparent au repos : le bandeau n'apparaît qu'une fois collé, sur toute la largeur de la zone.
+                  stickyHeader &&
+                    "-my-2 py-2 lg:sticky lg:z-20 lg:before:pointer-events-none lg:before:absolute lg:before:inset-y-0 lg:before:-inset-x-[100vw] lg:before:-z-10 lg:before:border-b lg:before:bg-background/90 lg:before:opacity-0 lg:before:backdrop-blur lg:before:transition-opacity lg:before:duration-200",
+                  stickyHeader && projectHeaderCompact && "lg:before:opacity-100",
+                )}
                 style={stickyHeader ? { top: projectHeaderHeight } : undefined}
               >
               <TabsList
