@@ -49,6 +49,7 @@ from odoo_manager_core.platform import (
     wsl_executable_available,
     wsl_command_with_cwd,
     find_wsl_executable_distribution,
+    reset_wsl_executable_cache,
     wsl_execution_path,
     wsl_windows_path,
     wsl_path_context,
@@ -68,6 +69,7 @@ from odoo_manager_core.windows_links import (
     MIGRATION_JOURNAL_NAME,
     contains_wsl_symlink,
     convert_wsl_symlinks,
+    is_wsl_symlink,
     native_symlinks_supported,
     wsl_symlinks,
 )
@@ -654,7 +656,9 @@ def preferred_git_runtime():
     context = active_workspace_wsl_context()
     distribution = context.distribution if context else SETTINGS.wsl_distribution
     native_available = host_executable_available("git")
-    wsl_distribution = find_wsl_executable_distribution("git", distribution)
+    # Git pour Windows suffit hors workspace WSL : aucune sonde WSL dans ce cas.
+    needs_wsl_probe = bool(context) or not native_available
+    wsl_distribution = find_wsl_executable_distribution("git", distribution) if needs_wsl_probe else None
     wsl_available = wsl_distribution is not None
     use_wsl = (bool(context) and wsl_available) or (not native_available and wsl_available)
     if use_wsl:
@@ -918,6 +922,14 @@ def generate_ssh_key(comment="", replace=False):
 
 
 def install_git_job(job):
+    try:
+        install_git(job)
+    finally:
+        # Git vient peut-être d'apparaître : la détection mise en cache ne doit pas le masquer.
+        reset_wsl_executable_cache()
+
+
+def install_git(job):
     if platform_id() != "windows":
         raise RuntimeError("L'installation automatique de Git est disponible sous Windows.")
 
@@ -3086,6 +3098,12 @@ def delete_module_file_entry(job, project, module_name):
     imports_roots = module_import_roots(project)
     entry = primary_addons / module_name
 
+    if is_wsl_symlink(entry):
+        # Windows ne peut ni lire ni vérifier la cible (WinError 1920) : rien n'est supprimé à l'aveugle.
+        raise RuntimeError(
+            f"Suppression refusée pour {module_name} : son lien a été créé par WSL et Windows ne peut pas le vérifier. "
+            "Convertis d'abord les liens du projet depuis le bandeau affiché dans le projet."
+        )
     if not entry.exists() and not entry.is_symlink():
         job.add(f"Module introuvable dans odoo/addons: {module_name}")
         return False

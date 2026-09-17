@@ -119,7 +119,9 @@ class ProjectCreator:
         self.wsl_context = detected_wsl
         distribution = detected_wsl.distribution if detected_wsl else settings.wsl_distribution
         native_git = host_executable_available("git")
-        wsl_distribution = find_wsl_executable_distribution("git", distribution) if platform_id() == "windows" else None
+        # Git pour Windows suffit hors workspace WSL : aucune sonde WSL dans ce cas.
+        needs_wsl_probe = platform_id() == "windows" and (bool(detected_wsl) or not native_git)
+        wsl_distribution = find_wsl_executable_distribution("git", distribution) if needs_wsl_probe else None
         wsl_git = wsl_distribution is not None
         self.git_wsl_distribution = wsl_distribution if ((detected_wsl and wsl_git) or (not native_git and wsl_git)) else None
 

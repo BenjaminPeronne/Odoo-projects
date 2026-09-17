@@ -74,6 +74,25 @@ def _windows_docker_backends(settings):
     return [wsl, native] if context else [native, wsl]
 
 
+def _wsl_docker_installed(backend, timeout):
+    if not host_executable_available("wsl.exe"):
+        return False
+    try:
+        version_probe = subprocess.run(
+            [*backend.command, "--version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+            **hidden_process_kwargs(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return version_probe.returncode == 0
+
+
 def _default_docker_backend(settings):
     cached = _cached_docker_backend(settings)
     if cached:
@@ -181,23 +200,12 @@ def docker_status(settings, timeout=6):
         for backend in _windows_docker_backends(settings):
             if backend.kind == "native":
                 installed = host_executable_available(settings.docker_executable)
-            elif not host_executable_available("wsl.exe"):
-                installed = False
+            elif backend.kind == "wsl" and not workspace_wsl_context(settings, settings.workspace):
+                # Évalué après le moteur natif : WSL n'est sondé que si Docker Desktop ne répond pas.
+                # Chaque sonde démarrait la VM WSL, toutes les 10 s avec l'overview.
+                installed = None
             else:
-                try:
-                    version_probe = subprocess.run(
-                        [*backend.command, "--version"],
-                        capture_output=True,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
-                        timeout=timeout,
-                        check=False,
-                        **hidden_process_kwargs(),
-                    )
-                    installed = version_probe.returncode == 0
-                except (OSError, subprocess.SubprocessError):
-                    installed = False
+                installed = _wsl_docker_installed(backend, timeout)
             probes.append((backend, installed))
 
     environments = []
@@ -206,6 +214,10 @@ def docker_status(settings, timeout=6):
     first_installed = None
     try:
         for backend, installed in probes:
+            if installed is None:
+                if selected is not None:
+                    continue
+                installed = _wsl_docker_installed(backend, timeout)
             if not installed:
                 environments.append({"backend": backend.kind, "label": backend.label, "installed": False, "running": False})
                 continue

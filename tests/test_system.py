@@ -101,7 +101,8 @@ class DockerStatusTests(unittest.TestCase):
     @mock.patch("odoo_manager_core.system.host_executable_available", return_value=True)
     @mock.patch("odoo_manager_core.system.platform_id", return_value="windows")
     @mock.patch("odoo_manager_core.system.subprocess.run")
-    def test_windows_docker_status_probes_native_and_wsl(self, run, _platform, _available, _resolve):
+    def test_windows_docker_status_does_not_wake_wsl_when_native_docker_runs(self, run, _platform, _available, _resolve):
+        # Chaque sonde WSL démarrait la VM, toutes les 10 s avec l'overview.
         run.return_value = mock.Mock(returncode=0, stdout='"28.0.0"\n', stderr="")
         settings = ManagerSettings.from_dict({}, "/tmp/workspace")
 
@@ -110,8 +111,7 @@ class DockerStatusTests(unittest.TestCase):
         self.assertEqual(status["state"], "ready")
         self.assertEqual(status["backend"], "native")
         commands = [call.args[0] for call in run.call_args_list]
-        self.assertTrue(any(command[0] == r"C:\Docker\docker.exe" for command in commands))
-        self.assertTrue(any(command[0] == "wsl.exe" for command in commands))
+        self.assertEqual([[r"C:\Docker\docker.exe", "info", "--format", "{{json .ServerVersion}}"]], commands)
 
     @mock.patch("odoo_manager_core.system.resolve_host_executable", return_value=r"C:\Docker\docker.exe")
     @mock.patch("odoo_manager_core.system.host_executable_available", return_value=True)

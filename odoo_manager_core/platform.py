@@ -6,6 +6,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -243,6 +244,15 @@ def decode_wsl_distribution_output(output):
     return output.decode("utf-8-sig", errors="replace")
 
 
+# (exécutable, distribution préférée) -> (instant, distribution trouvée ou None).
+# Une recherche lance au moins un wsl.exe (jusqu'à 6 s par distribution) : les écrans
+# et les créations la répétaient pour chaque commande Git.
+WSL_EXECUTABLE_DISTRIBUTIONS = {}
+WSL_EXECUTABLE_CACHE_TTL_SECONDS = 60
+# Un échec peut venir d'une VM WSL encore en démarrage : il est revérifié plus tôt.
+WSL_EXECUTABLE_MISSING_TTL_SECONDS = 10
+
+
 def find_wsl_executable_distribution(executable, preferred_distribution="", timeout=6):
     """Return the WSL distribution containing an executable, if any.
 
@@ -252,6 +262,23 @@ def find_wsl_executable_distribution(executable, preferred_distribution="", time
     """
     if platform.system() != "Windows" or not host_executable_available("wsl.exe"):
         return None
+    key = (str(executable), str(preferred_distribution or "").casefold())
+    cached = WSL_EXECUTABLE_DISTRIBUTIONS.get(key)
+    now = time.monotonic()
+    if cached:
+        ttl = WSL_EXECUTABLE_CACHE_TTL_SECONDS if cached[1] is not None else WSL_EXECUTABLE_MISSING_TTL_SECONDS
+        if now - cached[0] < ttl:
+            return cached[1]
+    distribution = _probe_wsl_executable_distribution(executable, preferred_distribution, timeout)
+    WSL_EXECUTABLE_DISTRIBUTIONS[key] = (now, distribution)
+    return distribution
+
+
+def reset_wsl_executable_cache():
+    WSL_EXECUTABLE_DISTRIBUTIONS.clear()
+
+
+def _probe_wsl_executable_distribution(executable, preferred_distribution, timeout):
     if wsl_executable_available(executable, preferred_distribution, timeout=timeout):
         return preferred_distribution
     try:

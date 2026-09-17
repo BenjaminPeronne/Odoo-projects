@@ -105,6 +105,16 @@ services:
 """
 
 
+GIT_SSH_COMMAND = "ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new"
+
+
+def merge_wslenv(current, names):
+    entries = [entry for entry in str(current or "").split(":") if entry]
+    known = {entry.split("/", 1)[0] for entry in entries}
+    entries.extend(name for name in names if name not in known)
+    return ":".join(entries)
+
+
 def terminate_active_processes(wait_seconds=0.5):
     with ACTIVE_PROCESSES_LOCK:
         processes = list(ACTIVE_PROCESSES)
@@ -141,10 +151,14 @@ class ProjectService:
         env = os.environ.copy()
         env["PATH"] = executable_search_path()
         env["GIT_TERMINAL_PROMPT"] = "0"
-        env.setdefault(
-            "GIT_SSH_COMMAND",
-            "ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new",
-        )
+        env.setdefault("GIT_SSH_COMMAND", GIT_SSH_COMMAND)
+        if platform.system() == "Windows":
+            # wsl.exe ne transmet que les variables listées dans WSLENV : sans elles, Git dans WSL
+            # pouvait attendre une réponse SSH (clé d'hôte inconnue) sans terminal.
+            forwarded = ["GIT_TERMINAL_PROMPT"]
+            if env["GIT_SSH_COMMAND"] == GIT_SSH_COMMAND:
+                forwarded.append("GIT_SSH_COMMAND")
+            env["WSLENV"] = merge_wslenv(env.get("WSLENV", ""), forwarded)
         return env
 
     def log(self, callback, message):
@@ -233,7 +247,9 @@ class ProjectService:
         context = workspace_wsl_context(self.settings, self.workspace) if platform.system() == "Windows" else None
         distribution = context.distribution if context else self.settings.wsl_distribution
         native_available = host_executable_available("git")
-        wsl_distribution = find_wsl_executable_distribution("git", distribution)
+        # Git pour Windows suffit hors workspace WSL : aucune sonde WSL dans ce cas.
+        needs_wsl_probe = bool(context) or not native_available
+        wsl_distribution = find_wsl_executable_distribution("git", distribution) if needs_wsl_probe else None
         wsl_available = wsl_distribution is not None
         if (context and wsl_available) or (not native_available and wsl_available):
             return [*wsl_command_prefix(wsl_distribution), "git", *arguments]

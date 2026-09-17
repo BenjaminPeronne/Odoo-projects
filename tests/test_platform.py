@@ -12,6 +12,7 @@ from odoo_manager_core.platform import (
     hidden_process_kwargs,
     open_terminal_command,
     open_terminal_script,
+    reset_wsl_executable_cache,
     workspace_command_prefix,
     workspace_execution_path,
     wsl_command_with_cwd,
@@ -161,6 +162,10 @@ class TerminalLaunchTests(unittest.TestCase):
 
 
 class WindowsProcessTests(unittest.TestCase):
+    def setUp(self):
+        reset_wsl_executable_cache()
+        self.addCleanup(reset_wsl_executable_cache)
+
     def test_wsl_unc_variants_are_translated_without_calling_wslpath(self):
         localhost = wsl_path_context(r"\\wsl.localhost\Ubuntu-24.04\home\demo\Odoo-projects")
         legacy = wsl_path_context(r"\\wsl$\Ubuntu-24.04\home\demo\Odoo-projects")
