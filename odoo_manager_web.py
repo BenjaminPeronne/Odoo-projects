@@ -4912,12 +4912,33 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         return
 
+    def discard_request_body(self):
+        """Lit le corps avant de refuser la requête.
+
+        Fermer la connexion en laissant des octets non lus fait envoyer un RST par
+        Windows : le client perd la réponse 403 et ne voit qu'une connexion coupée.
+        Au-delà de la limite JSON, la connexion est coupée sans rien lire.
+        """
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            return
+        if length <= 0 or length > MAX_JSON_BODY_BYTES:
+            return
+        remaining = length
+        while remaining > 0:
+            chunk = self.rfile.read(min(remaining, 65536))
+            if not chunk:
+                return
+            remaining -= len(chunk)
+
     def reject_untrusted_request(self):
         reason = untrusted_request_reason(self.headers)
         if not reason:
             return False
         body = json.dumps({"error": reason}, ensure_ascii=False).encode("utf-8")
         try:
+            self.discard_request_body()
             self.send_response(403)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
