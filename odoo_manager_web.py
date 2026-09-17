@@ -64,6 +64,13 @@ from odoo_manager_core.project_creator import (
 from odoo_manager_core.project_service import terminate_active_processes as terminate_project_processes
 from odoo_manager_core.odoo_log_display import OdooLogDisplay, compact_odoo_log_text
 from odoo_manager_core.system import docker_command, reset_docker_backend_cache, shell_command
+from odoo_manager_core.windows_links import (
+    MIGRATION_JOURNAL_NAME,
+    contains_wsl_symlink,
+    convert_wsl_symlinks,
+    native_symlinks_supported,
+    wsl_symlinks,
+)
 
 
 ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)).resolve()
@@ -1430,11 +1437,23 @@ def wsl_module_dirs(project):
     return paths
 
 
+def project_has_wsl_links(project):
+    """Liens WSL hérités d'une ancienne version : Windows ne peut pas les lire."""
+    if platform_id() != "windows":
+        return False
+    return any(contains_wsl_symlink(parent) for parent in module_parent_candidates(project))
+
+
+def project_reads_modules_through_wsl(project):
+    # Un scan natif prend 0,2 s contre 30 à 70 s via WSL : WSL seulement quand Windows ne peut pas lire les liens.
+    return project_has_wsl_links(project) and wsl_shell_available(SETTINGS.wsl_distribution)
+
+
 def module_dirs(project):
     if active_workspace_wsl_context():
         yield from wsl_module_dirs(project)
         return
-    if platform_id() == "windows" and wsl_shell_available(SETTINGS.wsl_distribution):
+    if project_reads_modules_through_wsl(project):
         try:
             yield from wsl_module_dirs(project)
             return
@@ -3071,17 +3090,24 @@ def stop_project_job(job, project):
     project_service().stop_project(project, log=job.add)
 
 
-def addon_links_wsl_distribution():
-    """Distribution WSL qui porte les liens d'addons sous Windows, sinon None.
+def addon_links_wsl_distribution(*directories, creating=False):
+    """Distribution WSL qui porte les liens d'addons de ces dossiers, sinon None.
 
     Windows ne voit pas les liens créés par WSL : `exists()` et `is_symlink()`
-    renvoient False, puis `symlink_to` échoue (WinError 183) ou crée un lien
-    Windows que Docker ne peut pas suivre. Même règle que ProjectCreator.
+    renvoient False, puis `symlink_to` échoue (WinError 183). Un lien Windows
+    relatif est en revanche suivi par Docker Desktop : WSL ne sert que pour un
+    workspace WSL, un dossier qui contient encore des liens WSL, ou une création
+    que Windows refuse (mode développeur désactivé). Même règle que ProjectCreator.
     """
     if platform_id() != "windows":
         return None
     if active_workspace_wsl_context() or SETTINGS.execution_mode == "wsl":
         return active_wsl_distribution()
+    needs_wsl = any(contains_wsl_symlink(directory) for directory in directories) or (
+        creating and not all(native_symlinks_supported(directory) for directory in directories)
+    )
+    if not needs_wsl:
+        return None
     return SETTINGS.wsl_distribution if wsl_shell_available(SETTINGS.wsl_distribution) else None
 
 
@@ -3108,7 +3134,7 @@ ADDON_LINK_STATUS_CHUNK = 100  # Paires par appel WSL : reste sous la limite de 
 def addon_link_statuses(pairs):
     """États de plusieurs liens en un appel WSL par lot ; voir addon_link_status."""
     pairs = list(pairs)
-    distribution = addon_links_wsl_distribution()
+    distribution = addon_links_wsl_distribution(*{Path(link).parent for link, _target in pairs})
     if distribution is None:
         return [addon_link_status_native(link, target) for link, target in pairs]
     script = (
@@ -3151,7 +3177,7 @@ def addon_link_status_native(link_path, expected_target):
 
 
 def create_addon_link(link_path, link_value):
-    distribution = addon_links_wsl_distribution()
+    distribution = addon_links_wsl_distribution(link_path.parent, creating=True)
     if distribution is None:
         link_path.symlink_to(link_value, target_is_directory=True)
         return
@@ -3165,7 +3191,7 @@ def create_addon_link(link_path, link_value):
 
 
 def remove_module_entry(path):
-    distribution = addon_links_wsl_distribution()
+    distribution = addon_links_wsl_distribution(path.parent)
     if distribution is not None:
         run_wsl_script(
             distribution, 'rm -rf -- "$1"', [wsl_entry_path(path, distribution)],
@@ -3178,7 +3204,7 @@ def remove_module_entry(path):
 
 
 def move_module_entry(source, destination):
-    distribution = addon_links_wsl_distribution()
+    distribution = addon_links_wsl_distribution(source.parent, destination.parent)
     if distribution is None:
         shutil.move(str(source), str(destination))
         return
@@ -3454,6 +3480,64 @@ def repair_enterprise_links_job(job, project):
     job.add("Vérification des liens symboliques Enterprise terminée.")
 
 
+def wsl_link_parents(project):
+    """Dossiers d'addons qui contiennent des liens WSL ou une conversion interrompue."""
+    return [
+        parent
+        for parent in module_parent_candidates(project)
+        if contains_wsl_symlink(parent) or (parent / MIGRATION_JOURNAL_NAME).is_file()
+    ]
+
+
+def addon_links_snapshot(project):
+    """État des liens d'addons hérités de WSL, pour proposer leur conversion."""
+    project = validate_project(project)
+    if platform_id() != "windows" or active_workspace_wsl_context():
+        return {"supported": False, "wsl_links": 0, "interrupted": False, "native_symlinks": True}
+    parents = wsl_link_parents(project)
+    return {
+        "supported": True,
+        "wsl_links": sum(len(wsl_symlinks(parent)) for parent in parents),
+        "interrupted": any((parent / MIGRATION_JOURNAL_NAME).is_file() for parent in parents),
+        "native_symlinks": all(native_symlinks_supported(parent) for parent in parents),
+    }
+
+
+def convert_wsl_addon_links_job(job, project):
+    project = validate_project(project)
+    if platform_id() != "windows":
+        raise RuntimeError("La conversion des liens WSL ne concerne que Windows.")
+    if active_workspace_wsl_context():
+        raise RuntimeError("Le dossier des projets est dans WSL : ses liens Linux sont attendus et restent inchangés.")
+    parents = wsl_link_parents(project)
+    if not parents:
+        job.add("Aucun lien WSL à convertir : les modules sont déjà lus directement par Windows.")
+        return
+    if container_status(f"odoo-{project}") == "running":
+        raise RuntimeError("Arrête le projet avant de convertir ses liens : Odoo lit ces dossiers pendant son exécution.")
+    if not all(native_symlinks_supported(parent) for parent in parents):
+        raise RuntimeError(
+            "Windows refuse la création de liens symboliques. Active le mode développeur "
+            "(Paramètres > Système > Espace développeurs), puis relance la conversion."
+        )
+
+    converted = 0
+    problems = []
+    for parent in parents:
+        job.add(f"Conversion des liens WSL de {parent}...")
+        result = convert_wsl_symlinks(parent, log=job.add)
+        converted += result["converted"]
+        problems.extend(f"{name} : {reason}" for name, reason in (*result["skipped"], *result["failures"]))
+    clear_project_module_cache(project)
+    job.add(f"{converted} lien(s) converti(s) en liens Windows relatifs, lisibles par Windows et par Docker.")
+    if problems:
+        raise RuntimeError(
+            f"{len(problems)} lien(s) non converti(s), relance la conversion après vérification : "
+            + " ; ".join(problems[:10]) + (" …" if len(problems) > 10 else "")
+        )
+    job.add("La liste des modules est désormais lue directement par Windows, sans WSL.")
+
+
 def read_manifest_dict(path):
     # Odoo lit lui-même le manifeste avec ast.literal_eval : même règle ici.
     for filename in ("__manifest__.py", "__openerp__.py"):
@@ -3550,7 +3634,7 @@ def wsl_module_graph(project):
 def project_module_graph(project):
     if active_workspace_wsl_context():
         return wsl_module_graph(project)
-    if platform_id() == "windows" and wsl_shell_available(SETTINGS.wsl_distribution):
+    if project_reads_modules_through_wsl(project):
         try:
             return wsl_module_graph(project)
         except RuntimeError:
@@ -4796,6 +4880,11 @@ class Handler(BaseHTTPRequestHandler):
                     validate_db(db_name)
                 return json_response(self, {"modules": modules_for(project, db_name)})
 
+            match = re.match(r"^/api/projects/([^/]+)/addon-links$", path)
+            if match:
+                project = urllib.parse.unquote(match.group(1))
+                return json_response(self, addon_links_snapshot(project))
+
             match = re.match(r"^/api/projects/([^/]+)/languages$", path)
             if match:
                 project = validate_project(urllib.parse.unquote(match.group(1)))
@@ -5412,6 +5501,14 @@ class Handler(BaseHTTPRequestHandler):
                 job = Job(
                     f"Vérifier les liens Enterprise de {project}",
                     repair_enterprise_links_job,
+                    (project,),
+                    project=project,
+                )
+            elif action == "convert_wsl_addon_links":
+                project = validate_project(payload.get("project", ""))
+                job = Job(
+                    f"Convertir les liens WSL de {project}",
+                    convert_wsl_addon_links_job,
                     (project,),
                     project=project,
                 )

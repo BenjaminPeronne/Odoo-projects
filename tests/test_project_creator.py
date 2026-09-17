@@ -267,6 +267,8 @@ class ProjectCreatorTests(unittest.TestCase):
             ],
         )
 
+    # Mode développeur désactivé : Windows refuse les liens natifs.
+    @mock.patch("odoo_manager_core.project_creator.native_symlinks_supported", return_value=False)
     @mock.patch("odoo_manager_core.project_creator.wsl_execution_path", return_value="/mnt/c/Odoo/DEMO/odoo/addons")
     @mock.patch("odoo_manager_core.project_creator.host_executable_available", return_value=True)
     @mock.patch("odoo_manager_core.project_creator.platform_id", return_value="windows")
@@ -275,6 +277,7 @@ class ProjectCreatorTests(unittest.TestCase):
         _platform,
         _wsl_available,
         _wsl_execution_path,
+        _native_links_refused,
     ):
         project = self.workspace / "DEMO"
         source = project / "odoo" / "addons-store" / "custom"

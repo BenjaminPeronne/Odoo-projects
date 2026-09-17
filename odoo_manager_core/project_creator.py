@@ -23,6 +23,7 @@ from .platform import (
     find_wsl_executable_distribution,
     wsl_execution_path,
 )
+from .windows_links import contains_wsl_symlink, native_symlinks_supported
 
 
 SUPPORTED_ODOO_VERSIONS = ("15.0", "16.0", "17.0", "18.0", "19.0")
@@ -275,17 +276,35 @@ class ProjectCreator:
                 return None
         return False
 
+    def wsl_workspace_links(self):
+        return bool(self.wsl_context or self.settings.execution_mode == "wsl")
+
+    def creates_links_with_wsl(self, addons_dir):
+        """Native relative links are read by Windows and followed by Docker Desktop.
+
+        WSL links remain for a WSL workspace, a folder that already holds WSL
+        links, or when Windows refuses native links (Developer Mode disabled).
+        """
+        if platform_id() != "windows":
+            return False
+        return (
+            self.wsl_workspace_links()
+            or contains_wsl_symlink(addons_dir)
+            or not native_symlinks_supported(addons_dir)
+        )
+
     def wsl_link_paths(self, candidates, addons_dir):
-        """Mirror link_modules: on Windows, WSL creates the links whenever it can translate their paths.
+        """Mirror link_modules: links created by WSL must be inspected from WSL.
 
         Those WSL symlinks are unreadable from Windows Python (WinError 1920) and
-        look like foreign entries, so they must be inspected from WSL as well.
-        Returns None when the links were created natively, e.g. wsl.exe without
-        any installed distribution.
+        look like foreign entries. Returns None when the links are native, e.g.
+        with Developer Mode or wsl.exe without any installed distribution.
         """
         if platform_id() != "windows":
             return None
-        wsl_required = bool(self.wsl_context or self.settings.execution_mode == "wsl")
+        wsl_required = self.wsl_workspace_links()
+        if not wsl_required and not self.creates_links_with_wsl(addons_dir):
+            return None
         if not wsl_required and not host_executable_available("wsl.exe"):
             return None
         distribution = self.wsl_context.distribution if self.wsl_context else self.settings.wsl_distribution
@@ -409,7 +428,7 @@ class ProjectCreator:
             self.log(log, f"Nettoyage différé requis pour le dossier temporaire: {path}")
 
     def link_modules_batch_via_wsl(self, modules, addons_dir, log=None, replace=False):
-        if platform_id() != "windows" or not host_executable_available("wsl.exe"):
+        if not self.creates_links_with_wsl(addons_dir) or not host_executable_available("wsl.exe"):
             return None
 
         distribution = self.wsl_context.distribution if self.wsl_context else self.settings.wsl_distribution

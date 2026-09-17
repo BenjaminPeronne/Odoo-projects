@@ -332,7 +332,7 @@ sh scripts/macos_allow_private_build.sh
 | « Service local indisponible » | Le backend n'a pas démarré ou le port est pris : consulter `backend.log` dans le dossier des journaux. |
 | Docker signalé arrêté | Lancer Docker Desktop (bouton **Ouvrir Docker**) puis **Actualiser**. |
 | Échec du clonage GitLab | Vérifier que la clé SSH publique est enregistrée sur GitLab et que le port `10022` est joignable. Sous Windows, préférer un chemin court (ex. `C:\Odoo`). |
-| Liens d'addons illisibles sous Windows (`WinError 1920`) | Liens créés par WSL : ils fonctionnent dans Docker et sont vérifiés via WSL. S'assurer que WSL 2 démarre correctement. |
+| Liens d'addons illisibles sous Windows (`WinError 1920`), liste des modules très lente | Liens créés par WSL par une ancienne version, sans le mode développeur. Un bandeau propose **Convertir les liens** dans le projet : activer le mode développeur Windows (Paramètres > Système > Espace développeurs), arrêter le projet, puis convertir. Les liens deviennent des liens Windows relatifs, lus par Windows et par Docker ; une conversion interrompue se reprend depuis le même bandeau. |
 | `Bad Gateway` à l'ouverture d'Odoo | Odoo s'initialise encore (jusqu'à plusieurs minutes sur un disque Windows) : suivre les logs du projet. |
 
 Le journal des erreurs de l'application regroupe les erreurs de l'interface, de l'API et des tâches, avec leur trace.

@@ -135,12 +135,14 @@ class ModuleLayoutTests(unittest.TestCase):
             web.WORKSPACE = self.root
             web.clear_project_module_cache(self.project)
 
+    # Liens WSL hérités d'une ancienne version : Windows ne peut pas les lire.
+    @mock.patch("odoo_manager_web.contains_wsl_symlink", return_value=True)
     @mock.patch("odoo_manager_web.platform_id", return_value="windows")
     @mock.patch("odoo_manager_web.wsl_executable_available", return_value=True)
     @mock.patch("odoo_manager_web.wsl_execution_path")
     @mock.patch("odoo_manager_web.run_capture")
     def test_native_windows_workspace_resolves_wsl_links_inside_wsl(
-        self, run_capture, execution_path, _wsl_available, _platform
+        self, run_capture, execution_path, _wsl_available, _platform, _legacy_wsl_links
     ):
         linux_root = "/mnt/c/Users/demo/Odoo-projects/TEST_PROJECT"
 

@@ -113,6 +113,14 @@ type TraefikStatus = {
   can_start: boolean;
 };
 
+// Liens de odoo/addons créés par WSL dans les anciennes versions Windows.
+type AddonLinksStatus = {
+  supported: boolean;
+  wsl_links: number;
+  interrupted: boolean;
+  native_symlinks: boolean;
+};
+
 type SystemStatus = {
   docker: DockerStatus;
   traefik?: TraefikStatus;
@@ -957,6 +965,7 @@ function SettingsGroup({ className, ...props }: HTMLAttributes<HTMLDivElement>) 
 export default function Home() {
   const [overview, setOverview] = useState<Overview | null>(null);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
+  const [addonLinks, setAddonLinks] = useState<AddonLinksStatus | null>(null);
   const [settings, setSettings] = useState<ManagerSettings | null>(null);
   const [settingsDraft, setSettingsDraft] = useState<ManagerSettings | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -1625,6 +1634,26 @@ export default function Home() {
     selectedJobIdRef.current = selectedJobId;
   }, [selectedJobId]);
 
+  const refreshAddonLinks = useCallback(async () => {
+    const projectName = selectedProject?.name;
+    if (!projectName) {
+      setAddonLinks(null);
+      return;
+    }
+    try {
+      const payload = await api<AddonLinksStatus>(`/api/projects/${encodeURIComponent(projectName)}/addon-links`);
+      setAddonLinks(payload);
+    } catch {
+      // Contrôle informatif : son échec ne doit pas bloquer l'ouverture du projet.
+      setAddonLinks(null);
+    }
+  }, [selectedProject?.name]);
+
+  useEffect(() => {
+    setAddonLinks(null);
+    void refreshAddonLinks();
+  }, [refreshAddonLinks]);
+
   const refreshModules = useCallback(async () => {
     const projectName = selectedProject?.name;
     const generation = ++modulesRequestGeneration.current;
@@ -1659,8 +1688,8 @@ export default function Home() {
       .join("|");
     if (!completionKey || completionKey === lastSynchronizedJobCompletion.current) return;
     lastSynchronizedJobCompletion.current = completionKey;
-    void Promise.all([refreshOverview(), refreshModules()]);
-  }, [jobs, refreshModules, refreshOverview, selectedProject?.name]);
+    void Promise.all([refreshOverview(), refreshModules(), refreshAddonLinks()]);
+  }, [jobs, refreshAddonLinks, refreshModules, refreshOverview, selectedProject?.name]);
 
   useEffect(() => () => {
     for (const timeout of scheduledTimeouts.current) window.clearTimeout(timeout);
@@ -1873,6 +1902,12 @@ export default function Home() {
       setActiveTab("logs");
       schedule(refreshModules, 2500);
     }
+  }
+
+  async function convertWslAddonLinks() {
+    if (!selectedProject) return;
+    const job = await createJob("convert_wsl_addon_links", { project: selectedProject.name });
+    if (job) setActiveTab("logs");
   }
 
   async function repairEnterpriseLinks() {
@@ -3677,6 +3712,45 @@ export default function Home() {
                   <Button className="w-full sm:w-auto" size="sm" variant="outline" onClick={openSettingsDialog}>
                     <Settings className="h-4 w-4" />
                     Paramètres
+                  </Button>
+                </div>
+              </div>
+            )}
+            {selectedProject && addonLinks?.supported && (addonLinks.wsl_links > 0 || addonLinks.interrupted) && (
+              <div className="mb-4 flex flex-col gap-3 border-y border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/45 dark:text-amber-100 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex min-w-0 items-start gap-3">
+                  <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
+                  <div className="min-w-0">
+                    <div className="font-semibold">
+                      {addonLinks.interrupted ? "Conversion des liens d’addons interrompue" : "Liens d’addons créés par une ancienne version"}
+                    </div>
+                    <div className="mt-0.5 break-words text-amber-800 dark:text-amber-200">
+                      {addonLinks.interrupted
+                        ? "Relance la conversion pour la terminer : certains modules peuvent être absents tant qu’elle n’est pas achevée."
+                        : `${addonLinks.wsl_links} lien(s) de ce projet ont été créés par WSL. Windows ne peut pas les lire, ce qui ralentit fortement la liste des modules. La conversion les remplace par des liens Windows identiques, lus par Windows et par Docker.`}
+                    </div>
+                    {!addonLinks.native_symlinks && (
+                      <div className="mt-1 text-xs text-amber-700 dark:text-amber-300">
+                        Active d’abord le mode développeur Windows : Paramètres &gt; Système &gt; Espace développeurs.
+                      </div>
+                    )}
+                    {addonLinks.native_symlinks && selectedProjectOnline && (
+                      <div className="mt-1 text-xs text-amber-700 dark:text-amber-300">Arrête le projet avant la conversion.</div>
+                    )}
+                  </div>
+                </div>
+                <div className="flex shrink-0 flex-col gap-2 sm:flex-row">
+                  <Button
+                    className="w-full sm:w-auto"
+                    size="sm"
+                    disabled={loading || !addonLinks.native_symlinks || selectedProjectOnline}
+                    onClick={convertWslAddonLinks}
+                  >
+                    {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
+                    {addonLinks.interrupted ? "Reprendre la conversion" : "Convertir les liens"}
+                  </Button>
+                  <Button className="w-full sm:w-auto" size="sm" variant="outline" onClick={() => void refreshAddonLinks()}>
+                    Vérifier à nouveau
                   </Button>
                 </div>
               </div>
