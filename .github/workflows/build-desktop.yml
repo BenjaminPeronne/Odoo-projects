@@ -13,6 +13,7 @@ permissions:
 jobs:
   build:
     name: ${{ matrix.artifact }}
+    needs: wsl-image
     runs-on: ${{ matrix.platform }}
     env:
       PYTHONIOENCODING: utf-8
@@ -61,6 +62,12 @@ jobs:
         run: npm ci
       - name: Install sidecar builder
         run: python -m pip install pyinstaller
+      - name: Download the Linux runtime embedded in the Windows installer
+        if: runner.os == 'Windows'
+        uses: actions/download-artifact@v6
+        with:
+          name: sdk-manager-linux-runtime
+          path: odoo-manager-next/electron/binaries
       - name: Run backend tests
         run: python -m unittest discover -s tests -v
       - name: Build native backend and Electron installer
@@ -86,7 +93,7 @@ jobs:
           if-no-files-found: error
 
   wsl-image:
-    name: sdk-manager-wsl-image
+    name: sdk-manager-linux-runtime
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v5
@@ -97,22 +104,31 @@ jobs:
         run: python -m unittest tests.test_wsl_image -v
       - name: Build the WSL distribution image
         run: python scripts/build_wsl_image.py
-      - name: Check that the image boots and runs Docker
+      - name: Check the built image
         run: |
           set -euxo pipefail
           version=$(python -c "import json,pathlib;print(json.loads(pathlib.Path('odoo-manager-next/package.json').read_text())['version'])")
           archive="dist/wsl/sdk-manager-${version}.wsl"
           (cd dist/wsl && sha256sum -c "sdk-manager-${version}.wsl.sha256")
-          # Le noyau WSL manque au runner : on vérifie ce qui l'est sans lui, dans l'archive elle-même.
+          # Le noyau WSL manque au runner : le contenu est vérifié dans l'archive elle-même.
           tar -tf "$archive" etc/wsl.conf etc/docker/daemon.json opt/sdk-manager/provision.sh usr/bin/dockerd usr/bin/git > /dev/null
           tar -xOf "$archive" etc/sdk-manager-release | grep -Fx "$version"
           tar -xOf "$archive" etc/wsl.conf | grep -F "systemd = true"
-      - name: Upload the WSL distribution image
+      - name: Build the Linux backend that runs inside the distribution
+        run: |
+          set -euxo pipefail
+          python -m pip install pyinstaller
+          python scripts/build_electron_sidecar.py --clean
+      - name: Lay out the runtime as the Windows installer expects it
+        run: |
+          set -euxo pipefail
+          mkdir -p runtime/wsl runtime/backend-linux
+          cp dist/wsl/*.wsl dist/wsl/*.sha256 runtime/wsl/
+          cp odoo-manager-next/electron/binaries/odoo-manager-backend runtime/backend-linux/
+      - name: Upload the Linux runtime
         uses: actions/upload-artifact@v6
         with:
-          name: sdk-manager-wsl-image
-          path: |
-            dist/wsl/*.wsl
-            dist/wsl/*.sha256
+          name: sdk-manager-linux-runtime
+          path: runtime/**
           retention-days: 1
           if-no-files-found: error

@@ -66,9 +66,13 @@ function contentPolicy(html, endpoint) {
 }
 
 class Backend {
-  constructor({ executable, args = [], logDir, env = process.env }) {
+  // `command` remplace executable/args quand le backend tourne ailleurs que sur
+  // Windows : dans la distribution WSL, la commande dépend du port retenu.
+  constructor({ executable, args = [], logDir, env = process.env, command = null, preferredPort = null }) {
     this.executable = executable;
     this.args = args;
+    this.command = command;
+    this.preferredPort = preferredPort;
     this.logDir = logDir;
     this.logPath = path.join(logDir, 'backend.log');
     this.env = env;
@@ -85,12 +89,13 @@ class Backend {
       fs.rmSync(path.join(this.logDir, 'backend.previous.log'), { force: true });
       fs.renameSync(this.logPath, path.join(this.logDir, 'backend.previous.log'));
     }
-    this.port = await selectPort(configuredPort(this.env));
+    this.port = await selectPort(this.preferredPort || configuredPort(this.env));
     this.endpoint = `http://127.0.0.1:${this.port}`;
     this.log(`\n=== SDK Local Manager Electron · ${new Date().toISOString()} · ${this.endpoint} ===`);
     const fd = fs.openSync(this.logPath, 'a');
     try {
-      this.child = spawn(this.executable, this.args, {
+      const target = this.command ? this.command(this.port, this.instance) : { executable: this.executable, args: this.args };
+      this.child = spawn(target.executable, target.args, {
         env: { ...this.env, ODOO_GUI_HOST: '127.0.0.1', ODOO_GUI_PORT: String(this.port),
           ODOO_MANAGER_LOG_DIR: this.logDir, ODOO_MANAGER_INSTANCE_ID: this.instance },
         windowsHide: true, stdio: ['ignore', fd, fd],

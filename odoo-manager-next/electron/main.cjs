@@ -6,6 +6,7 @@ const { spawn } = require('node:child_process');
 const { APP_ORIGIN, Backend, externalUrl, staticPath, contentPolicy } = require('./runtime.cjs');
 const { CredentialStore } = require('./credentials.cjs');
 const { GitLabClient } = require('./gitlab.cjs');
+const { LINUX_WORKSPACE, WslEnvironment, imageFiles } = require('./wsl.cjs');
 
 app.setName('SDK Local Manager');
 app.setAppUserModelId('com.sudokeys.odoo-manager');
@@ -18,8 +19,32 @@ if (smokePath && !process.env.ODOO_MANAGER_CONFIG_DIR) throw new Error('Le smoke
 if (smokePath) app.setPath('userData', path.join(process.env.ODOO_MANAGER_CONFIG_DIR, 'electron'));
 let window;
 let backend;
+let wsl;
 let quitting = false;
 const notifications = new Set();
+
+function wslResources() {
+  const root = app.isPackaged ? process.resourcesPath : path.join(app.getAppPath(), 'electron/binaries');
+  return {
+    ...imageFiles(root, app.getVersion()),
+    backendSource: path.join(root, 'backend-linux', 'odoo-manager-backend'),
+  };
+}
+
+/** Prépare l'environnement Linux pour la version courante, puis dit si le backend peut y tourner. */
+async function prepareWslEnvironment() {
+  const resources = wslResources();
+  const state = await wsl.prepare({ version: app.getVersion(), ...resources });
+  return state;
+}
+
+// Même règle que PROJECT_NAME_RE côté backend : l'interface ne peut pas fabriquer un chemin.
+const PROJECT_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/;
+
+function projectName(value) {
+  if (typeof value !== 'string' || !PROJECT_NAME.test(value)) throw new Error('Nom de projet invalide.');
+  return value;
+}
 
 function run(command, args) {
   return new Promise((resolve, reject) => {
@@ -57,6 +82,11 @@ function installHandlers() {
   handle('backend-diagnostics', () => backend.diagnostics());
   handle('open-external', url => shell.openExternal(externalUrl(url)));
   handle('open-docker', openDocker);
+  handle('wsl-status', () => (wsl ? wsl.status() : { wslInstalled: false, distributionInstalled: false, supported: false }));
+  handle('wsl-install-wsl', () => (wsl ? wsl.installWsl() : { ok: false, message: 'Windows uniquement.' }));
+  handle('wsl-prepare', () => prepareWslEnvironment());
+  handle('wsl-open-editor', project => wsl.openEditor(`${LINUX_WORKSPACE}/${projectName(project)}`));
+  handle('wsl-open-explorer', project => shell.openPath(wsl.explorerPath(`${LINUX_WORKSPACE}/${projectName(project)}`)));
   handle('pick-directory', async defaultPath => {
     if (defaultPath !== undefined && (typeof defaultPath !== 'string' || defaultPath.length > 32768)) throw new Error('Chemin invalide.');
     const result = await dialog.showOpenDialog(window, {
@@ -93,10 +123,25 @@ async function start() {
   const root = app.getAppPath();
   const out = path.join(root, 'out');
   const binaryRoot = app.isPackaged ? path.join(process.resourcesPath, 'backend') : path.join(root, 'electron/binaries');
-  backend = new Backend({
+  const logDir = process.env.ODOO_MANAGER_LOG_DIR || app.getPath('logs');
+  const options = {
     executable: path.join(binaryRoot, 'odoo-manager-backend' + (process.platform === 'win32' ? '.exe' : '')),
-    logDir: process.env.ODOO_MANAGER_LOG_DIR || app.getPath('logs'),
-  });
+    logDir,
+  };
+  if (process.platform === 'win32') {
+    wsl = new WslEnvironment({
+      installRoot: path.join(app.getPath('userData'), 'wsl'),
+      log: message => fs.appendFileSync(path.join(logDir, 'backend.log'), message + '\n'),
+    });
+    const state = await wsl.status().catch(() => null);
+    // L'environnement Linux sert dès qu'il est installé ; sinon le backend Windows
+    // prend le relais, et l'interface propose de préparer le poste.
+    if (state?.distributionInstalled) {
+      options.command = (port, instance) => wsl.backendCommand(port, instance);
+      options.preferredPort = 18765;
+    }
+  }
+  backend = new Backend(options);
   try { await backend.start(); } catch (error) {
     backend.log(error.stack || error.message);
     // Keep the existing frontend's diagnostics and recovery screen available.

@@ -64,6 +64,9 @@ def main():
         targets = builder_arguments(args.bundles or default_bundles())
     except ValueError as error:
         raise SystemExit(str(error)) from error
+    # Ressources de l'environnement WSL : présentes ou non, electron-builder doit les trouver.
+    for directory in ("wsl", "backend-linux"):
+        (FRONTEND / "electron" / "binaries" / directory).mkdir(parents=True, exist_ok=True)
     sidecar = [sys.executable, str(ROOT / "scripts/build_electron_sidecar.py")]
     if not args.no_clean:
         sidecar.append("--clean")
