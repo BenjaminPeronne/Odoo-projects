@@ -1688,6 +1688,21 @@ def module_layout_context(project):
     )
 
 
+def module_parent_in_layout(project, path, layout):
+    """Parent résolu d'un module sans relancer la résolution des dossiers déjà résolus du contexte.
+
+    Sous Windows, chaque résolution coûte un appel système (GetFinalPathNameByHandle) :
+    la refaire pour le parent commun de ~1 400 modules doublait le temps de la liste.
+    """
+    link_parent, storage_parent, legacy_storage_parent, _imports_roots = layout
+    known = {
+        project_addons_link_parent(project): link_parent,
+        project_addons_storage_parent(project): storage_parent,
+        project_legacy_addons_storage_parent(project): legacy_storage_parent,
+    }
+    return known.get(path.parent) or safe_resolve(path.parent)
+
+
 def module_location_info(project, path, layout=None):
     metadata = WSL_MODULE_METADATA.get(str(path).casefold())
     if metadata:
@@ -1695,8 +1710,9 @@ def module_location_info(project, path, layout=None):
             key: metadata[key]
             for key in ("path", "link_path", "source_path", "path_kind")
         }
-    link_parent, storage_parent, legacy_storage_parent, imports_roots = layout or module_layout_context(project)
-    parent = safe_resolve(path.parent)
+    layout = layout or module_layout_context(project)
+    link_parent, storage_parent, legacy_storage_parent, imports_roots = layout
+    parent = module_parent_in_layout(project, path, layout)
     source_path = safe_resolve(path) if path.is_symlink() else path
 
     link_path = ""
@@ -1711,9 +1727,10 @@ def module_location_info(project, path, layout=None):
             pass
 
     if parent == link_parent and path.is_symlink():
-        if path_is_direct_child_of(source_path, storage_parent):
+        # source_path et les dossiers du contexte sont déjà résolus.
+        if source_path.parent == storage_parent:
             kind = "lien vers addons-store"
-        elif path_is_direct_child_of(source_path, legacy_storage_parent):
+        elif source_path.parent == legacy_storage_parent:
             kind = "lien vers ancien stockage"
         elif any(path_is_relative_to(source_path, root) for root in imports_roots):
             kind = "lien vers import outil"
@@ -1783,8 +1800,9 @@ def module_removal_info(project, path, layout=None):
             key: metadata[key]
             for key in ("removable", "removal_mode", "removal_note")
         }
-    link_parent, storage_parent, legacy_storage_parent, imports_roots = layout or module_layout_context(project)
-    parent = safe_resolve(path.parent)
+    layout = layout or module_layout_context(project)
+    link_parent, storage_parent, legacy_storage_parent, imports_roots = layout
+    parent = module_parent_in_layout(project, path, layout)
 
     if parent != link_parent:
         if parent == storage_parent:
@@ -1806,14 +1824,15 @@ def module_removal_info(project, path, layout=None):
         }
 
     if path.is_symlink():
+        # La cible est résolue à chaque lecture ; les dossiers du contexte le sont déjà.
         target = safe_resolve(path)
-        if path_is_direct_child_of(target, storage_parent):
+        if target.parent == storage_parent:
             return {
                 "removable": True,
                 "removal_mode": "link_and_storage",
                 "removal_note": "Supprime le lien odoo/addons et le dossier dans odoo/addons-store.",
             }
-        if path_is_direct_child_of(target, legacy_storage_parent):
+        if target.parent == legacy_storage_parent:
             return {
                 "removable": True,
                 "removal_mode": "link_and_legacy_storage",
