@@ -45,7 +45,7 @@ class SimulatedWindows:
         self.commands.append(command)
         text = kwargs.get("text") or kwargs.get("encoding")
         stdout = ""
-        if "info" in command and "{{json .ServerVersion}}" in command:
+        if "version" in command and "{{json .Server.Version}}" in command:
             stdout = '"29.5.3"\n'
         elif "--version" in command:
             stdout = "git version 2.55.0\n" if any("git" in part for part in command[:4]) else "Docker version 29.5.3\n"

@@ -226,8 +226,10 @@ def docker_status(settings, timeout=6):
             env = os.environ.copy()
             env["PATH"] = executable_search_path()
             try:
+                # `docker version` interroge le moteur comme `docker info`, sans lancer chaque
+                # plugin CLI (14 processus avec Docker Desktop) : 200 ms au lieu de 560 ms.
                 result = subprocess.run(
-                    [*backend.command, "info", "--format", "{{json .ServerVersion}}"],
+                    [*backend.command, "version", "--format", "{{json .Server.Version}}"],
                     capture_output=True,
                     text=True,
                     encoding="utf-8",

@@ -111,7 +111,7 @@ class DockerStatusTests(unittest.TestCase):
         self.assertEqual(status["state"], "ready")
         self.assertEqual(status["backend"], "native")
         commands = [call.args[0] for call in run.call_args_list]
-        self.assertEqual([[r"C:\Docker\docker.exe", "info", "--format", "{{json .ServerVersion}}"]], commands)
+        self.assertEqual([[r"C:\Docker\docker.exe", "version", "--format", "{{json .Server.Version}}"]], commands)
 
     @mock.patch("odoo_manager_core.system.resolve_host_executable", return_value=r"C:\Docker\docker.exe")
     @mock.patch("odoo_manager_core.system.host_executable_available", return_value=True)
