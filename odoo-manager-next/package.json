@@ -37,7 +37,7 @@
     "typescript": "^5.7.2"
   },
   "main": "electron/main.cjs",
-  "homepage": "https://github.com/BenjaminPeronne/Odoo-projects",
+  "homepage": "https://github.com/BenjaminPeronne/SDK-Local-Manager",
   "desktopName": "com.sudokeys.odoo-manager.desktop",
   "description": "Gestionnaire local des projets Odoo Sudokeys",
   "author": {

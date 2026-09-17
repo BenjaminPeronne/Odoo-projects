@@ -1,5 +1,7 @@
 # SDK Local Manager — Odoo Manager
 
+Dépôt : [BenjaminPeronne/SDK-Local-Manager](https://github.com/BenjaminPeronne/SDK-Local-Manager)
+
 Application de bureau Sudokeys pour gérer les environnements **Odoo locaux** sous Docker : créer un projet, le démarrer, gérer ses bases et ses modules, sans passer par le terminal.
 
 Elle fonctionne sous **macOS**, **Windows 10/11** (Docker Desktop, avec WSL 2 appelé automatiquement quand il le faut) et **Linux**.
@@ -146,7 +148,7 @@ flowchart LR
 ## Structure du dépôt
 
 ```text
-Odoo-Manager/
+SDK-Local-Manager/
 ├── odoo_manager_web.py          # Backend : API HTTP, tâches, projets, bases, modules
 ├── odoo_manager_runtime.py      # Initialisation des flux et journaux du backend empaqueté
 ├── odoo_manager_core/           # Logique métier réutilisable
@@ -196,6 +198,12 @@ Odoo-Manager/
 Installer le paquet correspondant au système (`.dmg`, `.exe`, `.deb` ou `.AppImage`) puis lancer **SDK Local Manager**.
 
 ### Environnement de développement
+
+Cloner le dépôt :
+
+```bash
+git clone https://github.com/BenjaminPeronne/SDK-Local-Manager.git && cd SDK-Local-Manager
+```
 
 Installer les dépendances du frontend :
 
