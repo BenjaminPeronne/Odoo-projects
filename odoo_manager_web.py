@@ -24,6 +24,7 @@ import urllib.error
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PureWindowsPath
+from typing import NamedTuple
 
 from odoo_manager_runtime import initialize_runtime_streams
 
@@ -58,6 +59,7 @@ from odoo_manager_core.platform import (
 )
 from odoo_manager_core.project_creator import (
     SUPPORTED_ODOO_VERSIONS,
+    abandoned_staging_entries,
     validate_git_ref,
     validate_gitlab_repository,
     validate_new_project_name,
@@ -65,7 +67,13 @@ from odoo_manager_core.project_creator import (
 )
 from odoo_manager_core.project_service import terminate_active_processes as terminate_project_processes
 from odoo_manager_core.odoo_log_display import OdooLogDisplay, compact_odoo_log_text
-from odoo_manager_core.system import docker_command, reset_docker_backend_cache, shell_command
+from odoo_manager_core.docker_api import EngineUnavailable
+from odoo_manager_core.system import (
+    active_engine_client,
+    docker_command,
+    reset_docker_backend_cache,
+    shell_command,
+)
 from odoo_manager_core.windows_links import (
     MIGRATION_JOURNAL_NAME,
     contains_wsl_symlink,
@@ -637,6 +645,16 @@ def traefik_status(docker=None):
     }
 
 
+def abandoned_staging_snapshot():
+    """Dossiers de créations interrompues, proposés au nettoyage par l'interface."""
+    entries = abandoned_staging_entries(WORKSPACE)
+    return {
+        "count": len(entries),
+        "names": [entry["name"] for entry in entries[:20]],
+        "oldest_modified_at": min((entry["modified_at"] for entry in entries), default=0),
+    }
+
+
 def system_status_snapshot(docker=None):
     docker = docker or docker_status(SETTINGS)
     return {
@@ -644,6 +662,7 @@ def system_status_snapshot(docker=None):
         "traefik": traefik_status(docker),
         "workspace": str(WORKSPACE),
         "workspace_exists": safe_path_is_dir(WORKSPACE),
+        "abandoned_staging": abandoned_staging_snapshot(),
     }
 
 
@@ -1007,16 +1026,34 @@ def install_git(job):
 
 
 def container_status(name):
+    detected = container_states_via_api()
+    if detected is not None:
+        return detected.get(name, "absent")
     code, output = run_capture(docker_command(SETTINGS, "inspect", "-f", "{{.State.Status}}", name), timeout=5)
     if code != 0 or not output:
         return "absent"
     return output.splitlines()[0].strip()
 
 
+def container_states_via_api():
+    """États des conteneurs par l'API du moteur, ou None pour repasser par la CLI."""
+    client = active_engine_client(SETTINGS)
+    if client is None:
+        return None
+    try:
+        return client.container_states()
+    except EngineUnavailable:
+        return None
+
+
 def container_statuses(names):
     names = tuple(names)
     if not names:
         return {}
+    # La boucle d'événements relit ces états toutes les 2 s : 8 ms par l'API contre 150 ms par la CLI.
+    detected = container_states_via_api()
+    if detected is not None:
+        return {name: detected.get(name, "absent") for name in names}
     code, output = run_capture(
         docker_command(SETTINGS, "ps", "-a", "--format", "{{.Names}}|{{.State}}"),
         timeout=8,
@@ -1696,14 +1733,31 @@ def safe_resolve(path):
         return path.absolute()
 
 
+class ModuleLayout(NamedTuple):
+    link_parent: Path
+    storage_parent: Path
+    legacy_storage_parent: Path
+    imports_roots: tuple
+    # Parents déjà résolus, indexés par leur chemin d'origine : reconstruire ces
+    # trois Path pour chacun des ~1 400 modules coûtait 0,25 s par liste.
+    resolved_parents: dict
+
+
 def module_layout_context(project):
     # Shared only within one listing: never reuse filesystem safety checks
     # across requests or destructive operations.
-    return (
-        safe_resolve(project_addons_link_parent(project)),
-        safe_resolve(project_addons_storage_parent(project)),
-        safe_resolve(project_legacy_addons_storage_parent(project)),
+    link_parent = project_addons_link_parent(project)
+    storage_parent = project_addons_storage_parent(project)
+    legacy_storage_parent = project_legacy_addons_storage_parent(project)
+    resolved = (
+        safe_resolve(link_parent),
+        safe_resolve(storage_parent),
+        safe_resolve(legacy_storage_parent),
+    )
+    return ModuleLayout(
+        *resolved,
         module_import_roots(project),
+        dict(zip((link_parent, storage_parent, legacy_storage_parent), resolved)),
     )
 
 
@@ -1713,13 +1767,7 @@ def module_parent_in_layout(project, path, layout):
     Sous Windows, chaque résolution coûte un appel système (GetFinalPathNameByHandle) :
     la refaire pour le parent commun de ~1 400 modules doublait le temps de la liste.
     """
-    link_parent, storage_parent, legacy_storage_parent, _imports_roots = layout
-    known = {
-        project_addons_link_parent(project): link_parent,
-        project_addons_storage_parent(project): storage_parent,
-        project_legacy_addons_storage_parent(project): legacy_storage_parent,
-    }
-    return known.get(path.parent) or safe_resolve(path.parent)
+    return layout.resolved_parents.get(path.parent) or safe_resolve(path.parent)
 
 
 def module_location_info(project, path, layout=None):
@@ -1730,7 +1778,7 @@ def module_location_info(project, path, layout=None):
             for key in ("path", "link_path", "source_path", "path_kind")
         }
     layout = layout or module_layout_context(project)
-    link_parent, storage_parent, legacy_storage_parent, imports_roots = layout
+    link_parent, storage_parent, legacy_storage_parent, imports_roots = layout[:4]
     parent = module_parent_in_layout(project, path, layout)
     source_path = safe_resolve(path) if path.is_symlink() else path
 
@@ -1820,7 +1868,7 @@ def module_removal_info(project, path, layout=None):
             for key in ("removable", "removal_mode", "removal_note")
         }
     layout = layout or module_layout_context(project)
-    link_parent, storage_parent, legacy_storage_parent, imports_roots = layout
+    link_parent, storage_parent, legacy_storage_parent, imports_roots = layout[:4]
     parent = module_parent_in_layout(project, path, layout)
 
     if parent != link_parent:
@@ -2031,8 +2079,10 @@ def project_diagnostics(project):
         )
         return diagnostics
 
-    odoo_status = container_status(f"odoo-{project}")
-    pg_status = container_status(f"postgresql-{project}")
+    # Un seul `docker ps` pour les deux conteneurs : chaque `docker inspect` coûte 150 ms.
+    statuses = container_statuses((f"odoo-{project}", f"postgresql-{project}"))
+    odoo_status = statuses[f"odoo-{project}"]
+    pg_status = statuses[f"postgresql-{project}"]
     diagnostics["odoo_status"] = odoo_status
     diagnostics["postgres_status"] = pg_status
     if pg_status != "running":
@@ -2047,7 +2097,8 @@ def project_diagnostics(project):
         return diagnostics
 
     available_paths = {path.name: path for path in module_dirs(project)}
-    databases = [db_name for db_name in list_databases_for(project) if db_name != "postgres"]
+    # L'état du conteneur vient d'être lu : ne pas le redemander à Docker.
+    databases = [db_name for db_name in list_databases_for(project, check_container=False) if db_name != "postgres"]
 
     for db_name in databases:
         db_info = {
@@ -2602,6 +2653,29 @@ def restore_module_update_exclusions_job(job, project, db_name, modules):
     for name in sorted(changed):
         job.add(f"- {name}: installed -> to upgrade")
     job.add("Si leur code est absent, le diagnostic les signalera de nouveau avant la mise à jour.")
+
+
+def cleanup_staging_job(job):
+    """Supprime les dossiers de créations interrompues, jamais un projet."""
+    entries = abandoned_staging_entries(WORKSPACE)
+    if not entries:
+        job.add("Aucun dossier de préparation à nettoyer.")
+        return {"removed": 0}
+
+    creator = ProjectCreator(SETTINGS, WORKSPACE, project_service())
+    free_before = shutil.disk_usage(WORKSPACE).free
+    removed = 0
+    for entry in entries:
+        path = Path(entry["path"])
+        job.add(f"Suppression de {path.name}...")
+        creator.cleanup_staging_path(path, log=job.add)
+        if path.exists():
+            job.add(f"{path.name} n'a pas pu être supprimé.")
+            continue
+        removed += 1
+    freed = max(0, shutil.disk_usage(WORKSPACE).free - free_before)
+    job.add(f"{removed} dossier(s) supprimé(s), {freed / (1024 ** 3):.1f} Go libérés.")
+    return {"removed": removed, "freed_bytes": freed}
 
 
 def install_traefik_job(job):
@@ -5456,6 +5530,8 @@ class Handler(BaseHTTPRequestHandler):
                     ),
                     project=name,
                 )
+            elif action == "cleanup_staging":
+                job = Job("Nettoyer les créations interrompues", cleanup_staging_job)
             elif action == "install_traefik":
                 job = Job("Installer Traefik", install_traefik_job)
             elif action == "install_git":

@@ -26,6 +26,11 @@ from .platform import (
 from .windows_links import contains_wsl_symlink, native_symlinks_supported
 
 
+STAGING_DIRECTORY_NAME = ".odoo_manager_staging"
+# Une création interrompue (application tuée, panne) laisse son dossier de préparation :
+# 6,8 Go relevés sur un poste. Un dossier récent peut appartenir à une création en cours.
+ABANDONED_STAGING_MIN_AGE_SECONDS = 3600
+
 SUPPORTED_ODOO_VERSIONS = ("15.0", "16.0", "17.0", "18.0", "19.0")
 ODOO_REPOSITORY = "ssh://git@gitlab.sudokeys.com:10022/sudokeys/odoo.git"
 ENTERPRISE_REPOSITORY = "ssh://git@gitlab.sudokeys.com:10022/sudokeys/odoo_entreprise.git"
@@ -38,6 +43,29 @@ SUDOKEYS_GITLAB_RE = re.compile(
     r"[A-Za-z0-9._/-]+\.git$"
 )
 RIKA_INSTANCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
+
+
+def staging_directory(workspace):
+    return Path(workspace) / STAGING_DIRECTORY_NAME
+
+
+def abandoned_staging_entries(workspace, now=None, min_age_seconds=ABANDONED_STAGING_MIN_AGE_SECONDS):
+    """Dossiers de préparation qu'aucune création en cours ne peut utiliser."""
+    now = time.time() if now is None else now
+    entries = []
+    try:
+        candidates = sorted(staging_directory(workspace).iterdir(), key=lambda item: item.name)
+    except OSError:
+        return entries
+    for entry in candidates:
+        try:
+            modified_at = entry.stat().st_mtime
+        except OSError:
+            continue
+        if now - modified_at < min_age_seconds:
+            continue
+        entries.append({"path": str(entry), "name": entry.name, "modified_at": modified_at})
+    return entries
 RIKA_BASE_URL = "https://rika.sudokeys.com/"
 MAX_RIKA_ARCHIVE_BYTES = 100 * 1024 * 1024 * 1024
 MAX_RIKA_ARCHIVE_ENTRIES = 2_000_000
@@ -710,7 +738,7 @@ class ProjectCreator:
             raise ValueError(f"Un projet nommé {name} existe déjà dans le workspace.")
 
         self.require_git()
-        staging_root = self.workspace / ".odoo_manager_staging"
+        staging_root = staging_directory(self.workspace)
         staging_root.mkdir(parents=True, exist_ok=True)
         temporary = Path(tempfile.mkdtemp(prefix=f"{name}-", dir=staging_root))
         staged_project = temporary / "project"

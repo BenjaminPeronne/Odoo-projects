@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 import zipfile
@@ -7,6 +8,8 @@ from unittest import mock
 from odoo_manager_core.config import ManagerSettings
 from odoo_manager_core.project_creator import (
     ProjectCreator,
+    abandoned_staging_entries,
+    staging_directory,
     validate_git_ref,
     validate_gitlab_repository,
     validate_new_project_name,
@@ -408,3 +411,27 @@ class ProjectCreatorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AbandonedStagingTests(unittest.TestCase):
+    """Une création interrompue laisse son dossier de préparation : 6,8 Go relevés sur un poste."""
+
+    def entries(self, ages_in_hours):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            staging = staging_directory(workspace)
+            staging.mkdir()
+            now = 1_700_000_000.0
+            for index, age in enumerate(ages_in_hours):
+                directory = staging / f"PROJET-{index}"
+                directory.mkdir()
+                (directory / "project").mkdir()
+                os.utime(directory, (now - age * 3600, now - age * 3600))
+            return [entry["name"] for entry in abandoned_staging_entries(workspace, now=now)]
+
+    def test_reports_old_directories_and_spares_a_creation_in_progress(self):
+        self.assertEqual(["PROJET-0", "PROJET-2"], self.entries([5, 0.1, 48]))
+
+    def test_workspace_without_staging_directory_reports_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual([], abandoned_staging_entries(Path(tmp)))
