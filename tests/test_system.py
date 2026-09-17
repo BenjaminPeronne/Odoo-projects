@@ -2,6 +2,7 @@ import unittest
 from unittest import mock
 
 from odoo_manager_core.config import ManagerSettings
+from odoo_manager_core.docker_api import DockerEngineClient, EngineEndpoint, EngineUnavailable
 from odoo_manager_core.system import docker_command, docker_status, reset_docker_backend_cache, shell_command
 
 
@@ -9,6 +10,10 @@ class DockerStatusTests(unittest.TestCase):
     def setUp(self):
         reset_docker_backend_cache()
         self.settings = ManagerSettings.from_dict({}, "/tmp/workspace")
+        # Ces scénarios simulent la CLI : l'API du moteur ne doit pas viser le Docker du poste.
+        patcher = mock.patch("odoo_manager_core.system.engine_endpoint", return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     @mock.patch("odoo_manager_core.system.platform_id", return_value="linux")
     @mock.patch("odoo_manager_core.system.executable_available", return_value=False)
@@ -132,6 +137,43 @@ class DockerStatusTests(unittest.TestCase):
         self.assertEqual(status["state"], "ready")
         self.assertEqual(status["backend"], "wsl")
         self.assertEqual(docker_command(self.settings, "ps")[:3], ["wsl.exe", "--exec", "docker"])
+
+
+class DockerEngineApiTests(unittest.TestCase):
+    """L'état lu par l'API évite 150 à 560 ms et deux processus par appel de la CLI."""
+
+    def setUp(self):
+        reset_docker_backend_cache()
+        self.settings = ManagerSettings.from_dict({}, "/tmp/workspace")
+
+    @mock.patch("odoo_manager_core.system.host_executable_available", return_value=True)
+    @mock.patch("odoo_manager_core.system.platform_id", return_value="windows")
+    @mock.patch("odoo_manager_core.system.resolve_host_executable", return_value=r"C:\Docker\docker.exe")
+    @mock.patch("odoo_manager_core.system.subprocess.run")
+    @mock.patch("odoo_manager_core.system.engine_endpoint", return_value=EngineEndpoint("npipe", r"\.\pipe\docker_engine"))
+    def test_status_comes_from_the_engine_api_without_running_docker(self, _endpoint, run, _resolve, _platform, _available):
+        with mock.patch.object(DockerEngineClient, "server_version", return_value="29.7.2"):
+            status = docker_status(self.settings)
+
+        self.assertEqual(("ready", True, "29.7.2"), (status["state"], status["running"], status["version"]))
+        run.assert_not_called()
+
+    @mock.patch("odoo_manager_core.system.host_executable_available", return_value=True)
+    @mock.patch("odoo_manager_core.system.platform_id", return_value="windows")
+    @mock.patch("odoo_manager_core.system.resolve_host_executable", return_value=r"C:\Docker\docker.exe")
+    @mock.patch("odoo_manager_core.system.subprocess.run")
+    @mock.patch("odoo_manager_core.system.engine_endpoint", return_value=EngineEndpoint("npipe", r"\.\pipe\docker_engine"))
+    def test_unreachable_api_falls_back_to_the_cli(self, _endpoint, run, _resolve, _platform, _available):
+        run.return_value = mock.Mock(returncode=0, stdout='"29.7.2"\n', stderr="")
+
+        with mock.patch.object(DockerEngineClient, "server_version", side_effect=EngineUnavailable("pipe absent")):
+            status = docker_status(self.settings)
+
+        self.assertEqual(("ready", "29.7.2"), (status["state"], status["version"]))
+        self.assertEqual(
+            [[r"C:\Docker\docker.exe", "version", "--format", "{{json .Server.Version}}"]],
+            [call.args[0] for call in run.call_args_list],
+        )
 
 
 if __name__ == "__main__":

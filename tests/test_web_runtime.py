@@ -565,6 +565,12 @@ class EventWatchCostTests(unittest.TestCase):
 
 
 class ContainerStatusBatchTests(unittest.TestCase):
+    def setUp(self):
+        # Scénarios de repli CLI : l'API du moteur ne doit pas viser le Docker du poste.
+        patcher = patch("odoo_manager_web.active_engine_client", return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     @patch("odoo_manager_web.run_capture")
     def test_skips_docker_probe_when_there_are_no_projects(self, run_capture):
         self.assertEqual(web.container_statuses(()), {})
@@ -581,6 +587,29 @@ class ContainerStatusBatchTests(unittest.TestCase):
             {"odoo-DEMO": "running", "postgresql-DEMO": "exited", "odoo-MISSING": "absent"},
         )
         self.assertEqual(run_capture.call_count, 1)
+
+
+class ContainerStatusEngineApiTests(unittest.TestCase):
+    """La boucle d'événements relit ces états toutes les 2 s : 8 ms par l'API contre 150 ms par la CLI."""
+
+    @patch("odoo_manager_web.run_capture")
+    @patch("odoo_manager_web.active_engine_client")
+    def test_states_come_from_the_engine_api(self, engine_client, run_capture):
+        engine_client.return_value = Mock(container_states=Mock(return_value={"odoo-DEMO": "running"}))
+
+        statuses = web.container_statuses(("odoo-DEMO", "postgresql-DEMO"))
+
+        self.assertEqual({"odoo-DEMO": "running", "postgresql-DEMO": "absent"}, statuses)
+        run_capture.assert_not_called()
+
+    @patch("odoo_manager_web.run_capture")
+    @patch("odoo_manager_web.active_engine_client")
+    def test_unreachable_api_falls_back_to_the_cli(self, engine_client, run_capture):
+        engine_client.return_value = Mock(container_states=Mock(side_effect=web.EngineUnavailable("pipe absent")))
+        run_capture.return_value = (0, "odoo-DEMO|running\n")
+
+        self.assertEqual({"odoo-DEMO": "running"}, web.container_statuses(("odoo-DEMO",)))
+        self.assertEqual(1, run_capture.call_count)
 
 
 class ProjectDiscoveryTests(unittest.TestCase):
