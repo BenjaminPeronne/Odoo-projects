@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('sdkDesktop', Object.freeze({
   wslStatus: () => ipcRenderer.invoke('sdk:wsl-status'),
   wslInstallWsl: () => ipcRenderer.invoke('sdk:wsl-install-wsl'),
   wslPrepare: () => ipcRenderer.invoke('sdk:wsl-prepare'),
+  wslLegacyWorkspace: () => ipcRenderer.invoke('sdk:wsl-legacy-workspace'),
   wslOpenEditor: project => ipcRenderer.invoke('sdk:wsl-open-editor', project),
   wslOpenExplorer: project => ipcRenderer.invoke('sdk:wsl-open-explorer', project),
   pickDirectory: defaultPath => ipcRenderer.invoke('sdk:pick-directory', defaultPath),

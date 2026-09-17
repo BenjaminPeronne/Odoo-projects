@@ -60,6 +60,13 @@ test('checksum file is read strictly', () => {
   assert.throws(() => expectedChecksum('pas une empreinte'));
 });
 
+test('the Windows projects folder is seen from the distribution under /mnt', () => {
+  assert.equal(WslEnvironment.mountedWindowsPath('C:\\Users\\aymerick\\Odoo-projects'), '/mnt/c/Users/aymerick/Odoo-projects');
+  assert.equal(WslEnvironment.mountedWindowsPath('D:/Data/Odoo-projects/'), '/mnt/d/Data/Odoo-projects');
+  assert.equal(WslEnvironment.mountedWindowsPath('\\\\wsl.localhost\\SDK-Manager\\home\\sdk'), '');
+  assert.equal(WslEnvironment.mountedWindowsPath(''), '');
+});
+
 function fakeEnvironment({ distributions = [], release = '', version = '2.4.12.0' } = {}) {
   const calls = [];
   const runner = async (executable, args) => {

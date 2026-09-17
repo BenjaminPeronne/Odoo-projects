@@ -33,6 +33,7 @@ import {
   Play,
   PlusCircle,
   RefreshCcw,
+  Rocket,
   Search,
   Settings,
   ShieldCheck,
@@ -131,6 +132,9 @@ type SystemStatus = {
   workspace_exists: boolean;
   abandoned_staging?: { count: number; names: string[]; oldest_modified_at: number };
 };
+
+type MigrationCandidate = { name: string; source: string; already_migrated: boolean; stopped: boolean };
+type MigrationSnapshot = { available: boolean; source: string; projects: MigrationCandidate[] };
 
 type BootstrapSnapshot = {
   overview: Overview;
@@ -982,6 +986,7 @@ export default function Home() {
   const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [wslSetupOpen, setWslSetupOpen] = useState(false);
   const [wslStatus, setWslStatus] = useState<WslStatus | null>(null);
+  const [migration, setMigration] = useState<MigrationSnapshot | null>(null);
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
   const [creationPrerequisites, setCreationPrerequisites] = useState<ProjectCreationPrerequisites | null>(null);
   const [loadingCreationPrerequisites, setLoadingCreationPrerequisites] = useState(false);
@@ -2026,6 +2031,28 @@ export default function Home() {
     const job = await createJob("install_traefik");
     if (job) {
       schedule(refreshSystemStatus, 2500);
+      schedule(refreshOverview, 4000);
+    }
+  }
+
+  // Les projets restés sur C:\ démarrent 10 fois plus lentement : la migration les copie
+  // dans l'environnement Linux et laisse l'original intact.
+  const refreshMigration = useCallback(async () => {
+    try {
+      setMigration(await api<MigrationSnapshot>("/api/system/migration"));
+    } catch {
+      setMigration(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!initializing) void refreshMigration();
+  }, [initializing, refreshMigration]);
+
+  async function requestProjectMigration(project: string) {
+    const job = await createJob("migrate_project", { project });
+    if (job) {
+      schedule(refreshMigration, 3000);
       schedule(refreshOverview, 4000);
     }
   }
@@ -3740,6 +3767,35 @@ export default function Home() {
                     <Settings className="h-4 w-4" />
                     Paramètres
                   </Button>
+                </div>
+              </div>
+            )}
+            {migration?.available && migration.projects.some((candidate) => !candidate.already_migrated) && (
+              <div className="mb-4 flex flex-col gap-3 border-y border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-950 dark:border-emerald-800 dark:bg-emerald-950/45 dark:text-emerald-100">
+                <div className="flex min-w-0 items-start gap-3">
+                  <Rocket className="mt-0.5 h-5 w-5 shrink-0 text-emerald-700" />
+                  <div className="min-w-0">
+                    <div className="font-semibold">Projets à migrer vers l’environnement Linux</div>
+                    <div className="mt-0.5 break-words text-emerald-800 dark:text-emerald-200">
+                      Ces projets sont encore servis depuis {migration.source}. Odoo y démarre en une minute environ, contre quelques secondes une fois migré. La copie ne modifie pas l’original.
+                    </div>
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2 sm:pl-8">
+                  {migration.projects.filter((candidate) => !candidate.already_migrated).map((candidate) => (
+                    <Button
+                      key={candidate.name}
+                      size="sm"
+                      variant="outline"
+                      disabled={!candidate.stopped || loading}
+                      title={candidate.stopped ? undefined : "Arrête ce projet avant de le migrer : sa base serait copiée dans un état incohérent."}
+                      onClick={() => requestProjectMigration(candidate.name)}
+                    >
+                      <Rocket className="h-4 w-4" />
+                      {candidate.name}
+                      {!candidate.stopped && " (en cours d’exécution)"}
+                    </Button>
+                  ))}
                 </div>
               </div>
             )}

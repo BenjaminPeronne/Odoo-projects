@@ -67,6 +67,9 @@ class ManagerSettings:
     interface_icon: str = "manager"
     interface_layout: str = "classic"
     onboarding_completed: bool = False
+    # Ancien dossier de projets Windows, vu depuis la distribution (/mnt/c/...).
+    # Renseigné au passage sous WSL : il sert à proposer la migration des projets.
+    legacy_workspace: str = ""
 
     @classmethod
     def from_dict(cls, payload, default_workspace):
@@ -110,6 +113,7 @@ class ManagerSettings:
             interface_icon=interface_icon,
             interface_layout=interface_layout,
             onboarding_completed=bool(payload.get("onboarding_completed", False)),
+            legacy_workspace=str(payload.get("legacy_workspace", "") or "").strip(),
         )
 
     def to_dict(self):

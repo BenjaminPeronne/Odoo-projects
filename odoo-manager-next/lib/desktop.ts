@@ -21,6 +21,7 @@ export interface DesktopBridge {
   wslStatus?(): Promise<WslStatus>;
   wslInstallWsl?(): Promise<{ ok: boolean; rebootRequired: boolean; message: string }>;
   wslPrepare?(): Promise<WslStatus>;
+  wslLegacyWorkspace?(): Promise<string>;
   wslOpenEditor?(project: string): Promise<void>;
   wslOpenExplorer?(project: string): Promise<void>;
 }

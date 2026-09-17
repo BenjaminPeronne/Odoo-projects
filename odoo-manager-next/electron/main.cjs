@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { spawn } = require('node:child_process');
-const { APP_ORIGIN, Backend, externalUrl, staticPath, contentPolicy } = require('./runtime.cjs');
+const { APP_ORIGIN, Backend, configPath, externalUrl, staticPath, contentPolicy } = require('./runtime.cjs');
 const { CredentialStore } = require('./credentials.cjs');
 const { GitLabClient } = require('./gitlab.cjs');
 const { LINUX_WORKSPACE, WslEnvironment, imageFiles } = require('./wsl.cjs');
@@ -85,6 +85,13 @@ function installHandlers() {
   handle('wsl-status', () => (wsl ? wsl.status() : { wslInstalled: false, distributionInstalled: false, supported: false }));
   handle('wsl-install-wsl', () => (wsl ? wsl.installWsl() : { ok: false, message: 'Windows uniquement.' }));
   handle('wsl-prepare', () => prepareWslEnvironment());
+  // Ancien dossier Windows, vu depuis la distribution : l'interface propose d'y migrer les projets.
+  handle('wsl-legacy-workspace', () => {
+    try {
+      const configured = JSON.parse(fs.readFileSync(configPath(), 'utf8')).workspace;
+      return WslEnvironment.mountedWindowsPath(configured);
+    } catch { return ''; }
+  });
   handle('wsl-open-editor', project => wsl.openEditor(`${LINUX_WORKSPACE}/${projectName(project)}`));
   handle('wsl-open-explorer', project => shell.openPath(wsl.explorerPath(`${LINUX_WORKSPACE}/${projectName(project)}`)));
   handle('pick-directory', async defaultPath => {

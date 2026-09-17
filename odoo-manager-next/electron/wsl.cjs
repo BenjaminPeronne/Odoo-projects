@@ -221,6 +221,13 @@ class WslEnvironment {
     return this.run('code.cmd', ['--remote', `wsl+${this.distribution}`, projectPath], { allowFailure: true });
   }
 
+  /** Chemin Linux du dossier de projets Windows, pour proposer la migration. */
+  static mountedWindowsPath(windowsPath) {
+    const match = /^([A-Za-z]):[\\/](.*)$/.exec(String(windowsPath || ''));
+    if (!match) return '';
+    return `/mnt/${match[1].toLowerCase()}/${match[2].replace(/\\/g, '/')}`.replace(/\/+$/, '');
+  }
+
   explorerPath(linuxPath) {
     const relative = String(linuxPath || '/').replace(/^\//, '').replace(/\//g, '\\');
     return `\\\\wsl.localhost\\${this.distribution}\\${relative}`;

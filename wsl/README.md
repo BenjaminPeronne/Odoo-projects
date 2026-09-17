@@ -42,6 +42,15 @@ wsl --unregister SDK-Manager
 
 Pour la figer : relever l'empreinte depuis GitLab ou une machine déjà appairée, la comparer, l'ajouter au fichier, puis reconstruire l'image. Une attaque de l'homme du milieu au premier clone devient impossible.
 
+## Migrer un projet déjà présent sur `C:\`
+
+L'application liste les projets restés sur le disque Windows et propose de les copier dans l'environnement Linux. La copie prend le projet entier : code, liens d'addons, base PostgreSQL et filestore. Les liens sont recréés à l'identique, sans être suivis.
+
+- **Le projet doit être arrêté.** Copier `postgresql_data` pendant que PostgreSQL écrit donnerait une base incohérente : l'application refuse tant que son fichier de verrou est présent.
+- **L'original n'est jamais modifié.** Il reste sur `C:\` après la migration, jusqu'à ce que vous le supprimiez vous-même.
+- **La copie est vérifiée** : mêmes fichiers, mêmes cibles de liens. En cas d'écart, la copie est conservée pour inspection et l'échec est signalé.
+- Une copie interrompue est supprimée, pour ne pas laisser un demi-projet dans la liste.
+
 ## Mises à jour
 
 L'application ne réimporte jamais la distribution : les projets y vivent. Quand sa version diffère de `/etc/sdk-manager-release`, elle exécute `provision.sh`, qui vérifie l'état avant d'agir et ne touche ni aux projets ni aux bases.

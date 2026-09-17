@@ -65,6 +65,14 @@ from odoo_manager_core.project_creator import (
     validate_new_project_name,
     validate_odoo_version,
 )
+from odoo_manager_core.migration import (
+    compare_projects,
+    copy_project,
+    is_project_directory,
+    measure_project,
+    migration_candidates,
+    project_is_stopped,
+)
 from odoo_manager_core.project_service import terminate_active_processes as terminate_project_processes
 from odoo_manager_core.odoo_log_display import OdooLogDisplay, compact_odoo_log_text
 from odoo_manager_core.docker_api import EngineUnavailable
@@ -2655,6 +2663,70 @@ def restore_module_update_exclusions_job(job, project, db_name, modules):
     job.add("Si leur code est absent, le diagnostic les signalera de nouveau avant la mise à jour.")
 
 
+def legacy_workspace_path():
+    """Ancien dossier de projets Windows, vu depuis la distribution."""
+    configured = str(getattr(SETTINGS, "legacy_workspace", "") or "").strip()
+    return Path(configured) if configured else None
+
+
+def migration_snapshot():
+    """Projets restés sur le disque Windows, proposés à la migration."""
+    source = legacy_workspace_path()
+    if not source or not safe_path_is_dir(source):
+        return {"available": False, "source": str(source or ""), "projects": []}
+    return {
+        "available": True,
+        "source": str(source),
+        "projects": migration_candidates(source, WORKSPACE),
+    }
+
+
+def migrate_project_job(job, project):
+    """Copie un projet du disque Windows vers l'environnement Linux, sans toucher à l'original."""
+    source_root = legacy_workspace_path()
+    if not source_root:
+        raise RuntimeError("Aucun ancien dossier de projets n'est connu.")
+    source = source_root / project
+    if not is_project_directory(source):
+        raise ValueError(f"{project} n'est pas un projet Odoo dans {source_root}.")
+    if not project_is_stopped(source):
+        raise RuntimeError(
+            f"{project} tourne encore : arrête-le dans l'ancienne application avant de le migrer, "
+            "sinon sa base serait copiée dans un état incohérent."
+        )
+    destination = WORKSPACE / project
+
+    job.add(f"Mesure de {project}...")
+    measured = measure_project(source)
+    job.add(f"{measured['files']} fichiers, {measured['bytes'] / (1024 ** 3):.1f} Go à copier.")
+    free = shutil.disk_usage(WORKSPACE).free
+    if free < measured["bytes"] * 1.1:
+        raise RuntimeError("Espace disque insuffisant dans l'environnement Linux pour cette copie.")
+
+    def report(copied, total):
+        job.progress = {"current": copied, "total": total or measured["files"]}
+
+    try:
+        copy_project(source, destination, log=job.add, progress=report, total_files=measured["files"])
+    except Exception:
+        # Une copie interrompue ne doit pas laisser un demi-projet dans la liste.
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
+
+    job.add("Contrôle de la copie...")
+    comparison = compare_projects(source, destination)
+    if not comparison["identical"]:
+        job.add(
+            f"{comparison['missing_count']} fichier(s) manquant(s), "
+            f"{comparison['different_links_count']} lien(s) différent(s)."
+        )
+        raise RuntimeError("La copie ne correspond pas à l'original : le projet migré a été conservé pour inspection.")
+    clear_project_module_cache(project)
+    invalidate_overview_databases(project)
+    job.add(f"{project} est migré. L'original reste dans {source_root} : supprime-le quand tu l'auras vérifié.")
+    return {"project": project, "files": comparison["copied_files"], "source": str(source)}
+
+
 def cleanup_staging_job(job):
     """Supprime les dossiers de créations interrompues, jamais un projet."""
     entries = abandoned_staging_entries(WORKSPACE)
@@ -5006,6 +5078,8 @@ class Handler(BaseHTTPRequestHandler):
                 return json_response(self, system_status_snapshot())
             if path == "/api/system/project-creation-prerequisites":
                 return json_response(self, project_creation_prerequisites())
+            if path == "/api/system/migration":
+                return json_response(self, migration_snapshot())
             if path == "/api/system/ssh-keys":
                 return json_response(self, ssh_public_keys_snapshot())
             if path == "/api/jobs":
@@ -5551,6 +5625,9 @@ class Handler(BaseHTTPRequestHandler):
                     ),
                     project=name,
                 )
+            elif action == "migrate_project":
+                name = validate_new_project_name(payload.get("project", ""))
+                job = Job(f"Migrer {name} vers l'environnement Linux", migrate_project_job, (name,), project=name)
             elif action == "cleanup_staging":
                 job = Job("Nettoyer les créations interrompues", cleanup_staging_job)
             elif action == "install_traefik":

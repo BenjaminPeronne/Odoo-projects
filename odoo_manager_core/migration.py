@@ -1,0 +1,165 @@
+"""Migration d'un projet depuis un disque Windows vers l'environnement Linux.
+
+Un projet servi depuis `C:\\` traverse le pont 9P de Docker Desktop : Odoo met 48 à
+95 s à démarrer, contre 4 à 6 s sur le système de fichiers de la distribution. La
+migration copie le projet tel quel, bases et filestore compris, et ne touche jamais
+à l'original : il reste sur `C:\\` tant que l'utilisateur ne l'a pas supprimé lui-même.
+
+Le projet doit être arrêté : copier `postgresql_data` pendant que PostgreSQL écrit
+donnerait une base incohérente.
+"""
+
+import os
+import shutil
+import time
+from pathlib import Path
+
+COMPOSE_NAMES = ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml")
+POSTGRES_DATA_DIRECTORY = "postgresql_data"
+POSTMASTER_FILE = "postmaster.pid"
+MIGRATION_MARKER = ".odoo_manager_migrated_from"
+# Le projet d'origine reste intact : ces dossiers sont recopiés à l'identique.
+PROGRESS_EVERY_FILES = 500
+
+
+def is_project_directory(path):
+    path = Path(path)
+    try:
+        return path.is_dir() and any((path / name).exists() for name in COMPOSE_NAMES)
+    except OSError:
+        return False
+
+
+def project_is_stopped(path):
+    """Faux tant que PostgreSQL tourne : son fichier de verrou est présent."""
+    return not (Path(path) / POSTGRES_DATA_DIRECTORY / POSTMASTER_FILE).exists()
+
+
+def migration_candidates(source_root, destination_root):
+    """Projets présents côté Windows et absents de l'environnement Linux."""
+    source_root = Path(source_root)
+    destination_root = Path(destination_root)
+    candidates = []
+    try:
+        entries = sorted(source_root.iterdir(), key=lambda item: item.name.lower())
+    except OSError:
+        return candidates
+    for entry in entries:
+        if entry.name.startswith(".") or not is_project_directory(entry):
+            continue
+        candidates.append({
+            "name": entry.name,
+            "source": str(entry),
+            "already_migrated": (destination_root / entry.name).exists(),
+            "stopped": project_is_stopped(entry),
+        })
+    return candidates
+
+
+def measure_project(path):
+    """Nombre de fichiers et octets à copier, liens non suivis."""
+    files = 0
+    total_bytes = 0
+    for directory, _subdirectories, names in os.walk(path, followlinks=False):
+        for name in names:
+            entry = Path(directory) / name
+            files += 1
+            try:
+                if not entry.is_symlink():
+                    total_bytes += entry.stat().st_size
+            except OSError:
+                continue
+    return {"files": files, "bytes": total_bytes}
+
+
+def copy_project(source, destination, log=None, progress=None, total_files=0):
+    """Copie le projet, liens d'addons compris, sans suivre les liens.
+
+    Les liens de `odoo/addons` sont relatifs : recopiés tels quels, ils désignent la
+    même cible dans la copie. Les suivre dupliquerait chaque module.
+
+    `shutil.copytree(symlinks=True)` ne convient pas : sous Windows, il recrée un lien
+    de dossier comme lien de fichier, que ni Windows ni Docker ne peuvent parcourir.
+    """
+    source = Path(source)
+    destination = Path(destination)
+    if destination.exists():
+        raise ValueError(f"Un projet nommé {destination.name} existe déjà dans l'environnement Linux.")
+    log = log or (lambda _message: None)
+    copied = 0
+    last_report = time.monotonic()
+
+    def count_one():
+        nonlocal copied, last_report
+        copied += 1
+        if copied % PROGRESS_EVERY_FILES == 0 and time.monotonic() - last_report > 1:
+            last_report = time.monotonic()
+            log(f"Copie : {copied}/{total_files} fichiers" if total_files else f"Copie : {copied} fichiers")
+            if progress:
+                progress(copied, total_files)
+
+    destination.mkdir(parents=True)
+    for directory, subdirectories, names in os.walk(source, followlinks=False):
+        current = Path(directory)
+        target_directory = destination / current.relative_to(source)
+        for name in list(subdirectories):
+            link = current / name
+            if not link.is_symlink():
+                (target_directory / name).mkdir(exist_ok=True)
+                continue
+            # Lien vers un dossier : le type doit être conservé pour rester parcourable.
+            subdirectories.remove(name)
+            os.symlink(os.readlink(link), target_directory / name, target_is_directory=True)
+            count_one()
+        for name in names:
+            entry = current / name
+            target = target_directory / name
+            if entry.is_symlink():
+                os.symlink(os.readlink(entry), target)
+            else:
+                shutil.copy2(entry, target, follow_symlinks=False)
+            count_one()
+        shutil.copystat(current, target_directory)
+    (destination / MIGRATION_MARKER).write_text(str(source) + "\n", encoding="utf-8")
+    log(f"Copie terminée : {copied} fichiers.")
+    return {"files": copied}
+
+
+def compare_projects(source, destination):
+    """Contrôle d'après-copie : mêmes fichiers, mêmes cibles de liens."""
+    source_entries = _relative_entries(source)
+    destination_entries = _relative_entries(destination)
+    destination_entries.pop(MIGRATION_MARKER, None)
+    missing = sorted(set(source_entries) - set(destination_entries))
+    different_links = sorted(
+        name for name, target in source_entries.items()
+        if target is not None and destination_entries.get(name) != target
+    )
+    return {
+        "source_files": len(source_entries),
+        "copied_files": len(destination_entries),
+        "missing": missing[:20],
+        "missing_count": len(missing),
+        "different_links": different_links[:20],
+        "different_links_count": len(different_links),
+        "identical": not missing and not different_links,
+    }
+
+
+def _relative_entries(root):
+    """Chemin relatif -> cible du lien, ou None pour un fichier ordinaire."""
+    root = Path(root)
+    entries = {}
+    for directory, subdirectories, names in os.walk(root, followlinks=False):
+        current = Path(directory)
+        # Les liens vers un dossier ne sont pas parcourus : leur cible est comparée telle quelle.
+        for name in list(subdirectories):
+            link = current / name
+            if link.is_symlink():
+                subdirectories.remove(name)
+                entries[str(link.relative_to(root)).replace("\\", "/")] = os.readlink(link).replace("\\", "/")
+        for name in names:
+            entry = current / name
+            key = str(entry.relative_to(root)).replace("\\", "/")
+            entries[key] = os.readlink(entry).replace("\\", "/") if entry.is_symlink() else None
+    return entries
