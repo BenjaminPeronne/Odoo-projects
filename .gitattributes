@@ -1,2 +1,5 @@
 # Les scripts shell sont lus par sh (WSL, macOS, Linux, sidecar) : jamais de CRLF.
 *.sh text eol=lf
+
+# Copiés tels quels dans une image Linux : jamais de CRLF.
+wsl/** text eol=lf
