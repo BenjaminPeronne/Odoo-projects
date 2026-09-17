@@ -1,3 +1,5 @@
+import type { WslStatus } from "./wsl-setup";
+
 export interface DesktopBridge {
   getVersion(): Promise<string>;
   backendEndpoint(): Promise<string>;
@@ -15,7 +17,15 @@ export interface DesktopBridge {
   gitlabDisconnect(): Promise<GitLabStatus>;
   gitlabProjects(search: string): Promise<GitLabProject[]>;
   gitlabRefs(projectId: number, search: string): Promise<GitLabRefs>;
+  // Environnement Linux sous Windows : absent des autres systèmes.
+  wslStatus?(): Promise<WslStatus>;
+  wslInstallWsl?(): Promise<{ ok: boolean; rebootRequired: boolean; message: string }>;
+  wslPrepare?(): Promise<WslStatus>;
+  wslOpenEditor?(project: string): Promise<void>;
+  wslOpenExplorer?(project: string): Promise<void>;
 }
+
+export type { WslStatus } from "./wsl-setup";
 
 export interface GitLabStatus {
   available: boolean;

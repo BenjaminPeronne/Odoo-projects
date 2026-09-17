@@ -56,6 +56,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { WslSetupDialog } from "@/components/wsl-setup";
+import { desktopBridge, type WslStatus } from "@/lib/desktop";
+import { isWslSetupPending } from "@/lib/wsl-setup";
 import { cn } from "@/lib/utils";
 import { mergeIncrementalJobOutput, type JobOutputCache } from "@/lib/job-output";
 import appIcon from "./icon.png";
@@ -126,6 +129,7 @@ type SystemStatus = {
   traefik?: TraefikStatus;
   workspace: string;
   workspace_exists: boolean;
+  abandoned_staging?: { count: number; names: string[]; oldest_modified_at: number };
 };
 
 type BootstrapSnapshot = {
@@ -976,6 +980,8 @@ export default function Home() {
   const [aboutOpen, setAboutOpen] = useState(false);
   const [appVersion, setAppVersion] = useState(FALLBACK_APP_VERSION);
   const [onboardingOpen, setOnboardingOpen] = useState(false);
+  const [wslSetupOpen, setWslSetupOpen] = useState(false);
+  const [wslStatus, setWslStatus] = useState<WslStatus | null>(null);
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
   const [creationPrerequisites, setCreationPrerequisites] = useState<ProjectCreationPrerequisites | null>(null);
   const [loadingCreationPrerequisites, setLoadingCreationPrerequisites] = useState(false);
@@ -1099,6 +1105,7 @@ export default function Home() {
   const zipInspectionGeneration = useRef(0);
   const scheduledTimeouts = useRef<Set<number>>(new Set());
   const onboardingPrompted = useRef(false);
+  const wslSetupPrompted = useRef(false);
   const pendingProjectNames = useRef(new Set<string>());
   const logOutputRef = useRef<HTMLPreElement>(null);
   const previousSelectedJobRef = useRef<{ id: number | null; status: string | null }>({ id: null, status: null });
@@ -1724,6 +1731,20 @@ export default function Home() {
     void loadCreationPrerequisites();
   }, [initializing, loadCreationPrerequisites, overview, settings]);
 
+  // Sous Windows, les projets servis depuis C:\ sont 10 fois plus lents que dans
+  // l'environnement Linux : la préparation est proposée dès qu'elle manque.
+  useEffect(() => {
+    const bridge = desktopBridge();
+    if (initializing || !bridge?.wslStatus) return;
+    bridge.wslStatus().then(setWslStatus).catch(() => setWslStatus(null));
+  }, [initializing]);
+
+  useEffect(() => {
+    if (wslSetupPrompted.current || !wslStatus || !isWslSetupPending(wslStatus, appVersion)) return;
+    wslSetupPrompted.current = true;
+    setWslSetupOpen(true);
+  }, [appVersion, wslStatus]);
+
   useEffect(() => {
     if (!pendingCreatedProjectName || !overview) return;
     const created = overview.projects.find((project) => project.name === pendingCreatedProjectName);
@@ -2007,6 +2028,12 @@ export default function Home() {
       schedule(refreshSystemStatus, 2500);
       schedule(refreshOverview, 4000);
     }
+  }
+
+  // Une création interrompue laisse son dossier de préparation : 6,8 Go relevés sur un poste.
+  async function requestStagingCleanup() {
+    const job = await createJob("cleanup_staging");
+    if (job) schedule(refreshSystemStatus, 2500);
   }
 
   async function requestGitInstall() {
@@ -3716,6 +3743,23 @@ export default function Home() {
                 </div>
               </div>
             )}
+            {(systemStatus?.abandoned_staging?.count ?? 0) > 0 && (
+              <div className="mb-4 flex flex-col gap-3 border-y border-slate-300 bg-slate-50 px-4 py-3 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-900/45 dark:text-slate-100 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex min-w-0 items-start gap-3">
+                  <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-slate-600" />
+                  <div className="min-w-0">
+                    <div className="font-semibold">Créations de projet interrompues</div>
+                    <div className="mt-0.5 break-words text-slate-700 dark:text-slate-300">
+                      {systemStatus!.abandoned_staging!.count} dossier(s) de préparation occupent de l’espace disque sans servir à aucun projet. Les supprimer ne touche à aucun projet ni à aucune base.
+                    </div>
+                  </div>
+                </div>
+                <Button className="w-full shrink-0 sm:w-auto" size="sm" variant="outline" disabled={loading} onClick={requestStagingCleanup}>
+                  {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                  Nettoyer
+                </Button>
+              </div>
+            )}
             {selectedProject && addonLinks?.supported && (addonLinks.wsl_links > 0 || addonLinks.interrupted) && (
               <div className="mb-4 flex flex-col gap-3 border-y border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950 dark:border-amber-800 dark:bg-amber-950/45 dark:text-amber-100 sm:flex-row sm:items-center sm:justify-between">
                 <div className="flex min-w-0 items-start gap-3">
@@ -4939,6 +4983,16 @@ export default function Home() {
           </div>
         </section>
       </div>
+
+      <WslSetupDialog
+        open={wslSetupOpen}
+        onOpenChange={setWslSetupOpen}
+        applicationVersion={appVersion}
+        onReady={() => {
+          setWslSetupOpen(false);
+          pushToast("success", "Environnement Linux prêt. Redémarre l’application pour l’utiliser.");
+        }}
+      />
 
       <Dialog open={onboardingOpen} onOpenChange={setOnboardingOpen}>
         <DialogContent className="max-h-[90vh] max-w-2xl space-y-5 overflow-y-auto">
