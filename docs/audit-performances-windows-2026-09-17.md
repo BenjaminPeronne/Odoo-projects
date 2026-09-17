@@ -8,7 +8,7 @@
 - Workspace réel `C:\Users\Aymerick\Odoo-projects` : `Caritel_v18` (1 416 modules), `DEMO_CPL` et `DEMO_CPL03` (1 447), `SIMPAC_v16` (1 171, conteneurs démarrés). Tous les liens d'addons sont des liens NTFS natifs.
 - Les processus enfants du backend sont échantillonnés toutes les 20 ms.
 
-Scripts de mesure : `bench.py` (routes), `idle.py` (charge de fond avec un client SSE), `compare_modules.py` (liste des modules avant/après), `bench_pg.sh` (PostgreSQL en bind mount ou en volume), `bench_code.sh` (code Odoo en bind mount ou en volume). Ils sont restés hors du dépôt.
+Scripts de mesure : `bench.py` (routes), `idle.py` (charge de fond avec un client SSE), `compare_modules.py` (liste des modules avant/après), `bench_pg.sh` (PostgreSQL en bind mount ou en volume), `bench_code.sh` (code Odoo en bind mount ou en volume), `bench_mix.sh` (compromis Odoo et Enterprise en volume). Ils sont restés hors du dépôt.
 
 ## Synthèse
 
@@ -104,6 +104,33 @@ Coût de la copie : 7 min 22 s pour `odoo/odoo` (37 669 fichiers, 970 Mo) et 15 
 
 **Conclusion : sortir le code de `C:\` est le levier principal.** Démarrer Odoo devient 11 à 13 fois plus rapide, et une mise à jour complète deux fois plus rapide. Le stockage de PostgreSQL n'accélère que les opérations de masse sur la base.
 
+#### Mesure : compromis Odoo et Enterprise en volume, addons spécifiques sur `C:\`
+
+Les 1 158 liens de `SIMPAC_v16` se répartissent entre 970 modules standard (Community et Enterprise) et 188 modules spécifiques (OCA, Sudokeys, `simpac`). En fichiers, `addons-store` compte 90 734 fichiers standard pour 7 096 spécifiques, soit 7 %. Trois variantes, avec PostgreSQL en volume et le code en lecture seule :
+
+- **bind** : tout sur `C:\`, comme aujourd'hui ;
+- **mixte** : `odoo/odoo`, les deux copies d'Enterprise et Community (`simpac_v16/odoo`) en volumes, montés par-dessus leurs dossiers dans `addons-store`. Les addons spécifiques et les liens de `odoo/addons` restent sur `C:\` ;
+- **volume** : tout en volumes, à partir des mêmes volumes standard, d'un volume pour les addons spécifiques et d'un volume pour les liens.
+
+Dans chaque manche, l'ordre est volume, mixte, bind : les variantes les plus lentes profitent du cache. `stat -f` vérifie le type de système de fichiers de chaque montage (ext4 ou 9P), et les 1 158 manifestes sont atteints dans les trois cas.
+
+| Opération | Bind | Mixte | Volume |
+|---|---:|---:|---:|
+| `find -L addons` (1 158 manifestes) | 31,5 s | 12,2 s | 1,2 s |
+| Chargement d'Odoo, manche 1 | 95,3 s | 19,7 s | 6,2 s |
+| Chargement d'Odoo, manche 2 | 62,1 s | 19,3 s | 4,2 s |
+| Chargement d'Odoo, manche 3 | 63,8 s | 19,4 s | 4,9 s |
+| `-u base` | 504,2 s | 273,1 s | 233,9 s |
+
+Lecture :
+
+- **Le compromis apporte l'essentiel du gain sur `-u`** : 273 s contre 504 s en bind, seulement 17 % de plus que tout en volume.
+- **Au démarrage, il divise le temps par 3 à 5**, mais reste environ 4 fois plus lent que tout en volume (19,5 s contre 4 à 6 s), avec un résultat très stable d'une manche à l'autre.
+- Hypothèse, non mesurée : l'écart vient surtout des liens de `odoo/addons` restés en 9P. Chaque fichier ouvert par Odoo via `addons/<module>/…` passe par une recherche et un `readlink` dans ce dossier 9P avant d'atteindre le volume. Ce dossier ne contient que des liens gérés par le gestionnaire : le placer en volume est faisable sans gêner le développement depuis Windows, les addons spécifiques restant sur `C:\`.
+- Les variations du bind mount d'une session à l'autre (370 s, 441 s puis 504 s pour `-u base`) confirment son instabilité.
+
+Coût de la copie des parties standard : 37 669 fichiers d'`odoo/odoo` (6 min 15 s), 38 470 de Community (6 min 19 s) et 26 010 et 26 254 pour les deux Enterprise (3 min 56 s chacune). `SIMPAC_v16` embarque deux copies de Community et d'Enterprise : un volume par version d'Odoo, partagé entre les projets, n'en garderait qu'une.
+
 Pistes, de la moins à la plus invasive :
 
 1. **Volume nommé pour `postgresql_data`** (`postgresql-<projet>-data`) : restaurations et imports 2 à 4 fois plus rapides, sans effet sur le démarrage. Contrepartie : les données ne sont plus visibles dans l'Explorateur. Suppression, sauvegarde et restauration doivent passer par Docker, ce que le gestionnaire fait déjà pour les bases. Il faut aussi migrer les projets existants (dump, puis restauration).
@@ -112,7 +139,7 @@ Pistes, de la moins à la plus invasive :
    - un workspace dans la distribution WSL (`\\wsl.localhost\Ubuntu\home\…`), déjà pris en charge par le code. Docker lit alors l'ext4 de WSL, comparable à un volume. Contreparties : l'Explorateur et VS Code sans Remote WSL deviennent lents, et le chemin WSL du backend (liste des modules) est à remesurer ;
    - des volumes gérés par le gestionnaire : Odoo et Enterprise par version, clonés directement dans le volume, et les addons du projet dans un volume par projet. C'est une refonte de `project_creator`, de l'import de modules et de la gestion des liens (création et vérification via `docker run`). Le développement d'addons clients depuis Windows devient aussi moins direct : il faut VS Code Dev Containers, ou garder uniquement les addons du projet en bind mount.
 
-   Compromis à mesurer : Odoo et Enterprise en volume, addons spécifiques du projet toujours sur `C:\`. Community et Enterprise représentent la grande majorité des fichiers lus au chargement.
+   Compromis mesuré : Odoo et Enterprise en volume, addons spécifiques du projet sur `C:\`. Démarrage ×3 à ×5 et `-u` ×1,8, tout en gardant les addons du projet modifiables depuis Windows. Ajouter les liens de `odoo/addons` aux volumes devrait rapprocher le démarrage de celui du tout-volume, à confirmer par une mesure.
 
 ### 2. `docker info` lance les 14 plugins CLI — corrigé
 
@@ -173,7 +200,7 @@ Recommandé, à faire par l'utilisateur :
 
 ## Ordre de correction proposé
 
-1. Choisir la forme de sortie du code de `C:\` : workspace WSL, ou Odoo et Enterprise en volume avec les addons du projet sur `C:\` (constat 1, piste 3). Mesurer d'abord ce compromis.
+1. Sortir le code standard de `C:\` : Odoo et Enterprise dans un volume par version, addons du projet sur `C:\` (constat 1, piste 3). Mesurer d'abord la même configuration avec les liens de `odoo/addons` en volume.
 2. Client Docker sur named pipe pour `version`, `ps` et `inspect` (constat 3).
 3. Limiter le test de l'installateur à la CI (constat 6).
 4. `postgresql_data` en volume nommé pour les nouveaux projets, si les restaurations de copies sont fréquentes (constat 1, piste 1).
