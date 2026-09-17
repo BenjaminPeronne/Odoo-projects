@@ -126,6 +126,33 @@ Trouvé en recette : « Créer base demo_test » sur `DEMO_01` échoue avec `url
 
 Le démarrage du projet fonctionnait, car sa sonde se connecte déjà à `127.0.0.1` avec l'en-tête `Host`. Traefik route correctement cette requête (HTTP 303 vérifié).
 
+## Analyse WSL du 17 septembre
+
+Les processus lancés par les fonctions en lecture seule du backend ont été enregistrés, puis réellement exécutés, sur le workspace réel (`DEMO_01` : 1 449 modules, liens natifs).
+
+| Opération | Avant : durée / `wsl.exe` | Après : durée / `wsl.exe` |
+|---|---|---|
+| `bootstrap` | 1 335 ms / 1 | 1 110 ms / 0 |
+| `overview` (toutes les 10 s) | 1 116 ms / 1 | 948 ms / 0 |
+| `system/status` | 797 ms / 1 | 608 ms / 0 |
+| Prérequis de création | 313 ms / 2 | 50 ms / 0 |
+| Clés SSH | 141 ms / 1 | 2 ms / 0 |
+| Diagnostic du projet | 2 115 ms / 1 | 1 600 ms / 0 |
+| Modules, sans cache | 3 061 ms / 0 | 1 417 ms / 0 |
+| Modules, avec cache | 1 237 ms / 0 | 472 ms / 0 |
+
+La liste des modules est strictement identique avant et après sur les 1 449 modules (mode de suppression, type et chemins). Seul un projet encore doté de liens WSL (Caritel, non converti) passe par WSL, comme prévu.
+
+Corrections :
+
+- constat 5 : Docker n'est sondé dans WSL que si Docker Desktop est absent ou arrêté ;
+- constat 7 : Git n'est cherché dans WSL que si Git pour Windows manque ou si le workspace est dans WSL. Le résultat est gardé en cache 60 s, ou 10 s s'il est négatif, et vidé après l'installation de Git ;
+- constat 6 : `GIT_TERMINAL_PROMPT` et la commande SSH non interactive de l'application sont transmis à WSL via `WSLENV`. Vérifié : WSL reçoit bien les deux variables. Une commande SSH personnalisée n'est pas transmise ;
+- constat 3 : la suppression ne reposait déjà pas sur le cache WSL. Elle refuse désormais un lien WSL avec un message qui invite à convertir le projet, au lieu de `WinError 1920` ;
+- liste native : les dossiers du projet ne sont plus résolus à nouveau pour chaque module.
+
+Non-régression (`tests/test_windows_wsl_budget.py`) : sur un Windows simulé avec Docker et Git natifs, aucun écran ne doit lancer `wsl.exe`. Ce test échoue sur le code antérieur. Deux contrôles vérifient que WSL reste utilisé sans outils natifs ou avec des liens WSL.
+
 ## Points vérifiés sans anomalie
 
 - Le backend est déclaré `longPathAware`, et `LongPathsEnabled=1`.
