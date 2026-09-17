@@ -162,6 +162,17 @@ html {
   scrollbar-gutter: stable;
 }
 
+/* With html in overflow-x: clip, the body overflow is not propagated to the
+   viewport: Radix's scroll lock (Dialog) would turn body into its own scroll
+   container and detach the sticky sidebar. Lock the root instead. */
+html:has(> body[data-scroll-locked]) {
+  overflow: hidden;
+}
+
+html body[data-scroll-locked] {
+  overflow: visible !important;
+}
+
 @supports (scrollbar-gutter: stable) {
   /* The root already reserves the scrollbar gutter. Radix injects its body
      compensation after this stylesheet, so use higher specificity to avoid
