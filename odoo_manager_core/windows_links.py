@@ -144,10 +144,7 @@ def native_symlinks_supported(directory):
     except OSError:
         NATIVE_SYMLINK_SUPPORT.pop(key, None)
         return False
-    try:
-        os.unlink(probe)
-    except OSError:
-        os.rmdir(probe)
+    remove_link_entry(probe)
     NATIVE_SYMLINK_SUPPORT[key] = now
     return True
 
@@ -172,6 +169,19 @@ def write_migration_journal(directory, links):
     temporary = journal.with_name(journal.name + ".tmp")
     temporary.write_text(json.dumps({"version": 1, "links": links}, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(temporary, journal)
+
+
+def remove_link_entry(path):
+    """Supprime l'entrée du lien lui-même, jamais sa cible.
+
+    Un lien WSL créé vers un dossier existant porte l'attribut répertoire : Windows
+    refuse alors DeleteFile (WinError 5) et exige RemoveDirectory, qui retire le
+    point d'analyse sans parcourir la cible.
+    """
+    try:
+        os.unlink(path)
+    except (PermissionError, IsADirectoryError):
+        os.rmdir(path)
 
 
 def is_native_link_to(path, value):
@@ -220,7 +230,7 @@ def convert_wsl_symlinks(directory, log=None):
         else:
             try:
                 if os.path.lexists(path):
-                    os.unlink(path)
+                    remove_link_entry(path)
                 os.symlink(value, path, target_is_directory=True)
                 converted += 1
             except OSError as exc:

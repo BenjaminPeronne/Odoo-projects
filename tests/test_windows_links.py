@@ -69,19 +69,26 @@ class ConversionTests(unittest.TestCase):
             (self.root / "addons-store" / name / "__manifest__.py").write_text("{}\n", encoding="utf-8")
             self.add_wsl_link(name, f"../addons-store/{name}")
 
-    def add_wsl_link(self, name, target):
-        (self.addons / name).write_text("lien WSL simulé", encoding="utf-8")
+    def add_wsl_link(self, name, target, directory_attribute=False):
+        if directory_attribute:
+            # Lien WSL vers un dossier existant : Windows lui donne l'attribut répertoire.
+            (self.addons / name).mkdir()
+        else:
+            (self.addons / name).write_text("lien WSL simulé", encoding="utf-8")
         self.targets[name] = target
+
+    def is_simulated_wsl_link(self, path):
+        return path.name in self.targets and not path.is_symlink() and (path.is_file() or path.is_dir())
 
     def simulated_wsl(self):
         def remaining_wsl_links(directory):
-            return sorted(path for path in Path(directory).iterdir() if path.is_file() and path.name in self.targets)
+            return sorted(path for path in Path(directory).iterdir() if self.is_simulated_wsl_link(path))
 
         def tag(path):
             path = Path(path)
             if path.is_symlink():
                 return windows_links.IO_REPARSE_TAG_SYMLINK
-            return IO_REPARSE_TAG_LX_SYMLINK if path.is_file() and path.name in self.targets else 0
+            return IO_REPARSE_TAG_LX_SYMLINK if self.is_simulated_wsl_link(path) else 0
 
         return (
             mock.patch.object(windows_links, "wsl_symlinks", side_effect=remaining_wsl_links),
@@ -103,6 +110,18 @@ class ConversionTests(unittest.TestCase):
             self.assertTrue((link / "__manifest__.py").is_file())
         self.assertFalse((self.addons / MIGRATION_JOURNAL_NAME).exists())
         self.assertEqual(["Conversion des liens : 3/3"], lines)
+
+    def test_links_with_the_directory_attribute_are_converted(self):
+        # Recette Caritel : DeleteFile refusé (WinError 5) sur les 1 416 liens WSL vers des dossiers.
+        (self.root / "addons-store" / "crm").mkdir()
+        (self.root / "addons-store" / "crm" / "__manifest__.py").write_text("{}\n", encoding="utf-8")
+        self.add_wsl_link("crm", "../addons-store/crm", directory_attribute=True)
+        wsl_links, targets, tags = self.simulated_wsl()
+        with wsl_links, targets, tags:
+            result = convert_wsl_symlinks(self.addons)
+        self.assertEqual({"converted": 4, "skipped": [], "failures": []}, result)
+        self.assertTrue((self.addons / "crm").is_symlink())
+        self.assertTrue((self.root / "addons-store" / "crm" / "__manifest__.py").is_file())
 
     def test_interrupted_conversion_resumes_from_its_journal(self):
         real_symlink = os.symlink
