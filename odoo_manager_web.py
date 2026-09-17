@@ -2667,28 +2667,49 @@ def reset_admin_password_job(job, project, db_name, password):
     project_service().run_odoo_reset_admin_password(project, db_name, validate_admin_password(password), log=job.add)
 
 
-class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
+def local_odoo_connection(url, timeout):
+    """Connexion HTTP vers une instance locale, servie par Traefik sur la boucle locale.
+
+    Windows ne résout pas les sous-domaines de .localhost (getaddrinfo, erreur 11001),
+    contrairement aux navigateurs, à macOS et à Linux : on se connecte à 127.0.0.1 en
+    gardant le nom d'hôte dans l'en-tête Host, comme la sonde de disponibilité d'Odoo.
+    Retourne (connexion, chemin, en-tête Host).
+    """
+    parsed = urllib.parse.urlsplit(url)
+    host = parsed.hostname
+    if parsed.scheme not in {"http", "https"} or not host:
+        raise RuntimeError(f"URL Odoo invalide : {url}")
+    connect_host = host if host in {"127.0.0.1", "localhost", "::1"} else "127.0.0.1"
+    connection_type = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+    connection = connection_type(connect_host, parsed.port, timeout=timeout)
+    target = parsed.path or "/"
+    if parsed.query:
+        target += "?" + parsed.query
+    host_header = host if parsed.port in {None, 80, 443} else f"{host}:{parsed.port}"
+    return connection, target, host_header
 
 
 def post_form_no_redirect(url, data, timeout=240):
     body = urllib.parse.urlencode(data).encode("utf-8")
-    request = urllib.request.Request(
-        url,
-        data=body,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    )
-    opener = urllib.request.build_opener(NoRedirectHandler)
+    connection, target, host_header = local_odoo_connection(url, timeout)
     try:
-        with opener.open(request, timeout=timeout) as response:
-            return response.status, response.read(131072).decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as exc:
-        if exc.code in (301, 302, 303, 307, 308):
-            return exc.code, ""
-        content = exc.read(4096).decode("utf-8", errors="replace")
-        raise RuntimeError(f"Odoo a retourne HTTP {exc.code}: {content[:600]}")
+        connection.request(
+            "POST",
+            target,
+            body=body,
+            headers={"Host": host_header, "Content-Type": "application/x-www-form-urlencoded"},
+        )
+        response = connection.getresponse()
+        if response.status in (301, 302, 303, 307, 308):
+            return response.status, ""
+        if response.status >= 400:
+            content = response.read(4096).decode("utf-8", errors="replace")
+            raise RuntimeError(f"Odoo a retourne HTTP {response.status}: {content[:600]}")
+        return response.status, response.read(131072).decode("utf-8", errors="replace")
+    except (OSError, http.client.HTTPException) as exc:
+        raise RuntimeError(f"Odoo ne répond pas sur {host_header} : {exc}") from exc
+    finally:
+        connection.close()
 
 
 def extract_odoo_page_error(content):
@@ -2756,9 +2777,10 @@ def multipart_field(boundary, name, value):
 
 
 def post_odoo_database_restore(job, url, backup_path, filename, db_name, master_pwd, copy, neutralize):
-    parsed = urllib.parse.urlsplit(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise RuntimeError("URL Odoo invalide pour la restauration.")
+    try:
+        connection, target, host_header = local_odoo_connection(url, timeout=2 * 60 * 60)
+    except RuntimeError as exc:
+        raise RuntimeError("URL Odoo invalide pour la restauration.") from exc
 
     boundary = f"----OdooManager{os.getpid()}{time.time_ns()}"
     fields = [
@@ -2778,16 +2800,11 @@ def post_odoo_database_restore(job, url, backup_path, filename, db_name, master_
     suffix = f"\r\n--{boundary}--\r\n".encode("utf-8")
     backup_size = Path(backup_path).stat().st_size
     content_length = len(prefix) + backup_size + len(suffix)
-    target = parsed.path or "/"
-    if parsed.query:
-        target += "?" + parsed.query
-
-    connection_type = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
-    connection = connection_type(parsed.hostname, parsed.port, timeout=2 * 60 * 60)
     sent = 0
     next_progress = 10
     try:
-        connection.putrequest("POST", target)
+        connection.putrequest("POST", target, skip_host=True)
+        connection.putheader("Host", host_header)
         connection.putheader("Content-Type", f"multipart/form-data; boundary={boundary}")
         connection.putheader("Content-Length", str(content_length))
         connection.putheader("Connection", "close")

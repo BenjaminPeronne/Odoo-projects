@@ -198,6 +198,38 @@ class DatabaseRestoreTests(unittest.TestCase):
                 web.validate_odoo_backup_archive(path)
 
     @patch("odoo_manager_web.http.client.HTTPConnection")
+    def test_database_form_reaches_localhost_subdomain_through_loopback(self, connection_type):
+        # Recette Windows : « getaddrinfo failed » en créant une base sur dev.DEMO_01.localhost.
+        connection = Mock()
+        connection.getresponse.return_value = Mock(status=303)
+        connection_type.return_value = connection
+
+        status, content = web.post_form_no_redirect("http://dev.DEMO_01.localhost/web/database/create", {"name": "demo"})
+
+        self.assertEqual((303, ""), (status, content))
+        connection_type.assert_called_once_with("127.0.0.1", None, timeout=240)
+        method, target = connection.request.call_args.args
+        self.assertEqual(("POST", "/web/database/create"), (method, target))
+        # Traefik compare les noms d'hôte sans tenir compte de la casse.
+        self.assertEqual("dev.demo_01.localhost", connection.request.call_args.kwargs["headers"]["Host"])
+        self.assertEqual(b"name=demo", connection.request.call_args.kwargs["body"])
+        connection.close.assert_called_once()
+
+    @patch("odoo_manager_web.http.client.HTTPConnection")
+    def test_database_form_reports_odoo_errors_and_unreachable_instances(self, connection_type):
+        connection = Mock()
+        response = Mock(status=500)
+        response.read.return_value = b"Internal Server Error"
+        connection.getresponse.return_value = response
+        connection_type.return_value = connection
+        with self.assertRaisesRegex(RuntimeError, "HTTP 500: Internal Server Error"):
+            web.post_form_no_redirect("http://dev.demo.localhost/web/database/drop", {})
+
+        connection.request.side_effect = ConnectionRefusedError("refused")
+        with self.assertRaisesRegex(RuntimeError, "ne répond pas sur dev.demo.localhost"):
+            web.post_form_no_redirect("http://dev.demo.localhost/web/database/drop", {})
+
+    @patch("odoo_manager_web.http.client.HTTPConnection")
     def test_streams_restore_with_official_odoo_form_fields(self, connection_type):
         connection = Mock()
         response = Mock(status=303)
@@ -221,7 +253,10 @@ class DatabaseRestoreTests(unittest.TestCase):
             )
 
         self.assertEqual((status, content), (303, ""))
-        connection.putrequest.assert_called_once_with("POST", "/web/database/restore")
+        # Windows ne résout pas dev.demo.localhost : connexion à la boucle locale, nom d'hôte dans Host.
+        self.assertEqual("127.0.0.1", connection_type.call_args.args[0])
+        connection.putrequest.assert_called_once_with("POST", "/web/database/restore", skip_host=True)
+        connection.putheader.assert_any_call("Host", "dev.demo.localhost")
         transmitted = b"".join(call.args[0] for call in connection.send.call_args_list)
         self.assertIn(b'name="master_pwd"\r\n\r\nodoo', transmitted)
         self.assertIn(b'name="name"\r\n\r\ndemo_restore', transmitted)
