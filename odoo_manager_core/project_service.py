@@ -13,7 +13,21 @@ import uuid
 from collections import deque
 from pathlib import Path
 
+from . import jobs
 from .system import docker_command
+from .traefik import (
+    TRAEFIK_CONFIG_FILENAMES,
+    TRAEFIK_DEFAULT_HTTP_PORT,
+    TraefikInstance,
+    compose_service_block,
+    compose_service_container_name,
+    compose_service_ports,
+    detect_traefik_instances,
+    entrypoints_from_config,
+    same_directory,
+    select_traefik_instance,
+    url_with_port,
+)
 from .platform import (
     command_uses_wsl,
     executable_search_path,
@@ -84,25 +98,65 @@ def add_postgres_healthcheck_start_period(content):
 
 
 HTTP_FAILURE_LABELS = {
-    "refused": "connexion refusée sur le port 80",
-    "reset": "connexion coupée sur le port 80",
+    "refused": "connexion refusée sur le port {port}",
+    "reset": "connexion coupée sur le port {port}",
     "timeout": "délai dépassé",
     "error": "connexion interrompue",
 }
 ODOO_STARTUP_LOG = "/home/odoo/srv/data/odoo-manager-startup.log"
 ODOO_STARTUP_STATUS = "/home/odoo/srv/data/odoo-manager-startup.status"
+ODOO_LOG_FILE = "/home/odoo/srv/data/odoo.log"
+PENDING_MODULE_STATES_SQL = "('to install','to upgrade','to remove')"
+ODOO_STATE_MARKER = "odoo-manager-state:"
+# Serveur Odoo : odoo-bin ou le script `odoo` de l'image, lancé directement ou par python/bash.
+# Un simple chemin finissant par /odoo, `odoo shell` ou une commande module (--stop-after-init)
+# n'est pas un serveur : les confondre faisait croire Odoo démarré alors qu'il ne l'était pas.
+ODOO_SERVER_PROCESS_PATTERN = r"^([^ ]*/)?((python[0-9.]*|(ba|da)?sh)( +-[^ ]+)* +)?([^ ]*/)?odoo(-bin)?( |$)"
+ODOO_NON_SERVER_PROCESS_PATTERN = r"--stop-after-init|--no-http|odoo(-bin)? +shell( |$)"
+ODOO_SERVER_STATE_SCRIPT = (
+    "if command -v ps >/dev/null 2>&1; then processes=$(ps -eo args); "
+    "else processes=$(for f in /proc/[0-9]*/cmdline; do tr '\\000' ' ' <\"$f\" 2>/dev/null; echo; done); fi; "
+    f"if printf '%s\\n' \"$processes\" | grep -E '{ODOO_SERVER_PROCESS_PATTERN}' "
+    f"| grep -Evq -- '{ODOO_NON_SERVER_PROCESS_PATTERN}'; then echo '{ODOO_STATE_MARKER}running'; "
+    f"elif [ -f {ODOO_STARTUP_STATUS} ]; then echo \"{ODOO_STATE_MARKER}exited:$(head -n 1 {ODOO_STARTUP_STATUS})\"; "
+    f"else echo '{ODOO_STATE_MARKER}absent'; fi"
+)
+# Sans processus ni code de sortie, le lanceur vient de démarrer ou a été tué : délai avant de conclure.
+ODOO_PROCESS_GRACE_SECONDS = 10
 ACTIVE_PROCESSES = set()
 ACTIVE_PROCESSES_LOCK = threading.Lock()
 # `ports: !override` remplace la liste au lieu de la fusionner (Compose >= 2.24.4).
 COMPOSE_OVERRIDE_TAG_MIN_VERSION = (2, 24, 4)
-TRAEFIK_LOOPBACK_OVERRIDE = """# Généré par Odoo Manager.
-# Traefik publie 80:80 sur toutes les interfaces : les instances Odoo locales et leur
+TRAEFIK_LOOPBACK_HEADER = """# Généré par Odoo Manager.
+# Traefik publie ses ports sur toutes les interfaces : les instances Odoo locales et leur
 # gestionnaire de bases (sauvegarde incluse) seraient joignables depuis le réseau.
-services:
-  traefik:
-    ports: !override
-      - "127.0.0.1:80:80"
+# Les ports de la machine choisis dans le compose de Traefik sont conservés.
 """
+TRAEFIK_PORT_WAIT_SECONDS = 15
+# Délai laissé au fournisseur Docker de Traefik pour publier une route avant de chercher une cause certaine.
+TRAEFIK_ROUTE_DIAGNOSIS_SECONDS = 20
+
+
+def traefik_loopback_override(service, ports):
+    """Surcharge compose qui limite les ports publiés à 127.0.0.1 sans changer leurs numéros."""
+    lines = [TRAEFIK_LOOPBACK_HEADER.rstrip("\n"), "services:", f"  {service}:", "    ports: !override"]
+    seen = set()
+    for port in ports:
+        # Les publications toutes interfaces (IPv4 ou IPv6) deviennent une seule publication locale.
+        host_ip = "127.0.0.1" if port.host_ip in {"", "0.0.0.0", "::", "[::]"} else port.host_ip
+        entry = f"{host_ip}:{port.host_port}:{port.container_port}" + ("" if port.protocol == "tcp" else f"/{port.protocol}")
+        if entry not in seen:
+            seen.add(entry)
+            lines.append(f'      - "{entry}"')
+    return "\n".join(lines) + "\n"
+
+
+def host_port_in_use(port, timeout=0.5):
+    try:
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 GIT_SSH_COMMAND = "ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new"
@@ -140,12 +194,15 @@ def terminate_active_processes(wait_seconds=0.5):
 
 
 class ProjectService:
-    def __init__(self, settings, workspace, traefik_dir=None, runner=None, http_probe=None):
+    def __init__(self, settings, workspace, traefik_dir=None, runner=None, http_probe=None, port_in_use=None):
         self.settings = settings
         self.workspace = Path(workspace)
         self.traefik_dir = Path(traefik_dir).expanduser() if traefik_dir else None
         self.runner = runner
         self.http_probe = http_probe
+        self.port_in_use = port_in_use
+        self._traefik = None
+        self._traefik_detected = False
 
     def env(self):
         env = os.environ.copy()
@@ -171,6 +228,7 @@ class ProjectService:
         if self.runner:
             return self.runner.stream(command, cwd=process_cwd, log=log)
 
+        jobs.checkpoint()
         self.log(log, "$ " + " ".join(str(arg) for arg in command))
         process = subprocess.Popen(
             command,
@@ -186,6 +244,7 @@ class ProjectService:
         )
         with ACTIVE_PROCESSES_LOCK:
             ACTIVE_PROCESSES.add(process)
+        jobs.track_process(process)
         try:
             assert process.stdout is not None
             for line in process.stdout:
@@ -198,11 +257,13 @@ class ProjectService:
             process.wait()
             raise
         finally:
+            jobs.untrack_process(process)
             if process.stdout is not None:
                 process.stdout.close()
             with ACTIVE_PROCESSES_LOCK:
                 ACTIVE_PROCESSES.discard(process)
         self.log(log, f"Code retour: {code}")
+        jobs.checkpoint()
         return code
 
     def capture(self, command, cwd=None, timeout=10):
@@ -212,15 +273,16 @@ class ProjectService:
             return self.runner.capture(command, cwd=process_cwd, timeout=timeout)
 
         try:
-            result = subprocess.run(
+            result = jobs.run_process(
                 command,
+                timeout,
                 cwd=str(process_cwd),
                 env=self.env(),
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=timeout,
                 **hidden_process_kwargs(),
             )
             stdout = (result.stdout or "").strip()
@@ -339,7 +401,7 @@ class ProjectService:
             self.log(log, logs)
 
     def wait_for_postgres(self, project, max_wait=180, log=None, sleep=None):
-        sleep = sleep or time.sleep
+        sleep = sleep or jobs.sleep
         container = f"postgresql-{project}"
         waited = 0
         last_state = None
@@ -489,7 +551,7 @@ class ProjectService:
         self.log(log, f"Mount /etc/localtime supprimé du compose macOS: {compose_file}")
         self.log(log, f"Sauvegarde: {backup}")
 
-    def project_url(self, project):
+    def project_url(self, project, refresh_traefik=False):
         compose = self.compose_file(project)
         if compose:
             try:
@@ -500,7 +562,7 @@ class ProjectService:
             if marker in content:
                 host = content.split(marker, 1)[1].split("`)", 1)[0]
                 if host:
-                    return f"http://{host}/"
+                    return url_with_port(f"http://{host}/", self.traefik_http_port(refresh=refresh_traefik))
 
         code, output = self.capture(self.docker("port", f"odoo-{project}", "8069/tcp"), timeout=1)
         if code == 0 and output:
@@ -508,9 +570,100 @@ class ProjectService:
             port = first.rsplit(":", 1)[-1]
             if port.isdigit():
                 return f"http://localhost:{port}/"
-        return f"http://dev.{project}.localhost/"
+        return url_with_port(f"http://dev.{project}.localhost/", self.traefik_http_port(refresh=refresh_traefik))
+
+    def traefik_compose_path(self):
+        if not self.traefik_dir:
+            return None
+        try:
+            return next((self.traefik_dir / name for name in COMPOSE_FILENAMES if (self.traefik_dir / name).is_file()), None)
+        except OSError:
+            return None
+
+    def traefik_compose_text(self):
+        base = self.traefik_compose_path()
+        try:
+            return base.read_text(encoding="utf-8", errors="ignore") if base else ""
+        except OSError:
+            return ""
+
+    def traefik_instances(self):
+        """Conteneurs Traefik de la machine ; None quand Docker ne répond pas."""
+        return detect_traefik_instances(self.capture, self.docker())
+
+    def is_managed_traefik(self, instance):
+        """Vrai pour le conteneur créé par compose depuis le dossier Traefik configuré."""
+        if not self.traefik_dir or not instance.working_dir:
+            return False
+        try:
+            resolved = self.traefik_dir.resolve()
+        except OSError:
+            resolved = self.traefik_dir
+        if same_directory(instance.working_dir, self.traefik_dir, resolved):
+            return True
+        try:
+            # Docker dans WSL enregistre le dossier sous sa forme Linux.
+            execution_directory = self.command_path(self.docker(), self.traefik_dir)
+        except (OSError, RuntimeError):
+            return False
+        return same_directory(instance.working_dir, execution_directory)
+
+    def traefik_instance(self, refresh=False):
+        if refresh or not self._traefik_detected:
+            self.use_traefik_instance(select_traefik_instance(self.traefik_instances() or [], self.is_managed_traefik))
+        return self._traefik
+
+    def use_traefik_instance(self, instance):
+        self._traefik, self._traefik_detected = instance, True
+
+    def configured_traefik_http_port(self):
+        """Port HTTP que publiera le compose de Traefik, lu tant que le conteneur n'est pas démarré."""
+        ports = compose_service_ports(self.traefik_compose_text())
+        if not ports:
+            return None
+        entrypoints = None
+        for name in TRAEFIK_CONFIG_FILENAMES:
+            try:
+                path = self.traefik_dir / name
+                if path.is_file():
+                    entrypoints = entrypoints_from_config(path.read_text(encoding="utf-8", errors="ignore"))
+                    break
+            except OSError:
+                continue
+        configured = TraefikInstance("", "traefik", "", "configured", published=tuple(ports), entrypoints=entrypoints)
+        return configured.http_port
+
+    def traefik_http_port(self, refresh=False):
+        instance = self.traefik_instance(refresh=refresh)
+        if instance and instance.running and instance.http_port:
+            return instance.http_port
+        return self.traefik_http_port_from_config()
+
+    def traefik_http_port_from_config(self):
+        return self.configured_traefik_http_port() or TRAEFIK_DEFAULT_HTTP_PORT
+
+    def traefik_container_name(self):
+        instance = self.traefik_instance()
+        if instance:
+            return instance.name
+        return compose_service_container_name(self.traefik_compose_text()) or "traefik"
 
     def start_traefik(self, log=None):
+        instances = self.traefik_instances() or []
+        managed = [instance for instance in instances if self.is_managed_traefik(instance)]
+        foreign = [instance for instance in instances if instance not in managed]
+        managed_running = any(instance.running for instance in managed)
+        compose_text = self.traefik_compose_text()
+        ports = compose_service_ports(compose_text) or []
+
+        if not managed_running:
+            existing = self.reusable_traefik(foreign, ports, log=log)
+            if existing:
+                self.use_traefik_instance(existing)
+                self.announce_traefik(existing, log=log)
+                self.ensure_traefik_port_reachable(log=log)
+                return
+
         if not self.traefik_dir or not self.traefik_dir.exists():
             self.log(log, f"Traefik introuvable: {self.traefik_dir or ''}".rstrip())
             return
@@ -518,45 +671,207 @@ class ProjectService:
             self.log(log, f"Dossier Traefik sans compose: {self.traefik_dir}")
             return
 
+        if not managed_running:
+            # Docker refuserait de créer le conteneur : le dire tout de suite plutôt qu'après un compose en échec.
+            self.ensure_traefik_container_name_free(compose_text, foreign)
+            conflict = self.traefik_port_conflict(ports, foreign)
+            if conflict:
+                port, owner = conflict
+                raise RuntimeError(
+                    f"Le port {port.host_port} de cette machine est déjà utilisé par {owner} : "
+                    f"Traefik ne peut pas le publier. Libère ce port, ou change le port publié dans "
+                    f"{self.traefik_compose_path()} (par exemple \"8080:{port.container_port}\") : "
+                    "le gestionnaire utilisera automatiquement le nouveau port."
+                )
+
         self.log(log, "Démarrage de Traefik...")
         compose_files = self.traefik_loopback_compose_files(log=log)
         code = self.stream(self.docker("compose", *compose_files, "up", "-d"), cwd=self.traefik_dir, log=log)
         if code != 0:
             raise RuntimeError("Impossible de démarrer Traefik.")
+        self.announce_traefik(self.traefik_instance(refresh=True), log=log)
         self.ensure_traefik_port_reachable(log=log)
 
+    def reusable_traefik(self, foreign, ports, log=None):
+        """Instance Traefik déjà démarrée hors du dossier configuré et capable de servir les projets."""
+        usable = []
+        for instance in foreign:
+            if not instance.running:
+                continue
+            problems = instance.compatibility_problems()
+            if problems:
+                self.log(log, f"Instance Traefik existante ignorée : {instance.describe()} ; {'; '.join(problems)}.")
+            else:
+                usable.append(instance)
+        if not usable:
+            return None
+
+        complete = [instance for instance in usable if not self.missing_traefik_middlewares(instance)]
+        if complete:
+            instance = select_traefik_instance(complete, lambda _instance: False)
+            self.log(log, f"Instance Traefik existante détectée : {instance.describe()}. Elle est réutilisée.")
+            return instance
+
+        instance = select_traefik_instance(usable, lambda _instance: False)
+        missing = ", ".join(f"{name}@docker" for name in self.missing_traefik_middlewares(instance))
+        if self.traefik_compose_path() and not self.traefik_port_conflict(ports, foreign):
+            self.log(
+                log,
+                f"Instance Traefik existante détectée : {instance.describe()}, sans les middlewares {missing} "
+                "utilisés par les projets. Démarrage de l'instance docker-local-tools à la place.",
+            )
+            return None
+        self.log(
+            log,
+            f"Instance Traefik existante détectée : {instance.describe()}. Elle est réutilisée, mais aucun conteneur "
+            f"ne définit les middlewares {missing} : les routes des projets qui les utilisent resteront en 404.",
+        )
+        return instance
+
+    def missing_traefik_middlewares(self, instance):
+        missing = instance.missing_middlewares
+        if not missing:
+            return ()
+        # Les middlewares @docker peuvent être déclarés par un autre conteneur que Traefik.
+        code, output = self.capture(self.docker("ps", "--no-trunc", "--format", "{{.Labels}}"), timeout=8)
+        if code != 0:
+            return ()
+        labels = (output or "").lower()
+        return tuple(name for name in missing if f"traefik.http.middlewares.{name}.".lower() not in labels)
+
+    def ensure_traefik_container_name_free(self, compose_text, foreign):
+        name = compose_service_container_name(compose_text)
+        holder = next((instance for instance in foreign if name and instance.name == name), None)
+        if holder is None:
+            return
+        origin = f"créé depuis {holder.working_dir}" if holder.working_dir else "créé hors de docker compose"
+        problems = holder.compatibility_problems() if holder.running else []
+        detail = f" Il ne peut pas servir les projets : {'; '.join(problems)}." if problems else ""
+        raise RuntimeError(
+            f"Un conteneur « {name} » existe déjà ({holder.describe()}, {origin}) : Docker ne peut pas créer "
+            f"celui de {self.traefik_dir}.{detail} Démarre-le (docker start {name}) s'il s'agit de ton instance "
+            f"Traefik, ou supprime-le (docker rm -f {name}), puis relance le démarrage."
+        )
+
+    def traefik_port_conflict(self, ports, instances):
+        """(port, occupant) du premier port du compose de Traefik déjà pris sur la machine."""
+        for port in ports:
+            if port.protocol != "tcp":
+                continue
+            holder = next(
+                (
+                    instance for instance in instances
+                    if instance.running and any(
+                        published.host_port == port.host_port and published.protocol == "tcp"
+                        for published in instance.published
+                    )
+                ),
+                None,
+            )
+            if holder:
+                return port, f"le conteneur Traefik {holder.describe()}"
+            if self.host_port_in_use(port.host_port):
+                return port, self.port_owner(port.host_port) or "un autre service"
+        return None
+
+    def host_port_in_use(self, port):
+        if self.port_in_use:
+            return self.port_in_use(port)
+        if self.runner is not None:
+            return False
+        return host_port_in_use(port)
+
+    def port_owner(self, port):
+        """Description de ce qui écoute sur un port de la machine ; chaîne vide si inconnu."""
+        code, output = self.capture(self.docker("ps", "--filter", f"publish={port}", "--format", "{{.Names}}"), timeout=8)
+        names = [line.strip() for line in (output or "").splitlines() if line.strip()] if code == 0 else []
+        if names:
+            return f"le conteneur Docker {names[0]}"
+        if platform.system() == "Windows":
+            code, output = self.capture([resolve_host_executable("netstat"), "-ano", "-p", "TCP"], timeout=8)
+            pid = None
+            for line in (output or "").splitlines() if code == 0 else ():
+                parts = line.split()
+                # L'état est traduit selon la langue de Windows : un socket en écoute a un distant en :0.
+                if (
+                    len(parts) >= 4 and parts[0].upper() == "TCP" and parts[-1].isdigit()
+                    and parts[1].rsplit(":", 1)[-1] == str(port) and parts[2].rsplit(":", 1)[-1] == "0"
+                ):
+                    pid = parts[-1]
+                    break
+            if not pid:
+                return ""
+            if pid == "4":
+                return "le service HTTP de Windows (processus System : IIS, HTTP.sys...)"
+            code, output = self.capture(
+                [resolve_host_executable("tasklist"), "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                timeout=8,
+            )
+            name = output.split(",", 1)[0].strip('"') if code == 0 and (output or "").startswith('"') else ""
+            return f"le processus {name} (PID {pid})" if name else f"le processus PID {pid}"
+        code, output = self.capture([resolve_host_executable("lsof"), "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fpc"], timeout=8)
+        if code != 0 or not output:
+            return ""
+        values = {}
+        for line in output.splitlines():
+            if line[:1] in {"p", "c"} and line[:1] not in values:
+                values[line[:1]] = line[1:]
+        return f"le processus {values['c']} (PID {values.get('p', '?')})" if values.get("c") else ""
+
+    def announce_traefik(self, instance, log=None):
+        if instance is None or not instance.running:
+            return
+        port = instance.http_port
+        if port is None:
+            raise RuntimeError(
+                f"Traefik ({instance.describe()}) est démarré mais son entrypoint HTTP n'est publié sur aucun port "
+                "de cette machine : les projets seraient injoignables. Publie ce port dans le compose de Traefik."
+            )
+        if port == TRAEFIK_DEFAULT_HTTP_PORT:
+            self.log(log, f"Traefik prêt : conteneur {instance.name}, port HTTP {port}.")
+        else:
+            self.log(
+                log,
+                f"Traefik prêt : conteneur {instance.name}, port HTTP {port} (port personnalisé). "
+                f"Les URL des projets utilisent ce port, par exemple http://dev.<projet>.localhost:{port}/.",
+            )
+
     def traefik_port_probe(self):
-        # Toute réponse HTTP (même 404) prouve que la redirection du port 80 vers Traefik fonctionne.
+        # Toute réponse HTTP (même 404) prouve que la redirection du port vers Traefik fonctionne.
+        url = url_with_port("http://traefik.localhost/api/overview", self.traefik_http_port())
         if self.http_probe:
-            result = self.http_probe("http://traefik.localhost/api/overview")
+            result = self.http_probe(url)
             return result if isinstance(result, tuple) else (result, "")
-        return self.http_probe_result("http://traefik.localhost/api/overview", timeout=5)
+        return self.http_probe_result(url, timeout=5)
 
     def ensure_traefik_port_reachable(self, log=None, sleep=None):
         """Répare la redirection de port de Docker Desktop quand Traefik tourne sans répondre.
 
-        Docker Desktop perd la redirection du port 80 quand Traefik est recréé avec une autre
+        Docker Desktop perd la redirection du port quand Traefik est recréé avec une autre
         adresse de publication, ou après une veille Windows : le conteneur est running mais
         chaque connexion est refusée ou coupée. Un redémarrage du conteneur la rétablit.
         """
         if self.runner is not None and self.http_probe is None:
             return True
-        sleep = sleep or time.sleep
+        sleep = sleep or jobs.sleep
         status, reason = self.traefik_port_probe()
-        if status or reason not in {"refused", "reset"} or self.container_status("traefik") != "running":
+        container = self.traefik_container_name()
+        if status or reason not in {"refused", "reset"} or self.container_status(container) != "running":
             return bool(status)
+        port = self.traefik_http_port()
         self.log(
             log,
-            f"Traefik tourne mais le port 80 ne répond pas depuis cette machine ({HTTP_FAILURE_LABELS[reason]}). "
-            "Redémarrage du conteneur traefik pour rétablir la redirection de port de Docker...",
+            f"Traefik tourne mais le port {port} ne répond pas depuis cette machine "
+            f"({HTTP_FAILURE_LABELS[reason].format(port=port)}). "
+            f"Redémarrage du conteneur {container} pour rétablir la redirection de port de Docker...",
         )
-        if self.stream(self.docker("restart", "traefik"), log=log) != 0:
+        if self.stream(self.docker("restart", container), log=log) != 0:
             return False
-        for _ in range(15):
+        for _ in range(TRAEFIK_PORT_WAIT_SECONDS):
             sleep(1)
             status, reason = self.traefik_port_probe()
             if status:
-                self.log(log, "Redirection du port 80 rétablie.")
+                self.log(log, f"Redirection du port {port} rétablie.")
                 return True
         return False
 
@@ -566,14 +881,19 @@ class ProjectService:
         return tuple(int(part) for part in match.groups()) if match else None
 
     def traefik_loopback_compose_files(self, log=None):
-        """Restreint Traefik à 127.0.0.1 sans modifier le dépôt docker-local-tools."""
-        base = next((self.traefik_dir / name for name in COMPOSE_FILENAMES if (self.traefik_dir / name).is_file()), None)
-        try:
-            base_text = base.read_text(encoding="utf-8", errors="ignore") if base else ""
-        except OSError:
-            base_text = ""
-        if not re.search(r"(?m)^\s{2}traefik:\s*$", base_text):
+        """Restreint Traefik à 127.0.0.1 sans modifier le dépôt docker-local-tools ni ses ports."""
+        base = self.traefik_compose_path()
+        base_text = self.traefik_compose_text()
+        if compose_service_block(base_text, "traefik") is None:
             self.log(log, "Service traefik introuvable dans le compose : ports laissés tels quels.")
+            return []
+        ports = compose_service_ports(base_text, "traefik")
+        if not ports:
+            self.log(
+                log,
+                "Ports de Traefik non reconnus dans le compose (variables, syntaxe longue ou aucun port) : "
+                "ports laissés tels quels.",
+            )
             return []
         version = self.compose_version()
         if not version or version < COMPOSE_OVERRIDE_TAG_MIN_VERSION:
@@ -584,10 +904,11 @@ class ProjectService:
             )
             return []
         override = self.workspace / ".odoo_manager_runtime" / "traefik-loopback.compose.yml"
+        content = traefik_loopback_override("traefik", ports)
         try:
             override.parent.mkdir(parents=True, exist_ok=True)
-            if not override.is_file() or override.read_text(encoding="utf-8") != TRAEFIK_LOOPBACK_OVERRIDE:
-                override.write_text(TRAEFIK_LOOPBACK_OVERRIDE, encoding="utf-8")
+            if not override.is_file() or override.read_text(encoding="utf-8") != content:
+                override.write_text(content, encoding="utf-8")
         except OSError as exc:
             self.log(log, f"Surcharge Traefik impossible à écrire ({exc}) : ports laissés tels quels.")
             return []
@@ -762,7 +1083,8 @@ class ProjectService:
                 "Les conteneurs existants et les données ont été conservées."
             )
 
-    def wait_for_container(self, container, max_wait=60, log=None, sleep=time.sleep):
+    def wait_for_container(self, container, max_wait=60, log=None, sleep=None):
+        sleep = sleep or jobs.sleep
         waited = 0
         while waited <= max_wait:
             status = self.container_status(container)
@@ -783,7 +1105,7 @@ class ProjectService:
         sleep=None,
     ):
         """Wait until the image entrypoint has installed project dependencies."""
-        sleep = sleep or time.sleep
+        sleep = sleep or jobs.sleep
         waited = 0
         init_command = "tr '\\000' ' ' </proc/1/cmdline 2>/dev/null || true"
         announced = False
@@ -824,16 +1146,47 @@ class ProjectService:
             "Consulte les logs affichés ci-dessus."
         )
 
+    def odoo_server_state(self, container):
+        """`running`, `exited:<code>`, `absent`, ou `unknown` quand Docker ne répond pas à temps.
+
+        Un `docker exec` expiré sous un Docker chargé ne prouve pas qu'Odoo est arrêté :
+        le confondre avec un arrêt faisait échouer des démarrages qui aboutissaient.
+        """
+        code, output = self.capture(self.docker("exec", container, "sh", "-c", ODOO_SERVER_STATE_SCRIPT), timeout=15)
+        if code == 0:
+            for line in (output or "").splitlines():
+                if line.startswith(ODOO_STATE_MARKER):
+                    return line[len(ODOO_STATE_MARKER):].strip()
+        if code == 124:
+            return "unknown"
+        status = self.container_status(container)
+        return "unknown" if status == "running" else "absent"
+
     def odoo_server_running(self, container):
-        process_command = (
-            "ps -eo args | "
-            "grep -E '([/][o]doo-bin|[/][o]doo)( |$)' >/dev/null 2>&1"
+        return self.odoo_server_state(container) == "running"
+
+    def odoo_stopped_error(self, container, state, when, log=None):
+        outputs = self.odoo_startup_diagnostics(container, log=log)
+        exit_code = state.split(":", 1)[1].strip() if state.startswith("exited:") else ""
+        reason = self.odoo_startup_failure_reason(outputs)
+        return RuntimeError(
+            f"Le processus Odoo s'est arrêté{f' (code {exit_code})' if exit_code else ''} {when}. {reason}"
         )
-        code, _ = self.capture(
-            self.docker("exec", container, "sh", "-lc", process_command),
-            timeout=8,
-        )
-        return code == 0
+
+    def odoo_startup_failure_reason(self, outputs):
+        """Dernière erreur du lancement en cours, sans reprendre celles des démarrages précédents."""
+        startup = (outputs.get(ODOO_STARTUP_LOG) or "").splitlines()
+        odoo_log = (outputs.get(ODOO_LOG_FILE) or "").splitlines()
+        banners = [index for index, line in enumerate(odoo_log) if "odoo: Odoo version" in line]
+        current_run = odoo_log[banners[-1]:] if banners else []
+        for lines in (current_run, startup):
+            reason = self.odoo_command_failure_reason(lines)
+            if reason.startswith("Dernière erreur Odoo"):
+                return reason
+        tail = next((line.strip() for line in reversed(startup) if line.strip() and "security risk" not in line), "")
+        if tail:
+            return f"Dernière sortie Odoo : {tail[:350]}"
+        return "Consulte les logs Odoo affichés ci-dessus."
 
     def odoo_startup_diagnostics(self, container, log=None):
         commands = (
@@ -847,6 +1200,7 @@ class ProjectService:
                     f"test -f {ODOO_STARTUP_STATUS} && cat {ODOO_STARTUP_STATUS} || true",
                 ),
                 8,
+                ODOO_STARTUP_STATUS,
             ),
             (
                 "Sortie du dernier lancement Odoo:",
@@ -858,6 +1212,7 @@ class ProjectService:
                     f"tail -n 160 {ODOO_STARTUP_LOG} 2>/dev/null || true",
                 ),
                 12,
+                ODOO_STARTUP_LOG,
             ),
             (
                 "Processus dans le conteneur Odoo:",
@@ -869,6 +1224,7 @@ class ProjectService:
                     "ps -eo pid,args | grep -E '[o]doo|[p]ython' | tail -n 30 || true",
                 ),
                 8,
+                "processes",
             ),
             (
                 "Derniers logs Odoo:",
@@ -877,25 +1233,37 @@ class ProjectService:
                     container,
                     "sh",
                     "-lc",
-                    "tail -n 120 /home/odoo/srv/data/odoo.log 2>/dev/null || true",
+                    f"tail -n 120 {ODOO_LOG_FILE} 2>/dev/null || true",
                 ),
                 12,
+                ODOO_LOG_FILE,
             ),
             (
                 "Derniers logs du conteneur Odoo:",
                 self.docker("logs", "--tail", "80", container),
                 12,
+                "container",
             ),
         )
-        for title, command, timeout in commands:
+        outputs = {}
+        for title, command, timeout, key in commands:
             code, output = self.capture(command, timeout=timeout)
             if code == 0 and output:
+                outputs[key] = output
                 self.log(log, title)
                 self.log(log, output)
+        return outputs
 
-    def wait_odoo_port(self, container, max_wait=300, log=None, sleep=None):
-        sleep = sleep or time.sleep
+    def wait_odoo_port(self, container, max_wait=300, log=None, sleep=None, launch=None):
+        """Attend l'ouverture du port 8069.
+
+        `launch` est fourni quand le serveur semblait déjà démarré : s'il n'existe plus, il est lancé
+        au lieu de conclure à un arrêt d'un serveur que le gestionnaire n'a jamais démarré.
+        """
+        sleep = sleep or jobs.sleep
         waited = 0
+        missing_since = None
+        state = ""
         command = (
             "import socket; "
             "s=socket.create_connection(('127.0.0.1', 8069), 2); "
@@ -907,15 +1275,29 @@ class ProjectService:
             code, _ = self.capture(self.docker("exec", container, "python3", "-c", command), timeout=5)
             if code == 0:
                 return
-            if waited >= 4 and not self.odoo_server_running(container):
-                self.odoo_startup_diagnostics(container, log=log)
-                raise RuntimeError(
-                    "Le processus Odoo s'est arrêté avant d'ouvrir le port 8069. "
-                    "Consulte les logs Odoo affichés ci-dessus."
-                )
+            if waited >= 4:
+                state = self.odoo_server_state(container)
+                if state in {"running", "unknown"}:
+                    missing_since = None
+                elif launch is not None:
+                    self.log(log, f"Aucun serveur Odoo actif dans {container} : lancement du serveur...")
+                    launch()
+                    launch = None
+                    missing_since = None
+                elif state.startswith("exited:"):
+                    raise self.odoo_stopped_error(container, state, "avant d'ouvrir le port 8069", log=log)
+                else:
+                    missing_since = waited if missing_since is None else missing_since
+                    if waited - missing_since >= ODOO_PROCESS_GRACE_SECONDS:
+                        raise self.odoo_stopped_error(container, state, "avant d'ouvrir le port 8069", log=log)
             sleep(2)
             waited += 2
         self.odoo_startup_diagnostics(container, log=log)
+        if state == "unknown":
+            raise RuntimeError(
+                f"Docker ne répond pas assez vite pour vérifier Odoo dans {container} depuis {max_wait}s. "
+                "Vérifie la charge de Docker Desktop (mémoire, CPU), puis relance le démarrage."
+            )
         raise RuntimeError(
             f"Odoo fonctionne mais ne répond pas sur le port 8069 après {max_wait}s. "
             "Consulte les logs Odoo affichés ci-dessus."
@@ -928,9 +1310,10 @@ class ProjectService:
         ensuite prendre plusieurs minutes (Windows, fichiers sur NTFS, gros projets).
         Tester seulement le port faisait accuser Traefik d'une lenteur d'Odoo.
         """
-        sleep = sleep or time.sleep
+        sleep = sleep or jobs.sleep
         started = time.monotonic()
         attempt = 0
+        missing_since = None
         while True:
             waited = int(time.monotonic() - started)
             code, output = self.capture(
@@ -946,11 +1329,13 @@ class ProjectService:
                 self.log(log, "Chargement d'Odoo : attente de la première réponse HTTP dans le conteneur...")
             self.log(log, f"Chargement d'Odoo... {waited}s/{max_wait}s ({detail[0]})")
             attempt += 1
-            if not self.odoo_server_running(container):
-                self.odoo_startup_diagnostics(container, log=log)
-                raise RuntimeError(
-                    "Le processus Odoo s'est arrêté pendant son chargement. Consulte les logs Odoo affichés ci-dessus."
-                )
+            state = self.odoo_server_state(container)
+            if state in {"running", "unknown"}:
+                missing_since = None
+            else:
+                missing_since = waited if missing_since is None else missing_since
+                if state.startswith("exited:") or waited - missing_since >= ODOO_PROCESS_GRACE_SECONDS:
+                    raise self.odoo_stopped_error(container, state, "pendant son chargement", log=log)
             if waited >= max_wait:
                 self.odoo_startup_diagnostics(container, log=log)
                 raise RuntimeError(
@@ -995,17 +1380,24 @@ class ProjectService:
     def http_status(cls, url, timeout=10):
         return cls.http_probe_result(url, timeout=timeout)[0]
 
-    def traefik_route_failure(self, project, status, reason):
-        host = urllib.parse.urlsplit(self.project_url(project)).hostname or "l'URL locale"
+    def traefik_route_failure(self, project, status, reason, url=None, problems=None):
+        parsed = urllib.parse.urlsplit(url or self.project_url(project))
+        host = parsed.hostname or "l'URL locale"
+        port = parsed.port or TRAEFIK_DEFAULT_HTTP_PORT
         container = f"odoo-{project}"
         if reason in {"refused", "reset"}:
-            traefik = self.container_status("traefik")
+            name = self.traefik_container_name()
+            traefik = self.container_status(name)
             return (
-                f"Rien n'écoute sur le port 80 de cette machine (conteneur traefik : {traefik}). "
-                "Traefik est arrêté, ou le port 80 est occupé par un autre service "
+                f"Rien n'écoute sur le port {port} de cette machine (conteneur {name} : {traefik}). "
+                f"Traefik est arrêté, ou le port {port} est occupé par un autre service "
                 "(sous Windows : IIS, service HTTP « System », Skype...). Odoo, lui, fonctionne."
             )
         if status == 404:
+            if problems is None:
+                problems = self.traefik_route_problems(project, port)
+            if problems:
+                return f"{host} répond en HTTP 404 sur le port {port} : {'; '.join(problems)}."
             networks = self.container_network_names(container)
             network_hint = (
                 f" Le conteneur n'est pas relié au réseau traefik-local (réseaux : {', '.join(networks) or 'aucun'})."
@@ -1024,6 +1416,36 @@ class ProjectService:
             )
         return f"Odoo répond dans son conteneur, mais {host} reste inaccessible via Traefik ({reason or status})."
 
+    def traefik_route_problems(self, project, port):
+        """Causes certaines d'un 404 persistant : attendre plus longtemps ne les corrigera pas."""
+        instances = self.traefik_instances()
+        if instances is None:
+            return []
+        instance = select_traefik_instance(instances, self.is_managed_traefik)
+        self.use_traefik_instance(instance)
+        if instance is None or not instance.running:
+            return [f"aucun conteneur Traefik n'est démarré, un autre serveur web occupe le port {port}"]
+        if instance.http_port and instance.http_port != port:
+            return [
+                f"Traefik ({instance.describe()}) n'écoute pas sur le port {port}, "
+                "un autre serveur web occupe ce port"
+            ]
+        problems = [f"Traefik ({instance.describe()}) : {problem}" for problem in instance.compatibility_problems()]
+        container = f"odoo-{project}"
+        networks = self.container_network_names(container)
+        if networks and instance.on_project_network and not instance.host_network and not set(networks) & set(instance.networks):
+            problems.append(
+                f"{container} (réseaux : {', '.join(networks)}) ne partage aucun réseau avec {instance.name} "
+                f"(réseaux : {', '.join(instance.networks)})"
+            )
+        missing = self.missing_traefik_middlewares(instance)
+        if missing:
+            problems.append(
+                f"aucun conteneur ne définit les middlewares {', '.join(name + '@docker' for name in missing)} "
+                "utilisés par les routes du projet (le Traefik de docker-local-tools les déclare)"
+            )
+        return problems
+
     def container_network_names(self, container):
         code, output = self.capture(
             self.docker("inspect", "-f", "{{range $name, $network := .NetworkSettings.Networks}}{{$name}}|{{$network.NetworkID}};{{end}}", container),
@@ -1034,7 +1456,7 @@ class ProjectService:
         return [item.split("|", 1)[0] for item in output.split(";") if item.strip()]
 
     def wait_project_http(self, project, max_wait=90, log=None, sleep=None):
-        sleep = sleep or time.sleep
+        sleep = sleep or jobs.sleep
         url = urllib.parse.urljoin(self.project_url(project), "web/login")
         if self.runner is not None and self.http_probe is None:
             return
@@ -1043,30 +1465,58 @@ class ProjectService:
         last_display = None
         status, reason = 0, ""
         port_repair_attempted = False
+        route_diagnosed = False
+        port_rechecked = False
+        problems = None
         while waited <= max_wait:
             result = self.http_probe(url) if self.http_probe else self.http_probe_result(url)
             status, reason = result if isinstance(result, tuple) else (result, "")
-            display = f"HTTP {status}" if status else HTTP_FAILURE_LABELS.get(reason, "HTTP indisponible")
+            port = urllib.parse.urlsplit(url).port or TRAEFIK_DEFAULT_HTTP_PORT
+            display = f"HTTP {status}" if status else HTTP_FAILURE_LABELS.get(reason, "HTTP indisponible").format(port=port)
             if display != last_display or waited % 10 == 0:
                 self.log(log, f"Vérification de l'accès Odoo via Traefik... {waited}s/{max_wait}s ({display})")
                 last_display = display
             if 200 <= status < 500 and status != 404:
                 return
+
+            certain_failure = False
             if reason in {"refused", "reset"} and waited >= 4 and not port_repair_attempted:
                 port_repair_attempted = True
-                self.ensure_traefik_port_reachable(log=log, sleep=sleep)
+                if not self.ensure_traefik_port_reachable(log=log, sleep=sleep):
+                    # Traefik arrêté : personne ne le redémarrera pendant l'attente. S'il tourne,
+                    # la redirection de Docker Desktop peut encore revenir : on continue d'attendre.
+                    certain_failure = self.container_status(self.traefik_container_name()) != "running"
+                    certain_failure = certain_failure or self.traefik_http_port(refresh=True) != port
+            if status == 404 and waited >= TRAEFIK_ROUTE_DIAGNOSIS_SECONDS and not route_diagnosed:
+                route_diagnosed = True
+                problems = self.traefik_route_problems(project, port)
+                certain_failure = bool(problems)
+            if certain_failure:
+                # Traefik a pu être démarré sur un autre port que celui de l'URL : une seule nouvelle détection.
+                detected = urllib.parse.urljoin(self.project_url(project, refresh_traefik=True), "web/login")
+                if detected != url and not port_rechecked:
+                    port_rechecked = True
+                    self.log(log, f"Traefik détecté sur un autre port : vérification de {detected}")
+                    url = detected
+                    route_diagnosed = False
+                    problems = None
+                    continue
+                raise RuntimeError(
+                    self.traefik_route_failure(project, status, reason, url=url, problems=problems)
+                    + " Le navigateur n'a pas été ouvert afin d'éviter une page Bad Gateway."
+                )
             sleep(2)
             waited += 2
         raise RuntimeError(
-            self.traefik_route_failure(project, status, reason)
+            self.traefik_route_failure(project, status, reason, url=url)
             + " Le navigateur n'a pas été ouvert afin d'éviter une page Bad Gateway."
         )
 
-    def start_odoo_server(self, project, log=None, disable_cron=False):
+    def start_odoo_server(self, project, log=None, disable_cron=False, sleep=None):
+        sleep = sleep or jobs.sleep
         container = f"odoo-{project}"
-        if self.odoo_server_running(container):
-            self.log(log, f"Serveur Odoo déjà démarré dans {container}")
-        else:
+
+        def launch():
             mode = " sans workers cron" if disable_cron else ""
             self.log(log, f"Démarrage du serveur Odoo{mode} dans {container}...")
             cron_option = " --max-cron-threads=0" if disable_cron else ""
@@ -1102,8 +1552,21 @@ class ProjectService:
             )
             if code != 0:
                 raise RuntimeError("Impossible de démarrer le serveur Odoo dans le conteneur.")
-        self.wait_odoo_port(container, log=log)
-        self.wait_odoo_http(container, log=log)
+
+        state = self.odoo_server_state(container)
+        for _ in range(3):
+            # Docker chargé : réessayer avant de lancer un second serveur à l'aveugle.
+            if state != "unknown":
+                break
+            sleep(2)
+            state = self.odoo_server_state(container)
+        if state == "running":
+            self.log(log, f"Serveur Odoo déjà démarré dans {container}")
+            self.wait_odoo_port(container, log=log, sleep=sleep, launch=launch)
+        else:
+            launch()
+            self.wait_odoo_port(container, log=log, sleep=sleep)
+        self.wait_odoo_http(container, log=log, sleep=sleep)
 
     def restart_odoo_server_after_failure(self, project, log=None):
         """Relance Odoo sans masquer l'erreur de l'opération qui a échoué."""
@@ -1114,9 +1577,10 @@ class ProjectService:
             self.log(log, f"Redémarrage du serveur Odoo impossible : {exc}")
 
     def stop_odoo_server(self, project, log=None, max_wait=30, sleep=None):
-        sleep = sleep or time.sleep
+        sleep = sleep or jobs.sleep
         container = f"odoo-{project}"
-        if not self.odoo_server_running(container):
+        # État inconnu (Docker lent) : l'arrêt est tenté, une commande module ne doit pas croiser un serveur actif.
+        if self.odoo_server_state(container) not in {"running", "unknown"}:
             return
         self.log(log, f"Arrêt du serveur Odoo dans {container}...")
         code = self.stream(
@@ -1133,7 +1597,7 @@ class ProjectService:
             raise RuntimeError("Impossible d'arrêter le serveur Odoo avant l'opération module.")
         waited = 0
         while waited <= max_wait:
-            if not self.odoo_server_running(container):
+            if self.odoo_server_state(container) not in {"running", "unknown"}:
                 return
             sleep(1)
             waited += 1
@@ -1195,6 +1659,7 @@ class ProjectService:
         self.log(log, f"Module(s): {modules}")
         self.log(log, f"Équivalent: odoo -d {db_name} {option} {modules} {' '.join([*extra_args, '--stop-after-init'])}")
         was_neutralized = self.database_is_neutralized(project, db_name)
+        self.register_module_operations_revert(project, db_name, log=log)
 
         self.stop_odoo_server(project, log=log)
         odoo_arguments = [
@@ -1217,9 +1682,10 @@ class ProjectService:
         )
         command_error = None
         command_severity_error = None
+        command_error_detail = []
 
         def log_module_output(line):
-            nonlocal command_error, command_severity_error
+            nonlocal command_error, command_severity_error, command_error_detail
             for part in str(line).replace("\r", "\n").splitlines():
                 part = part.strip()
                 if not part:
@@ -1230,6 +1696,9 @@ class ProjectService:
                     command_severity_error = None
                 elif command_severity_error and re.search(r"\b[A-Za-z_][\w.]*(?:Error|Exception|Fault):\s*\S", part):
                     command_error = part
+                    command_error_detail = []
+                elif command_error:
+                    command_error_detail.append(part)
             self.log(log, line)
 
         code = None
@@ -1241,7 +1710,7 @@ class ProjectService:
                     timeout=12,
                 )
                 if command_error:
-                    reason = f"Dernière erreur Odoo : {command_error[:350]}"
+                    reason = f"Dernière erreur Odoo : {command_error[:350]}{self.odoo_error_detail(command_error_detail)}"
                 elif command_severity_error:
                     reason = f"Dernière erreur Odoo : {command_severity_error[:350]}"
                 else:
@@ -1265,13 +1734,34 @@ class ProjectService:
         self.log(log, f"URL Odoo: {self.project_url(project)}")
 
     @staticmethod
-    def odoo_command_failure_reason(lines):
+    def odoo_error_detail(lines):
+        """Explication qu'Odoo écrit sous une exception, par exemple sous un ParseError de vue.
+
+        « ParseError: while parsing ….xml:3 » seul ne dit pas quoi corriger : la cause
+        (« Le champ `x` n'existe pas ») est quelques lignes plus bas.
+        """
+        explanation = re.compile(
+            r"n'existe pas|does not exist|non-existing|introuvable|not found|cannot be located|"
+            r"ne peut pas être localisé|invalide|invalid|inconnu|unknown",
+            re.IGNORECASE,
+        )
+        for line in lines[:40]:
+            line = line.strip()
+            if line.startswith(("View error context", "Contexte d'erreur")) or re.match(r"\d{4}-\d\d-\d\d ", line):
+                break
+            if explanation.search(line) and not line.startswith("<"):
+                return f" — {line[:250]}"
+        return ""
+
+    @classmethod
+    def odoo_command_failure_reason(cls, lines):
         exception = re.compile(r"\b[A-Za-z_][\w.]*(?:Error|Exception|Fault):\s*\S")
         severity = re.compile(r"\b(?:ERROR|CRITICAL)\b")
         last_severity = None
         last_exception = None
+        exception_index = None
         in_error_block = False
-        for line in lines:
+        for index, line in enumerate(lines):
             if not line:
                 continue
             if severity.search(line):
@@ -1281,9 +1771,12 @@ class ProjectService:
                 in_error_block = False
             elif in_error_block and exception.search(line):
                 last_exception = line
-        for line in (last_exception, last_severity):
-            if line:
-                return f"Dernière erreur Odoo : {line[:350]}"
+                exception_index = index
+        if last_exception:
+            detail = cls.odoo_error_detail(list(lines[exception_index + 1:]))
+            return f"Dernière erreur Odoo : {last_exception[:350]}{detail}"
+        if last_severity:
+            return f"Dernière erreur Odoo : {last_severity[:350]}"
         return "Cause non présente dans la sortie reçue. Consultez les Logs de cette tâche."
 
     def run_odoo_shell_script(self, project, db_name, script, failure_message, env=None, secrets=(), log=None):
@@ -1409,8 +1902,79 @@ print("Mot de passe réinitialisé pour l'identifiant : " + user.login)
         self.log(log, "Mot de passe administrateur réinitialisé.")
         self.log(log, f"URL Odoo: {self.project_url(project)}")
 
+    def pending_module_operations(self, project, db_name):
+        """Modules en attente d'installation, de mise à jour ou de suppression ; None si illisible."""
+        code, output = self.capture(
+            self.docker(
+                "exec", f"postgresql-{project}", "psql", "-X", "-U", "postgres", "-d", db_name, "-Atc",
+                f"select name from ir_module_module where state in {PENDING_MODULE_STATES_SQL} order by name;",
+            ),
+            timeout=20,
+        )
+        if code != 0:
+            return None
+        return {line.strip() for line in output.splitlines() if line.strip()}
+
+    def register_module_operations_revert(self, project, db_name, log=None):
+        """À l'arrêt de l'action, remet dans leur état précédent les modules qu'elle a laissés en attente.
+
+        Odoo valide chaque module traité : ceux-là restent modifiés. Les opérations qui
+        attendaient déjà avant l'action ne sont pas touchées.
+        """
+        if jobs.current_control() is None:
+            return
+        before = self.pending_module_operations(project, db_name)
+        if before is None:
+            self.log(log, f"États des modules de {db_name} illisibles : pas de remise en état possible en cas d'arrêt.")
+            return
+        jobs.on_cancel(
+            f"remise en état des modules laissés en attente dans {db_name}",
+            lambda: self.reset_pending_module_operations(project, db_name, before, log=log),
+        )
+
+    def reset_pending_module_operations(self, project, db_name, keep=(), log=None):
+        excluded = ",".join("'" + name.replace("'", "''") + "'" for name in sorted(keep))
+        condition = f"state in {PENDING_MODULE_STATES_SQL}" + (f" and name not in ({excluded})" if excluded else "")
+        query = (
+            "update ir_module_module "
+            "set state = case when state = 'to install' then 'uninstalled' else 'installed' end "
+            f"where {condition} returning name || ' -> ' || state;"
+        )
+        code, output = self.capture(
+            self.docker(
+                "exec", f"postgresql-{project}", "psql", "-X", "-v", "ON_ERROR_STOP=1",
+                "-U", "postgres", "-d", db_name, "-Atc", query,
+            ),
+            timeout=60,
+        )
+        if code != 0:
+            raise RuntimeError(output or f"Remise en état des modules de {db_name} impossible.")
+        changed = [line.strip() for line in output.splitlines() if "->" in line]
+        if changed:
+            self.log(log, "Modules remis dans leur état précédent : " + ", ".join(changed))
+        else:
+            self.log(log, "Aucun module laissé en attente par l'action.")
+
+    def register_start_revert(self, project, path, log=None):
+        """À l'arrêt de l'action, remet le projet dans l'état où elle l'a trouvé."""
+        if jobs.current_control() is None:
+            return
+        container = f"odoo-{project}"
+        statuses = (self.container_status(container), self.container_status(f"postgresql-{project}"))
+        if any(status != "running" for status in statuses):
+            jobs.on_cancel(
+                f"arrêt des conteneurs de {project} démarrés par cette action",
+                lambda: self.stream(self.docker("compose", "stop"), cwd=path, log=log),
+            )
+        elif self.odoo_server_state(container) != "running":
+            jobs.on_cancel(
+                f"arrêt du serveur Odoo de {project} lancé par cette action",
+                lambda: self.stop_odoo_server(project, log=log),
+            )
+
     def run_odoo_uninstall_command(self, project, db_name, modules, log=None):
         self.ensure_odoo_containers_ready(project, log=log)
+        self.register_module_operations_revert(project, db_name, log=log)
 
         self.log(log, "")
         self.log(log, "Commande Odoo (désinstallation)")
@@ -1639,6 +2203,7 @@ print("ODOO_MANAGER_NEUTRALIZATION_DONE")
         compose = self.compose_file(project)
         if not compose:
             raise RuntimeError(f"Projet introuvable ou sans fichier compose: {project}")
+        self.register_start_revert(project, path, log=log)
         self.fix_macos_localtime_mount(compose, log=log)
         self.fix_postgres_healthcheck_start_period(compose, log=log)
         self.start_traefik(log=log)
@@ -1673,7 +2238,9 @@ print("ODOO_MANAGER_NEUTRALIZATION_DONE")
         self.log(log, f"Mise à jour du projet {project}")
         if (path / ".git").exists():
             self.log(log, "Git pull...")
-            code = self.stream(self.git("pull", "--ff-only"), cwd=path, log=log)
+            # Un git pull interrompu laisse des verrous et un index à moitié écrit : il va à son terme.
+            with jobs.protected("git pull du projet"):
+                code = self.stream(self.git("pull", "--ff-only"), cwd=path, log=log)
             if code != 0:
                 raise RuntimeError(f"Git pull impossible pour {project}.")
         else:

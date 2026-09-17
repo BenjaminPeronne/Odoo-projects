@@ -73,6 +73,42 @@ class DockerStatusTests(unittest.TestCase):
         self.assertEqual(status["state"], "stopped")
         self.assertIn("daemon unavailable", status["message"])
 
+    @mock.patch("odoo_manager_core.system.platform_id", return_value="linux")
+    @mock.patch("odoo_manager_core.system.executable_available", return_value=True)
+    @mock.patch("odoo_manager_core.system.subprocess.run")
+    def test_slow_docker_that_answered_recently_stays_ready(self, run, _available, _platform):
+        import subprocess
+
+        run.return_value = mock.Mock(returncode=0, stdout='"29.8.0"\n', stderr="")
+        self.assertEqual("ready", docker_status(self.settings)["state"])
+
+        run.side_effect = subprocess.TimeoutExpired(["docker", "version"], 6)
+        slow = docker_status(self.settings)
+
+        self.assertEqual("ready", slow["state"])
+        self.assertTrue(slow["running"])
+        self.assertTrue(slow["slow"])
+        self.assertEqual("29.8.0", slow["version"])
+        self.assertIn("répond lentement", slow["message"])
+
+        with mock.patch("odoo_manager_core.system.time.monotonic", return_value=10**9):
+            stopped = docker_status(self.settings)
+        self.assertEqual("stopped", stopped["state"])
+        self.assertEqual("Docker ne répond pas dans le délai de 6 s.", stopped["message"])
+
+    @mock.patch("odoo_manager_core.system.platform_id", return_value="linux")
+    @mock.patch("odoo_manager_core.system.executable_available", return_value=True)
+    @mock.patch("odoo_manager_core.system.subprocess.run")
+    def test_docker_that_never_answered_is_not_reported_ready_on_timeout(self, run, _available, _platform):
+        import subprocess
+
+        run.side_effect = subprocess.TimeoutExpired(["docker", "version"], 6)
+
+        status = docker_status(self.settings)
+
+        self.assertEqual("stopped", status["state"])
+        self.assertFalse(status["running"])
+
     @mock.patch("odoo_manager_core.system.execution_path", return_value="/mnt/c/tools/odoo_manager.sh")
     def test_shell_command_uses_wsl_prefix(self, _execution_path):
         settings = ManagerSettings.from_dict(
@@ -111,7 +147,7 @@ class DockerStatusTests(unittest.TestCase):
         self.assertEqual(status["state"], "ready")
         self.assertEqual(status["backend"], "native")
         commands = [call.args[0] for call in run.call_args_list]
-        self.assertEqual([[r"C:\Docker\docker.exe", "info", "--format", "{{json .ServerVersion}}"]], commands)
+        self.assertEqual([[r"C:\Docker\docker.exe", "version", "--format", "{{json .Server.Version}}"]], commands)
 
     @mock.patch("odoo_manager_core.system.resolve_host_executable", return_value=r"C:\Docker\docker.exe")
     @mock.patch("odoo_manager_core.system.host_executable_available", return_value=True)

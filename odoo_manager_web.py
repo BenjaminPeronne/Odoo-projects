@@ -62,7 +62,9 @@ from odoo_manager_core.project_creator import (
     validate_new_project_name,
     validate_odoo_version,
 )
+from odoo_manager_core import jobs as job_control
 from odoo_manager_core.project_service import terminate_active_processes as terminate_project_processes
+from odoo_manager_core.traefik import url_with_port
 from odoo_manager_core.odoo_log_display import OdooLogDisplay, compact_odoo_log_text
 from odoo_manager_core.system import docker_command, reset_docker_backend_cache, shell_command
 from odoo_manager_core.windows_links import (
@@ -470,6 +472,16 @@ def json_response(handler, payload, status=200):
         return None
 
 
+def empty_response(handler, status=204):
+    try:
+        handler.send_response(status)
+        handler.send_header("Content-Length", "0")
+        add_cors_headers(handler)
+        handler.end_headers()
+    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+        return None
+
+
 def html_response(handler, body, status=200):
     data = body.encode("utf-8")
     try:
@@ -545,8 +557,9 @@ def run_capture(args, cwd=None, timeout=12):
     elif requested_cwd is not None and not safe_path_is_dir(requested_cwd):
         return 2, f"Dossier de travail introuvable: {requested_cwd}"
     try:
-        result = subprocess.run(
+        result = job_control.run_process(
             command,
+            timeout,
             cwd=str(command_cwd),
             env=command_env(),
             stdout=subprocess.PIPE,
@@ -554,7 +567,6 @@ def run_capture(args, cwd=None, timeout=12):
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=timeout,
             **hidden_process_kwargs(),
         )
         return result.returncode, result.stdout.strip()
@@ -597,16 +609,61 @@ def traefik_compose_probe():
     return has_compose, True, has_compose
 
 
+TRAEFIK_DETECTION_MAX_AGE_SECONDS = 10
+TRAEFIK_DETECTION_LOCK = threading.Lock()
+TRAEFIK_DETECTION = {"key": None, "checked_at": 0.0, "value": None}
+
+
+def invalidate_traefik_detection():
+    with TRAEFIK_DETECTION_LOCK:
+        TRAEFIK_DETECTION["checked_at"] = 0.0
+
+
+def detected_traefik(docker_running=True):
+    """Instance Traefik qui sert les projets et son port HTTP, mémorisés quelques secondes.
+
+    L'aperçu est rafraîchi en continu : sans cache, chaque URL de projet relancerait `docker ps`.
+    Docker arrêté, seul le compose de Traefik indique le port qui sera publié.
+    """
+    service = project_service()
+    if not docker_running:
+        return {"instance": None, "managed": False, "http_port": service.traefik_http_port_from_config()}
+    key = (tuple(docker_command(SETTINGS)), str(service.traefik_dir or ""))
+    with TRAEFIK_DETECTION_LOCK:
+        fresh = time.monotonic() - TRAEFIK_DETECTION["checked_at"] < TRAEFIK_DETECTION_MAX_AGE_SECONDS
+        if TRAEFIK_DETECTION["key"] == key and fresh:
+            return TRAEFIK_DETECTION["value"]
+    instance = service.traefik_instance(refresh=True)
+    value = {
+        "instance": instance,
+        "managed": bool(instance and service.is_managed_traefik(instance)),
+        "http_port": service.traefik_http_port(),
+    }
+    with TRAEFIK_DETECTION_LOCK:
+        TRAEFIK_DETECTION.update(key=key, checked_at=time.monotonic(), value=value)
+    return value
+
+
 def traefik_status(docker=None):
     docker = docker or docker_status(SETTINGS)
     has_compose, exists, valid = traefik_compose_probe()
-    running = False
-    if docker["running"]:
-        running = container_status("traefik") == "running"
+    detection = detected_traefik(docker["running"])
+    instance = detection["instance"]
+    http_port = detection["http_port"]
+    problems = instance.compatibility_problems() if instance and instance.running and not detection["managed"] else []
+    running = bool(instance and instance.running and not problems)
+    external = running and not detection["managed"]
+    port_hint = "" if http_port == 80 else f" (port HTTP {http_port})"
 
-    if running:
+    if running and external:
         state = "running"
-        message = "Traefik est opérationnel."
+        message = f"Instance Traefik existante utilisée : conteneur {instance.name}{port_hint or ' (port HTTP 80)'}."
+    elif running:
+        state = "running"
+        message = f"Traefik est opérationnel{port_hint}."
+    elif problems:
+        state = "conflict"
+        message = f"Une instance Traefik existante ({instance.describe()}) ne peut pas servir les projets : {'; '.join(problems)}."
     elif not exists:
         state = "missing"
         message = "Traefik n'est pas installé dans le dossier attendu."
@@ -623,6 +680,9 @@ def traefik_status(docker=None):
         "installed": has_compose,
         "running": running,
         "message": message,
+        "http_port": http_port,
+        "container": instance.name if instance else "",
+        "external": external,
         "repo": TRAEFIK_REPO,
         "requires_docker": not docker["running"],
         "can_install": docker["running"] and not valid,
@@ -1141,14 +1201,16 @@ def compose_file(project):
     return None
 
 
-def project_url(project):
+def project_url(project, traefik_port=None):
+    if traefik_port is None:
+        traefik_port = detected_traefik()["http_port"]
     file = compose_file(project)
     if file:
         try:
             content = file.read_text(encoding="utf-8", errors="ignore")
             match = re.search(r"Host\(`([^`]+)`\)", content)
             if match:
-                return f"http://{match.group(1)}/"
+                return url_with_port(f"http://{match.group(1)}/", traefik_port)
         except OSError:
             pass
 
@@ -1158,7 +1220,7 @@ def project_url(project):
         port = first.rsplit(":", 1)[-1]
         if port.isdigit():
             return f"http://localhost:{port}/"
-    return f"http://dev.{project}.localhost/"
+    return url_with_port(f"http://dev.{project}.localhost/", traefik_port)
 
 
 def project_odoo_version(project):
@@ -2204,6 +2266,7 @@ def overview(docker=None, databases_max_age=None):
     project_names = project_dirs()
     container_names = [name for project in project_names for name in (f"odoo-{project}", f"postgresql-{project}")]
     statuses = container_statuses(container_names) if docker_ok else {}
+    traefik_port = detected_traefik(docker_ok)["http_port"] if project_names else None
     projects = []
     for project in project_names:
         odoo_status = statuses.get(f"odoo-{project}", "absent") if docker_ok else "docker off"
@@ -2213,7 +2276,7 @@ def overview(docker=None, databases_max_age=None):
         else:
             databases = []
             invalidate_overview_databases(project)
-        url = project_url(project)
+        url = project_url(project, traefik_port=traefik_port)
         projects.append(
             {
                 "name": project,
@@ -2245,12 +2308,139 @@ def bootstrap_snapshot():
     }
 
 
+JOB_ACTIVE_STATUSES = frozenset({"running", "cancelling"})
+JOB_UNFINISHED_STATUSES = frozenset({"queued", "running", "cancelling"})
+MODULE_OPERATION_CANCEL_HINT = (
+    "Le processus Odoo est arrêté, les modules que l'action a laissés en attente reprennent leur état précédent, "
+    "puis Odoo redémarre. Les modules déjà traités par Odoo restent modifiés."
+)
+ODOO_SCRIPT_CANCEL_HINT = (
+    "Le script Odoo est arrêté avant d'enregistrer ses modifications, puis Odoo redémarre."
+)
+MODULE_FILES_CANCEL_HINT = "Les modules déjà copiés par cette action sont retirés et les versions remplacées restaurées."
+# (arrêt possible, ce que fait l'arrêt ou pourquoi il est impossible), par fonction d'action.
+JOB_CANCEL_POLICIES = {
+    "start_project_job": (True, "Les conteneurs et le serveur Odoo démarrés par cette action sont arrêtés ; ce qui tournait déjà reste démarré."),
+    "stop_project_job": (True, "L'arrêt est interrompu : les conteneurs déjà arrêtés le restent."),
+    "update_project_job": (True, "Le téléchargement en cours est interrompu. Un git pull commencé va d'abord à son terme."),
+    "update_all_projects_job": (True, "La mise à jour s'arrête au projet en cours. Un git pull commencé va d'abord à son terme."),
+    "module_command_job": (True, MODULE_OPERATION_CANCEL_HINT),
+    "update_all_modules_job": (True, MODULE_OPERATION_CANCEL_HINT),
+    "update_imported_modules_job": (True, MODULE_OPERATION_CANCEL_HINT),
+    "reset_module_translations_job": (True, MODULE_OPERATION_CANCEL_HINT),
+    "install_socle_job": (True, MODULE_OPERATION_CANCEL_HINT),
+    "neutralize_database_job": (True, ODOO_SCRIPT_CANCEL_HINT),
+    "regenerate_assets_job": (True, ODOO_SCRIPT_CANCEL_HINT),
+    "reset_all_translations_job": (True, ODOO_SCRIPT_CANCEL_HINT),
+    "reset_admin_password_job": (True, ODOO_SCRIPT_CANCEL_HINT),
+    "restore_database_job": (True, "La restauration est interrompue et la base partiellement restaurée est supprimée avec son filestore."),
+    "create_database_job": (True, "La création est interrompue et la base partiellement créée est supprimée avec son filestore."),
+    "drop_database_job": (True, "Possible tant que la suppression n'a pas été envoyée à Odoo ; ensuite elle va à son terme."),
+    "delete_project_job": (True, "Possible pendant l'arrêt des conteneurs : le projet est conservé. Le déplacement du dossier ne peut pas être interrompu."),
+    "delete_module_code_job": (True, "Possible pendant la désinstallation Odoo (modules remis en état). La suppression des fichiers ne peut pas être interrompue."),
+    "repository_modules_job": (True, MODULE_FILES_CANCEL_HINT),
+    "import_zip_modules_job": (True, MODULE_FILES_CANCEL_HINT),
+    "link_modules_job": (True, MODULE_FILES_CANCEL_HINT),
+    "create_project_job": (True, "La création est interrompue : le projet partiellement créé et ses conteneurs sont retirés (dossier conservé dans la corbeille du gestionnaire)."),
+    "install_traefik_job": (True, "Le téléchargement est interrompu ; aucun dossier partiel n'est conservé."),
+    "convert_wsl_addon_links_job": (True, "La conversion s'arrête entre deux liens ; relance-la plus tard pour la terminer."),
+    "install_git_job": (False, "l'installeur Windows ne peut pas être interrompu sans risque."),
+    "repair_enterprise_links_job": (False, "opération courte sur les liens de modules."),
+    "cancel_missing_module_operations_job": (False, "modification courte de la base, appliquée en une seule transaction."),
+    "restore_module_update_exclusions_job": (False, "modification courte de la base, appliquée en une seule transaction."),
+}
+DEFAULT_JOB_CANCEL_POLICY = (True, "L'action est interrompue ; ce qu'elle a déjà modifié n'est pas annulé automatiquement.")
+
+
+def jobs_conflict(first, second):
+    """Deux actions qui ne doivent pas tourner en même temps : même ressource, ou action sur tous les projets."""
+    if first.resources & second.resources:
+        return True
+    for everything, other in ((first, second), (second, first)):
+        # `*` couvre tous les projets, pas Git ni Traefik.
+        if "*" in everything.resources and any(item == "*" or item.startswith("project:") for item in other.resources):
+            return True
+    return False
+
+
+def job_waiting_reason(job):
+    """Pourquoi une action attend ; appelé sous JOBS_LOCK."""
+    for other in JOBS.values():
+        if other.id >= job.id:
+            break
+        if other.status in JOB_UNFINISHED_STATUSES and jobs_conflict(job, other):
+            return f"Après « {other.title} »"
+    return f"Limite de {MAX_RUNNING_JOBS} actions simultanées atteinte"
+
+
+def schedule_jobs():
+    """Démarre, dans l'ordre d'arrivée, les actions en attente qui ne croisent aucune action active."""
+    to_start = []
+    with JOBS_LOCK:
+        active = [job for job in JOBS.values() if job.status in JOB_ACTIVE_STATUSES]
+        waiting = []
+        for job in JOBS.values():
+            if job.status != "queued":
+                continue
+            # Une action arrivée plus tôt et encore bloquée garde la priorité sur son projet.
+            if len(active) >= MAX_RUNNING_JOBS or any(jobs_conflict(job, other) for other in (*active, *waiting)):
+                waiting.append(job)
+                continue
+            job.status = "running"
+            job.started_at = time.strftime("%Y-%m-%d %H:%M:%S")
+            job.thread = threading.Thread(target=job.run, daemon=True)
+            active.append(job)
+            to_start.append(job)
+    for job in to_start:
+        job.thread.start()
+
+
+def cancel_job(job_id):
+    """Arrête une action en cours ou la retire de la file d'attente."""
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if job is None:
+            raise ValueError("Action introuvable.")
+        status = job.status
+        if status in {"done", "error", "cancelled"}:
+            raise ValueError("Cette action est déjà terminée.")
+        if status == "running" and not job.cancellable:
+            raise ValueError(f"« {job.title} » ne peut pas être arrêtée : {job.cancel_hint}")
+        if status == "queued":
+            job.status = "cancelled"
+            job.finished_at = time.strftime("%Y-%m-%d %H:%M:%S")
+            job.error_message = "Retirée de la file d'attente avant son démarrage."
+            job.target = None
+            job.args = ()
+    if status == "queued":
+        job.add(job.error_message)
+        job.publish_completion()
+        schedule_jobs()
+        return job
+    if status == "cancelling":
+        return job
+
+    outcome = job.control.request_cancel()
+    if outcome == "refused":
+        raise ValueError(
+            f"« {job.title} » ne peut plus être arrêtée : étape irréversible en cours ({job.control.irreversible_step})."
+        )
+    with JOBS_LOCK:
+        if job.status == "running":
+            job.status = "cancelling"
+    if outcome == "deferred":
+        job.add(f"Arrêt demandé : il sera effectif à la fin de l'étape en cours ({job.control.protected_step}).")
+    elif outcome == "accepted":
+        job.add("Arrêt demandé : interruption de l'action...")
+    return job
+
+
 class Job:
-    def __init__(self, title, target, args=(), project=None):
+    def __init__(self, title, target, args=(), project=None, resources=None):
         global NEXT_JOB_ID
         self.title = title
         self.project = project
-        self.status = "running"
+        self.status = "queued"
         self.started_at = time.strftime("%Y-%m-%d %H:%M:%S")
         self.finished_at = None
         self.error_message = ""
@@ -2263,31 +2453,30 @@ class Job:
         self.target = target
         self.args = args
         self.thread = None
+        self.control = job_control.JobControl()
+        self.cancellable, self.cancel_hint = JOB_CANCEL_POLICIES.get(
+            getattr(target, "__name__", ""), DEFAULT_JOB_CANCEL_POLICY
+        )
+        if resources is None:
+            resources = {f"project:{project}"} if project else ()
+        self.resources = frozenset(resources)
         with JOBS_LOCK:
-            for active in JOBS.values():
-                if active.status == "running" and project and active.project == project:
-                    if (getattr(target, "__name__", "") == "repository_modules_job"
-                            or getattr(active.target, "__name__", "") == "repository_modules_job"):
-                        raise ValueError("Une action est déjà en cours sur ce projet. Attends sa fin avant l’import ou la mise à jour.")
-            running_count = sum(job.status == "running" for job in JOBS.values())
-            if running_count >= MAX_RUNNING_JOBS:
-                raise ValueError(
-                    f"Trop d'actions sont déjà en cours ({MAX_RUNNING_JOBS} maximum). Attends la fin d'une action."
-                )
-            completed_ids = [job_id for job_id, job in JOBS.items() if job.status != "running"]
+            finished_ids = [job_id for job_id, job in JOBS.items() if job.status not in JOB_UNFINISHED_STATUSES]
             excess = max(0, len(JOBS) - MAX_RETAINED_JOBS + 1)
-            for job_id in completed_ids[:excess]:
+            for job_id in finished_ids[:excess]:
                 JOBS.pop(job_id, None)
             self.id = NEXT_JOB_ID
             NEXT_JOB_ID += 1
             JOBS[self.id] = self
-        self.thread = threading.Thread(target=self.run, daemon=True)
-        self.thread.start()
+        schedule_jobs()
 
     def add(self, line):
         with JOBS_LOCK:
             self.lines.append(line.rstrip("\n"))
             self._append_output(line.rstrip("\n") + "\n")
+        # Chaque ligne écrite par l'action est un point d'arrêt : les longues sorties Odoo s'interrompent vite.
+        if job_control.current_control() is self.control:
+            self.control.checkpoint()
 
     def _trim_lines(self):
         # Troncature amortie : recopier 700 lignes et 120 Ko à chaque ligne coûtait
@@ -2319,38 +2508,84 @@ class Job:
             }
 
     def run(self):
+        failure = None
+        failure_trace = ""
         try:
-            self.target(self, *self.args)
-            if self.status == "running":
-                self.status = "done"
-        except Exception as exc:
-            self.error_message = str(exc).strip() or "Une erreur inattendue est survenue."
-            self.add(f"Erreur: {self.error_message}")
-            self.status = "error"
-            record_manager_error(
-                f"Job #{self.id} · {self.title}",
-                exc,
-                details=traceback.format_exc(),
-                project=self.project or "",
-            )
+            with job_control.bind_control(self.control):
+                try:
+                    self.target(self, *self.args)
+                except BaseException as exc:
+                    failure, failure_trace = exc, traceback.format_exc()
+                cancelled = self.control.cancel_requested and (failure is not None or self.control.cleaning_up)
+                if cancelled:
+                    self.finish_cancelled(failure)
+            if not cancelled and failure is None:
+                with JOBS_LOCK:
+                    if self.status in JOB_ACTIVE_STATUSES:
+                        self.status = "done"
+                if self.control.cancel_requested:
+                    self.add("Arrêt demandé après la fin de l'action : rien n'a été annulé.")
+            elif not cancelled:
+                self.error_message = str(failure).strip() or "Une erreur inattendue est survenue."
+                self.add(f"Erreur: {self.error_message}")
+                with JOBS_LOCK:
+                    self.status = "error"
+                record_manager_error(
+                    f"Job #{self.id} · {self.title}",
+                    failure,
+                    details=failure_trace,
+                    project=self.project or "",
+                )
         finally:
+            dependents = []
             with JOBS_LOCK:
                 self.finished_at = time.strftime("%Y-%m-%d %H:%M:%S")
                 self.args = ()
                 self.target = None
                 self.thread = None
+                if self.status in {"error", "cancelled"}:
+                    outcome = "a été arrêtée" if self.status == "cancelled" else "a échoué"
+                    for other in JOBS.values():
+                        if other.status == "queued" and jobs_conflict(self, other):
+                            other.status = "cancelled"
+                            other.finished_at = self.finished_at
+                            other.error_message = f"Annulée : l'action précédente « {self.title} » {outcome}."
+                            other.target = None
+                            other.args = ()
+                            dependents.append(other)
+            for other in dependents:
+                other.add(other.error_message)
+                other.publish_completion()
             invalidate_overview_databases()
             EVENT_DOCKER_REFRESH.set()
-            publish_event(
-                "job_completed",
-                {
-                    "id": self.id,
-                    "status": self.status,
-                    "project": self.project,
-                    "finished_at": self.finished_at,
-                    "result": self.result,
-                },
-            )
+            self.publish_completion()
+            schedule_jobs()
+
+    def finish_cancelled(self, failure):
+        self.control.begin_cleanup()
+        if failure is not None and not isinstance(failure, job_control.JobCancelled):
+            self.add(f"Interruption : {failure}")
+        failures = self.control.run_reverts(self.add)
+        message = "Action arrêtée par l'utilisateur."
+        if failures:
+            message += " Retour arrière incomplet : " + " ; ".join(failures)
+            record_manager_error(f"Job #{self.id} · {self.title}", message, project=self.project or "")
+        self.error_message = message
+        self.add(message)
+        with JOBS_LOCK:
+            self.status = "cancelled"
+
+    def publish_completion(self):
+        publish_event(
+            "job_completed",
+            {
+                "id": self.id,
+                "status": self.status,
+                "project": self.project,
+                "finished_at": self.finished_at,
+                "result": self.result,
+            },
+        )
 
 
 def terminate_active_subprocesses(wait_seconds=0.5):
@@ -2384,6 +2619,7 @@ def run_stream(job, args, cwd=None):
         process_cwd = Path.home()
     elif not process_cwd.is_dir():
         raise RuntimeError(f"Dossier de travail introuvable: {process_cwd}")
+    job_control.checkpoint()
     job.add("$ " + " ".join(command))
     process = subprocess.Popen(
         command,
@@ -2399,6 +2635,7 @@ def run_stream(job, args, cwd=None):
     )
     with ACTIVE_PROCESSES_LOCK:
         ACTIVE_PROCESSES.add(process)
+    job_control.track_process(process)
     try:
         assert process.stdout is not None
         for line in process.stdout:
@@ -2409,12 +2646,14 @@ def run_stream(job, args, cwd=None):
         process.wait()
         raise
     finally:
+        job_control.untrack_process(process)
         if process.stdout is not None:
             process.stdout.close()
         with ACTIVE_PROCESSES_LOCK:
             ACTIVE_PROCESSES.discard(process)
     job.add(f"Code retour: {code}")
-    if code != 0:
+    job_control.checkpoint()
+    if code != 0 and job.status == "running":
         job.status = "error"
     return code
 
@@ -2613,12 +2852,18 @@ def install_traefik_job(job):
         )
     job.add(git_output.splitlines()[0] if git_output else "Git détecté.")
     job.add(f"Git utilisé : {git_runtime['label']}.")
-    project_service().install_traefik(TRAEFIK_REPO, log=job.add)
+    try:
+        project_service().install_traefik(TRAEFIK_REPO, log=job.add)
+    finally:
+        invalidate_traefik_detection()
 
 
 def start_project_job(job, project):
     project = validate_project(project)
-    project_service().start_project(project, log=job.add)
+    try:
+        project_service().start_project(project, log=job.add)
+    finally:
+        invalidate_traefik_detection()
 
 
 def update_project_job(job, project):
@@ -2723,6 +2968,11 @@ def local_odoo_connection(url, timeout):
 def post_form_no_redirect(url, data, timeout=240):
     body = urllib.parse.urlencode(data).encode("utf-8")
     connection, target, host_header = local_odoo_connection(url, timeout)
+    with job_control.interruptible(connection.close):
+        return send_form_no_redirect(connection, target, host_header, body)
+
+
+def send_form_no_redirect(connection, target, host_header, body):
     try:
         connection.request(
             "POST",
@@ -2833,33 +3083,35 @@ def post_odoo_database_restore(job, url, backup_path, filename, db_name, master_
     content_length = len(prefix) + backup_size + len(suffix)
     sent = 0
     next_progress = 10
-    try:
-        connection.putrequest("POST", target, skip_host=True)
-        connection.putheader("Host", host_header)
-        connection.putheader("Content-Type", f"multipart/form-data; boundary={boundary}")
-        connection.putheader("Content-Length", str(content_length))
-        connection.putheader("Connection", "close")
-        connection.endheaders()
-        connection.send(prefix)
-        with Path(backup_path).open("rb") as source:
-            while True:
-                chunk = source.read(1024 * 1024)
-                if not chunk:
-                    break
-                connection.send(chunk)
-                sent += len(chunk)
-                progress = int((sent * 100) / backup_size) if backup_size else 100
-                if progress >= next_progress:
-                    job.add(f"Envoi de la sauvegarde vers Odoo... {min(progress, 100)} %")
-                    next_progress = ((progress // 10) + 1) * 10
-        connection.send(suffix)
-        response = connection.getresponse()
-        content = response.read(1024 * 1024).decode("utf-8", errors="replace")
-        return response.status, content
-    except (OSError, http.client.HTTPException) as exc:
-        raise RuntimeError(f"La restauration n'a pas pu être transmise à Odoo: {exc}") from exc
-    finally:
-        connection.close()
+    # Fermer la connexion interrompt l'envoi ou l'attente de la réponse quand l'action est arrêtée.
+    with job_control.interruptible(connection.close):
+        try:
+            connection.putrequest("POST", target, skip_host=True)
+            connection.putheader("Host", host_header)
+            connection.putheader("Content-Type", f"multipart/form-data; boundary={boundary}")
+            connection.putheader("Content-Length", str(content_length))
+            connection.putheader("Connection", "close")
+            connection.endheaders()
+            connection.send(prefix)
+            with Path(backup_path).open("rb") as source:
+                while True:
+                    chunk = source.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    connection.send(chunk)
+                    sent += len(chunk)
+                    progress = int((sent * 100) / backup_size) if backup_size else 100
+                    if progress >= next_progress:
+                        job.add(f"Envoi de la sauvegarde vers Odoo... {min(progress, 100)} %")
+                        next_progress = ((progress // 10) + 1) * 10
+            connection.send(suffix)
+            response = connection.getresponse()
+            content = response.read(1024 * 1024).decode("utf-8", errors="replace")
+            return response.status, content
+        except (OSError, http.client.HTTPException) as exc:
+            raise RuntimeError(f"La restauration n'a pas pu être transmise à Odoo: {exc}") from exc
+        finally:
+            connection.close()
 
 
 def odoo_restore_error(content):
@@ -2891,6 +3143,10 @@ def restore_database_job(job, project, backup_path, filename, db_name, master_pw
 
         if db_name in set(list_databases_for(project)):
             raise RuntimeError(f"La base existe déjà: {db_name}")
+        job_control.on_cancel(
+            f"suppression de la base partiellement restaurée {db_name}",
+            lambda: drop_partial_database(job, project, db_name),
+        )
 
         if neutralize:
             job.add("Passage temporaire d'Odoo en mode sans cron pendant la restauration...")
@@ -2905,6 +3161,12 @@ def restore_database_job(job, project, backup_path, filename, db_name, master_pw
         if neutralize and not native_restore_neutralization:
             job.add("Odoo 15: neutralisation appliquée par la seconde passe après restauration.")
         job.add(f"Restauration via Odoo: {url}")
+        if not neutralize:
+            # Odoo poursuit la restauration dans son serveur même si la connexion est coupée.
+            job_control.on_cancel(
+                "redémarrage d'Odoo pour interrompre la restauration côté serveur",
+                lambda: restart_odoo_server(job, service, project),
+            )
         status, content = post_odoo_database_restore(
             job,
             url,
@@ -2934,7 +3196,7 @@ def restore_database_job(job, project, backup_path, filename, db_name, master_pw
                 clear_project_module_cache(project)
                 return
             job.add(f"Attente apparition base... {waited}s/120s")
-            time.sleep(2)
+            job_control.sleep(2)
         raise RuntimeError("Odoo a accepté la sauvegarde, mais la base n'apparaît pas dans PostgreSQL.")
     finally:
         try:
@@ -2973,6 +3235,15 @@ def create_database_job(job, project, db_name, master_pwd, login, password, lang
     existing = set(list_databases_for(project))
     if db_name in existing:
         raise RuntimeError(f"La base existe deja: {db_name}")
+    service = project_service()
+    job_control.on_cancel(
+        f"suppression de la base partiellement créée {db_name}",
+        lambda: drop_partial_database(job, project, db_name),
+    )
+    job_control.on_cancel(
+        "redémarrage d'Odoo pour interrompre la création côté serveur",
+        lambda: restart_odoo_server(job, service, project),
+    )
 
     url = urllib.parse.urljoin(project_url(project), "web/database/create")
     form = {
@@ -3010,7 +3281,7 @@ def create_database_job(job, project, db_name, master_pwd, login, password, lang
             return
         if waited == 0 or waited % 10 == 0:
             job.add(f"Initialisation de la base... {waited}s/{max_wait}s")
-        time.sleep(2)
+        job_control.sleep(2)
 
     raise RuntimeError(
         "La création a été envoyée, mais la base n'apparaît pas dans PostgreSQL après 120 secondes."
@@ -3024,20 +3295,60 @@ def drop_database_job(job, project, db_name, master_pwd):
     url = urllib.parse.urljoin(project_url(project), "web/database/drop")
     job.add(f"Suppression de la base {db_name} dans {project}")
     job.add(f"Appel Odoo: {url}")
-    status, content = post_form_no_redirect(url, {"master_pwd": master_pwd, "name": db_name})
-    job.add(f"Réponse Odoo: HTTP {status}")
-    odoo_error = extract_odoo_page_error(content) if status == 200 else ""
-    if odoo_error:
-        raise RuntimeError(f"Odoo a refusé la suppression de la base : {odoo_error}")
+    with job_control.protected(f"suppression de la base {db_name} par Odoo", irreversible=True):
+        status, content = post_form_no_redirect(url, {"master_pwd": master_pwd, "name": db_name})
+        job.add(f"Réponse Odoo: HTTP {status}")
+        odoo_error = extract_odoo_page_error(content) if status == 200 else ""
+        if odoo_error:
+            raise RuntimeError(f"Odoo a refusé la suppression de la base : {odoo_error}")
 
-    for waited in range(0, 32, 2):
-        if db_name not in set(list_databases_for(project)):
-            invalidate_overview_databases(project)
-            clear_project_module_cache(project)
-            job.add(f"Base supprimée (filestore inclus) : {db_name}")
-            return
-        time.sleep(2)
+        for waited in range(0, 32, 2):
+            if db_name not in set(list_databases_for(project)):
+                invalidate_overview_databases(project)
+                clear_project_module_cache(project)
+                job.add(f"Base supprimée (filestore inclus) : {db_name}")
+                return
+            job_control.sleep(2)
     raise RuntimeError("La suppression a été envoyée, mais la base est toujours présente dans PostgreSQL.")
+
+
+def drop_partial_database(job, project, db_name):
+    """Supprime une base laissée incomplète par une restauration ou une création interrompue."""
+    if container_status(f"postgresql-{project}") != "running":
+        job.add(f"PostgreSQL arrêté : rien à supprimer pour {db_name}.")
+        return
+    literal = db_name.replace("'", "''")
+    identifier = db_name.replace('"', '""')
+    for attempt in range(3):
+        # Deux -c : DROP DATABASE refuse de s'exécuter dans le bloc de transaction d'un -c unique.
+        code, output = run_capture(
+            docker_command(
+                SETTINGS, "exec", f"postgresql-{project}", "psql", "-X", "-v", "ON_ERROR_STOP=1",
+                "-U", "postgres", "-d", "postgres",
+                "-c", f"select pg_terminate_backend(pid) from pg_stat_activity where datname = '{literal}' and pid <> pg_backend_pid();",
+                "-c", f'drop database if exists "{identifier}";',
+            ),
+            timeout=120,
+        )
+        if code == 0:
+            break
+        job.add(output[-600:] if output else f"Suppression de {db_name} refusée par PostgreSQL.")
+        time.sleep(2)
+    else:
+        raise RuntimeError(f"la base {db_name} n'a pas pu être supprimée")
+    if container_status(f"odoo-{project}") == "running":
+        run_capture(
+            docker_command(SETTINGS, "exec", f"odoo-{project}", "rm", "-rf", "--", f"/home/odoo/srv/data/filestore/{db_name}"),
+            timeout=120,
+        )
+    invalidate_overview_databases(project)
+    clear_project_module_cache(project)
+    job.add(f"Base {db_name} et son filestore supprimés.")
+
+
+def restart_odoo_server(job, service, project):
+    service.stop_odoo_server(project, log=job.add)
+    service.start_odoo_server(project, log=job.add)
 
 
 def delete_project_job(job, project):
@@ -3066,7 +3377,8 @@ def delete_project_job(job, project):
         suffix += 1
         destination = DELETED_PROJECTS / f"{base_name}_{suffix}"
 
-    shutil.move(str(path), str(destination))
+    with job_control.protected(f"déplacement de {project} dans la corbeille", irreversible=True):
+        shutil.move(str(path), str(destination))
     clear_project_module_cache(project)
     job.add(f"Projet deplace dans: {destination}")
     job.add("Suppression terminee. Le dossier reste recuperable a cet emplacement.")
@@ -3284,7 +3596,22 @@ def managed_module_copy_ready(project, module_name, storage_path):
     return (storage_path / "__manifest__.py").is_file() or (storage_path / "__openerp__.py").is_file()
 
 
-def copy_module_to_storage(job, project, module_path, replace_existing=False):
+class ModuleChangeJournal:
+    """Ce qu'un import de modules a créé ou remplacé, pour le défaire s'il est arrêté."""
+
+    def __init__(self):
+        self.created = []
+        self.backups = []
+
+    def rollback(self, job):
+        for path in reversed(self.created):
+            remove_module_entry(path)
+        for target, backup in reversed(self.backups):
+            move_module_entry(backup, target)
+        job.add("Import arrêté : modules copiés retirés, versions précédentes restaurées.")
+
+
+def copy_module_to_storage(job, project, module_path, replace_existing=False, journal=None):
     module_name = module_path.name
     validate_modules(module_name)
     storage_parent = project_addons_storage_parent(project)
@@ -3303,15 +3630,19 @@ def copy_module_to_storage(job, project, module_path, replace_existing=False):
             raise RuntimeError(
                 f"Remplacement refusé pour {module_name}: un dossier existe déjà dans odoo/addons-store sans lien géré."
             )
-        backup_existing_module(job, project, storage_path)
+        backup = backup_existing_module(job, project, storage_path)
+        if journal is not None:
+            journal.backups.append((storage_path, backup))
 
     ignore = shutil.ignore_patterns(".git", "__pycache__", "node_modules", ".DS_Store")
+    if journal is not None:
+        journal.created.append(storage_path)
     shutil.copytree(source_path, storage_path, symlinks=True, ignore=ignore)
     job.add(f"Module copié dans addons-store: {source_path} -> {storage_path}")
     return storage_path
 
 
-def ensure_relative_module_link(job, project, module_name, storage_path, replace_existing=False):
+def ensure_relative_module_link(job, project, module_name, storage_path, replace_existing=False, journal=None):
     link_parent = project_addons_link_parent(project)
     link_parent.mkdir(parents=True, exist_ok=True)
     link_path = link_parent / module_name
@@ -3342,8 +3673,12 @@ def ensure_relative_module_link(job, project, module_name, storage_path, replace
                 f"Lien fourni par un dépôt remplacé par la copie gérée: {link_path} -> {link_value}. "
                 "La source du dépôt est conservée."
             )
-        backup_existing_module(job, project, link_path)
+        backup = backup_existing_module(job, project, link_path)
+        if journal is not None:
+            journal.backups.append((link_path, backup))
 
+    if journal is not None:
+        journal.created.append(link_path)
     create_addon_link(link_path, link_value)
     job.add(f"Lien relatif créé: {link_path} -> {link_value}")
     return True
@@ -3361,14 +3696,24 @@ def install_module_candidates(job, project, candidates, replace_existing=False):
 
     linked = 0
     skipped = 0
-    for module_path in candidates:
-        module_path = module_path.resolve()
-        storage_path = copy_module_to_storage(job, project, module_path, replace_existing=replace_existing)
-        changed = ensure_relative_module_link(job, project, storage_path.name, storage_path, replace_existing=replace_existing)
-        if changed:
-            linked += 1
-        else:
-            skipped += 1
+    journal = ModuleChangeJournal()
+    try:
+        for module_path in candidates:
+            module_path = module_path.resolve()
+            storage_path = copy_module_to_storage(
+                job, project, module_path, replace_existing=replace_existing, journal=journal,
+            )
+            changed = ensure_relative_module_link(
+                job, project, storage_path.name, storage_path, replace_existing=replace_existing, journal=journal,
+            )
+            if changed:
+                linked += 1
+            else:
+                skipped += 1
+    except job_control.JobCancelled:
+        journal.rollback(job)
+        clear_project_module_cache(project)
+        raise
 
     clear_project_module_cache(project)
     job.add(f"Terminé. Modules préparés: {linked}. Déjà présents: {skipped}.")
@@ -3879,13 +4224,48 @@ def module_command_job(job, flag, project, db_name, modules, overwrite_translati
     if flag not in ("--install-module", "--update-module"):
         raise ValueError("Action module Odoo inconnue.")
 
-    project_service().run_odoo_module_command(
-        project,
-        db_name,
-        ",".join(module_names),
-        option="-i" if flag == "--install-module" else "-u",
-        log=job.add,
-        overwrite_translations=overwrite_translations,
+    try:
+        project_service().run_odoo_module_command(
+            project,
+            db_name,
+            ",".join(module_names),
+            option="-i" if flag == "--install-module" else "-u",
+            log=job.add,
+            overwrite_translations=overwrite_translations,
+        )
+    except RuntimeError as exc:
+        hint = missing_code_failure_hint(project, db_name, str(exc))
+        if hint:
+            job.add(hint)
+            raise RuntimeError(f"{exc} {hint}") from exc
+        raise
+
+
+# Erreurs Odoo typiques d'une base qui référence le code d'un module absent du projet.
+MISSING_CODE_ERROR_RE = re.compile(
+    r"n'existe pas|does not exist|non-existing model|External ID not found|No module named|KeyError",
+    re.IGNORECASE,
+)
+
+
+def missing_code_failure_hint(project, db_name, message):
+    """Désigne les modules installés sans code quand l'échec Odoo porte sur un champ ou modèle absent."""
+    if not MISSING_CODE_ERROR_RE.search(message):
+        return ""
+    try:
+        states = installed_modules(project, db_name)
+        available = {path.name for path in module_dirs(project)}
+    except (OSError, RuntimeError):
+        return ""
+    missing = sorted(
+        set(modules_missing_from_code(states, available, ACTIVE_MODULE_STATES)) - ignored_missing_modules(project, db_name)
+    )
+    if not missing:
+        return ""
+    shown = ", ".join(missing[:8]) + (f" et {len(missing) - 8} autre(s)" if len(missing) > 8 else "")
+    return (
+        f"Cause probable : la base {db_name} référence des modules installés dont le code est absent du projet "
+        f"({shown}). Restaure leur code dans le projet (liste complète dans l'onglet Diagnostic), puis relance."
     )
 
 
@@ -3946,9 +4326,10 @@ def delete_module_code_job(job, project, modules, db_name="", uninstall_first=Fa
         job.add("Désinstallation Odoo non demandée; suppression du code uniquement.")
 
     removed = 0
-    for module_name in module_names:
-        if delete_module_file_entry(job, project, module_name):
-            removed += 1
+    with job_control.protected("suppression du code des modules", irreversible=True):
+        for module_name in module_names:
+            if delete_module_file_entry(job, project, module_name):
+                removed += 1
 
     clear_project_module_cache(project)
     job.add(f"Suppression terminée. Entrées retirées de odoo/addons: {removed}.")
@@ -3968,6 +4349,7 @@ def create_project_job(
     start_after_creation,
 ):
     creator = ProjectCreator(SETTINGS, WORKSPACE, project_service())
+    job_control.on_cancel(f"retrait du projet {name} créé par cette action", lambda: discard_created_project(job, name))
     creator.create(
         name,
         version,
@@ -3990,10 +4372,26 @@ def create_project_job(
         return
 
     current_traefik = traefik_status(docker)
-    if not current_traefik["installed"]:
+    if not current_traefik["installed"] and not current_traefik["running"]:
         job.add("Traefik est absent. Installation automatique avant le premier démarrage...")
         install_traefik_job(job)
     project_service().start_project(name, log=job.add)
+
+
+def discard_created_project(job, name):
+    path = WORKSPACE / name
+    if not (path.exists() or path.is_symlink()):
+        job.add(f"Aucun dossier {name} créé : rien à retirer.")
+        return
+    if any((path / compose).is_file() for compose in ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml")):
+        docker_ok, _message = docker_available()
+        if docker_ok:
+            run_stream(job, docker_command(SETTINGS, "compose", "down"), cwd=path)
+    DELETED_PROJECTS.mkdir(parents=True, exist_ok=True)
+    destination = unique_child(DELETED_PROJECTS, f"{time.strftime('%Y%m%d_%H%M%S')}_{name}_creation_interrompue")
+    shutil.move(str(path), str(destination))
+    clear_project_module_cache(name)
+    job.add(f"Projet partiellement créé déplacé dans : {destination}")
 
 
 def find_module_candidates(source_path):
@@ -4398,7 +4796,7 @@ def repository_modules_job(job, project, url, branch, names, commit=""):
                 if plan["action"] == "add" and addon_link_status(link, target)[0] == "missing":
                     created.append(link)
                 ensure_relative_module_link(job, project, candidate.name, target)
-        except Exception:
+        except BaseException:
             for path in reversed(created):
                 remove_module_entry(path)
             for target, backup in reversed(backups):
@@ -4588,14 +4986,40 @@ def jobs_snapshot(detail_job_id=None, compact=False, output_from=None):
                 **job_output_payload(job, compact, detail_job_id, output_from),
                 "result": dict(job.result),
                 "progress": dict(job.progress) if job.progress else None,
+                **job_cancel_payload(job),
             }
             for job in reversed(values)
         ]
 
 
+def job_creation_payload(job):
+    with JOBS_LOCK:
+        return {
+            "id": job.id,
+            "title": job.title,
+            "project": job.project,
+            "status": job.status,
+            "started_at": job.started_at,
+            "lines": job.lines[-JOB_LINES_LIMIT:],
+            **job_cancel_payload(job),
+        }
+
+
+def job_cancel_payload(job):
+    """Ce que l'interface peut proposer pour arrêter l'action ; appelé sous JOBS_LOCK."""
+    irreversible = job.control.irreversible_step if job.status == "running" else ""
+    return {
+        "cancellable": job.status == "queued" or (job.status == "running" and job.cancellable and not irreversible),
+        "cancel_hint": job.cancel_hint,
+        "cancel_blocked_step": irreversible,
+        "cancel_pending_step": job.control.protected_step if job.status == "cancelling" else "",
+        "waiting_for": job_waiting_reason(job) if job.status == "queued" else "",
+    }
+
+
 def clear_jobs_history():
     with JOBS_LOCK:
-        running = {job_id: job for job_id, job in JOBS.items() if job.status == "running"}
+        running = {job_id: job for job_id, job in JOBS.items() if job.status in JOB_UNFINISHED_STATUSES}
         JOBS.clear()
         JOBS.update(running)
         return len(running)
@@ -4606,8 +5030,8 @@ def delete_job_history(job_id):
         job = JOBS.get(job_id)
         if not job:
             raise ValueError("Action introuvable.")
-        if job.status == "running":
-            raise ValueError("Impossible de supprimer une action en cours.")
+        if job.status in JOB_UNFINISHED_STATUSES:
+            raise ValueError("Impossible de supprimer une action en cours ou en attente : arrête-la d'abord.")
         del JOBS[job_id]
 
 
@@ -4881,6 +5305,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/":
                 return html_response(self, INDEX_HTML)
+            if path == "/favicon.ico":
+                # Demandé d'office par le navigateur sur la page de secours : ce n'est pas une erreur du service.
+                return empty_response(self)
             if path == "/api/health":
                 return json_response(
                     self,
@@ -5129,7 +5556,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 payload = self.read_json()
                 with JOBS_LOCK:
-                    running = [job.title for job in JOBS.values() if job.status == "running"]
+                    running = [job.title for job in JOBS.values() if job.status in JOB_UNFINISHED_STATUSES]
                 # Closing onboarding changes no path used by a running job; the
                 # first project creation sends it right after starting its job.
                 interface_only = set(payload) <= {"onboarding_completed", "create_workspace"}
@@ -5216,16 +5643,7 @@ class Handler(BaseHTTPRequestHandler):
                 destination = None
                 return json_response(
                     self,
-                    {
-                        "job": {
-                            "id": job.id,
-                            "title": job.title,
-                            "status": job.status,
-                            "started_at": job.started_at,
-                            "lines": job.lines[-JOB_LINES_LIMIT:],
-                        },
-                        "backup": details,
-                    },
+                    {"job": job_creation_payload(job), "backup": details},
                     status=201,
                 )
             except Exception as exc:
@@ -5297,19 +5715,20 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return json_response(
                     self,
-                    {
-                        "job": {
-                            "id": job.id,
-                            "title": job.title,
-                            "status": job.status,
-                            "started_at": job.started_at,
-                            "lines": job.lines[-JOB_LINES_LIMIT:],
-                        }
-                    },
+                    {"job": job_creation_payload(job)},
                     status=201,
                 )
             except Exception as exc:
                 return json_response(self, {"error": str(exc)}, status=400)
+
+        cancel_match = re.match(r"^/api/jobs/([0-9]+)/cancel$", parsed.path)
+        if cancel_match:
+            try:
+                self.read_json()
+                job = cancel_job(int(cancel_match.group(1)))
+                return json_response(self, {"job": job_creation_payload(job)})
+            except ValueError as exc:
+                return json_response(self, {"error": str(exc)}, status=409)
 
         if parsed.path != "/api/jobs":
             return json_response(self, {"error": "Route introuvable."}, status=404)
@@ -5333,7 +5752,7 @@ class Handler(BaseHTTPRequestHandler):
                 project = validate_project(payload.get("project", ""))
                 job = Job(f"MAJ projet {project}", update_project_job, (project,), project=project)
             elif action == "update_all":
-                job = Job("MAJ tous les projets", update_all_projects_job)
+                job = Job("MAJ tous les projets", update_all_projects_job, resources={"*"})
             elif action == "update_all_modules":
                 project = validate_project(payload.get("project", ""))
                 db_name = validate_odoo_db(payload.get("db", ""))
@@ -5450,9 +5869,9 @@ class Handler(BaseHTTPRequestHandler):
                     project=name,
                 )
             elif action == "install_traefik":
-                job = Job("Installer Traefik", install_traefik_job)
+                job = Job("Installer Traefik", install_traefik_job, resources={"traefik"})
             elif action == "install_git":
-                job = Job("Installer Git pour Windows", install_git_job)
+                job = Job("Installer Git pour Windows", install_git_job, resources={"git"})
             elif action == "create_database":
                 project = validate_project(payload.get("project", ""))
                 db_name = validate_new_db(payload.get("db", ""))
@@ -5577,16 +5996,7 @@ class Handler(BaseHTTPRequestHandler):
 
             return json_response(
                 self,
-                {
-                    "job": {
-                        "id": job.id,
-                        "title": job.title,
-                        "project": job.project,
-                        "status": job.status,
-                        "started_at": job.started_at,
-                        "lines": job.lines[-JOB_LINES_LIMIT:],
-                    }
-                },
+                {"job": job_creation_payload(job)},
                 status=201,
             )
         except Exception as exc:
