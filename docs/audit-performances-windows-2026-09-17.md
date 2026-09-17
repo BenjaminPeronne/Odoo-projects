@@ -8,7 +8,7 @@
 - Workspace réel `C:\Users\Aymerick\Odoo-projects` : `Caritel_v18` (1 416 modules), `DEMO_CPL` et `DEMO_CPL03` (1 447), `SIMPAC_v16` (1 171, conteneurs démarrés). Tous les liens d'addons sont des liens NTFS natifs.
 - Les processus enfants du backend sont échantillonnés toutes les 20 ms.
 
-Scripts de mesure : `bench.py` (routes), `idle.py` (charge de fond avec un client SSE), `compare_modules.py` (liste des modules avant/après), `bench_pg.sh` (PostgreSQL en bind mount ou en volume). Ils sont restés hors du dépôt.
+Scripts de mesure : `bench.py` (routes), `idle.py` (charge de fond avec un client SSE), `compare_modules.py` (liste des modules avant/après), `bench_pg.sh` (PostgreSQL en bind mount ou en volume), `bench_code.sh` (code Odoo en bind mount ou en volume). Ils sont restés hors du dépôt.
 
 ## Synthèse
 
@@ -86,15 +86,33 @@ Lecture :
 - **Le volume accélère fortement les opérations de masse sur la base** : restauration d'une copie RIKA ou d'une sauvegarde, `ANALYZE`, imports, lectures lourdes.
 - **Il ne change presque rien au démarrage d'Odoo ni à `-u`.** Les petites validations sont limitées par `fdatasync`, dont le coût est le même, et le temps d'Odoo se passe à lire le code en 9P. Le passage 1 (102,7 s puis 62,8 s) et le passage 2 (52,9 s) montrent que le cache du code pèse plus que le stockage de la base. Sur `-u base`, 300 s sur 365 servent à charger les 248 modules (119 299 requêtes).
 
+#### Mesure : code Odoo en bind mount ou en volume Docker
+
+Même copie de la base, PostgreSQL en volume dans les deux cas. Le code de `SIMPAC_v16` (`odoo/odoo` et `odoo/addons-store`, sans `.git`) a été copié dans des volumes par `tar`, et les 1 158 liens de `odoo/addons` ont été recréés avec des cibles identiques. Le code est monté en lecture seule dans les deux variantes. La variante volume passe toujours en premier : le bind mount profite du cache, le gain mesuré est donc un minimum.
+
+| Opération | Bind mount `C:\` | Volume Docker | Gain |
+|---|---:|---:|---:|
+| `find -L addons` (1 158 manifestes) | 33,2 s | 1,2 s | ×27 |
+| Chargement d'Odoo, manche 1 (registre) | 82,5 s (75,3 s) | 6,2 s (2,8 s) | ×13 |
+| Chargement d'Odoo, manche 2 | 48,4 s (43,6 s) | 3,7 s (1,5 s) | ×13 |
+| Chargement d'Odoo, manche 3 | 48,7 s (44,5 s) | 4,3 s (1,8 s) | ×11 |
+| `-u base` (248 modules, 119 000 requêtes) | 440,7 s | 234,5 s | ×1,9 |
+
+Les 248 modules sont chargés sans erreur dans les deux variantes, avec les mêmes chemins d'addons. Sur `-u base` en volume, il ne reste que le travail en base : chargement des données XML et requêtes SQL. Le bind mount de la mesure précédente avait donné 370 s : d'une session à l'autre, `-u base` sur `C:\` varie donc de ±15 %, et le gain réel est compris entre ×1,6 et ×1,9.
+
+Coût de la copie : 7 min 22 s pour `odoo/odoo` (37 669 fichiers, 970 Mo) et 15 min 48 s pour `addons-store` (97 830 fichiers, 1,9 Go). La lecture des fichiers par Windows, analysés par Defender, domine ce temps. Le coût est unique par version d'Odoo si le code est partagé, mais un clone Git fait directement dans le volume éviterait ce passage par Windows.
+
+**Conclusion : sortir le code de `C:\` est le levier principal.** Démarrer Odoo devient 11 à 13 fois plus rapide, et une mise à jour complète deux fois plus rapide. Le stockage de PostgreSQL n'accélère que les opérations de masse sur la base.
+
 Pistes, de la moins à la plus invasive :
 
 1. **Volume nommé pour `postgresql_data`** (`postgresql-<projet>-data`) : restaurations et imports 2 à 4 fois plus rapides, sans effet sur le démarrage. Contrepartie : les données ne sont plus visibles dans l'Explorateur. Suppression, sauvegarde et restauration doivent passer par Docker, ce que le gestionnaire fait déjà pour les bases. Il faut aussi migrer les projets existants (dump, puis restauration).
 2. **Volume nommé pour `odoo_data`** (filestore). Le diagnostic du filestore lit aujourd'hui ce dossier depuis Windows : il faudrait le faire via `docker exec`.
-3. **Code Odoo et Enterprise hors de `C:\`** : c'est le seul levier sur le démarrage et `-u`. Deux formes possibles :
-   - un workspace dans la distribution WSL (`\\wsl.localhost\Ubuntu\home\…`), déjà pris en charge par le code. Windows (Explorateur, VS Code sans Remote WSL) devient alors lent, et le chemin WSL du backend est à remesurer ;
-   - un volume par version d'Odoo, monté en lecture seule par tous les projets. C'est une refonte de `project_creator` et de la gestion des liens.
+3. **Code Odoo et Enterprise hors de `C:\`** : démarrage ×11 à ×13 et `-u` ×1,9, mesurés. Deux formes possibles :
+   - un workspace dans la distribution WSL (`\\wsl.localhost\Ubuntu\home\…`), déjà pris en charge par le code. Docker lit alors l'ext4 de WSL, comparable à un volume. Contreparties : l'Explorateur et VS Code sans Remote WSL deviennent lents, et le chemin WSL du backend (liste des modules) est à remesurer ;
+   - des volumes gérés par le gestionnaire : Odoo et Enterprise par version, clonés directement dans le volume, et les addons du projet dans un volume par projet. C'est une refonte de `project_creator`, de l'import de modules et de la gestion des liens (création et vérification via `docker run`). Le développement d'addons clients depuis Windows devient aussi moins direct : il faut VS Code Dev Containers, ou garder uniquement les addons du projet en bind mount.
 
-   À mesurer en priorité : chargement d'Odoo et `-u base` avec le code copié dans un volume.
+   Compromis à mesurer : Odoo et Enterprise en volume, addons spécifiques du projet toujours sur `C:\`. Community et Enterprise représentent la grande majorité des fichiers lus au chargement.
 
 ### 2. `docker info` lance les 14 plugins CLI — corrigé
 
@@ -155,7 +173,7 @@ Recommandé, à faire par l'utilisateur :
 
 ## Ordre de correction proposé
 
-1. Mesurer le chargement d'Odoo et `-u base` avec le code dans un volume ou dans WSL (constat 1, piste 3). C'est le seul levier mesuré sur les temps d'attente quotidiens.
+1. Choisir la forme de sortie du code de `C:\` : workspace WSL, ou Odoo et Enterprise en volume avec les addons du projet sur `C:\` (constat 1, piste 3). Mesurer d'abord ce compromis.
 2. Client Docker sur named pipe pour `version`, `ps` et `inspect` (constat 3).
 3. Limiter le test de l'installateur à la CI (constat 6).
 4. `postgresql_data` en volume nommé pour les nouveaux projets, si les restaurations de copies sont fréquentes (constat 1, piste 1).
