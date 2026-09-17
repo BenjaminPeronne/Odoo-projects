@@ -21,8 +21,13 @@ from test_module_layout import DummyJob
 import odoo_manager_web as web
 
 
+def executable_name(command):
+    # Chemins Windows simulés : « \\ » n'est pas un séparateur pour Path sous macOS et Linux.
+    return Path(str(command[0]).replace("\\", "/")).name.casefold() if command else ""
+
+
 def is_wsl(command):
-    return bool(command) and Path(str(command[0]).replace("\\", "/")).name.casefold() in {"wsl", "wsl.exe"}
+    return executable_name(command) in {"wsl", "wsl.exe"}
 
 
 class SimulatedWindows:
@@ -121,7 +126,7 @@ class WslBudgetTests(unittest.TestCase):
         launched = self.run_screens(windows)
         self.assertEqual({name: [] for name in launched}, launched)
         # Le scénario a bien interrogé Docker et Git pour Windows : le budget n'est pas vide par accident.
-        self.assertTrue(any(Path(command[0]).name == "docker" for command in windows.commands))
+        self.assertTrue(any(executable_name(command) == "docker" for command in windows.commands))
 
     def test_budget_detects_legitimate_wsl_use(self):
         # Contrôle positif : sans Docker ni Git pour Windows, WSL est le recours attendu.
