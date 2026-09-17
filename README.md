@@ -354,4 +354,5 @@ Le journal des erreurs de l'application regroupe les erreurs de l'interface, de 
 - [docs/electron-migration.md](docs/electron-migration.md) : migration de Tauri vers Electron.
 - [docs/REFACTORING_CROSS_PLATFORM.md](docs/REFACTORING_CROSS_PLATFORM.md) : refonte multiplateforme.
 - [docs/performance-audit-2026-09-08.md](docs/performance-audit-2026-09-08.md) : audit des performances.
+- [docs/audit-performances-windows-2026-09-17.md](docs/audit-performances-windows-2026-09-17.md) : performances Windows, Docker et bind mounts WSL.
 - [docs/design-responsive-qa.md](docs/design-responsive-qa.md) : contrôle du design responsive.
