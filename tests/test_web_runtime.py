@@ -5,7 +5,7 @@ import time
 import tempfile
 import unittest
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from unittest.mock import Mock, patch
 
 import odoo_manager_web as web
@@ -35,6 +35,28 @@ class CorsTests(unittest.TestCase):
         web.add_cors_headers(handler)
 
         handler.send_header.assert_not_called()
+
+
+class PathIsRelativeToTests(unittest.TestCase):
+    def test_matches_pathlib_for_windows_and_posix_paths(self):
+        cases = [
+            (PureWindowsPath(r"C:\ws\p\odoo\addons-store\mod"), PureWindowsPath(r"C:\ws\p\odoo\addons-store")),
+            (PureWindowsPath(r"c:\WS\p\odoo\addons-store\mod"), PureWindowsPath(r"C:\ws\p\odoo\addons-store")),
+            (PureWindowsPath(r"C:\ws\p\odoo\addons-store"), PureWindowsPath(r"C:\ws\p\odoo\addons-store")),
+            (PureWindowsPath(r"C:\ws\p\odoo\addons-store-evil\mod"), PureWindowsPath(r"C:\ws\p\odoo\addons-store")),
+            (PureWindowsPath(r"C:\ws\p\odoo"), PureWindowsPath(r"C:\ws\p\odoo\addons-store")),
+            (PureWindowsPath(r"D:\ws\p\odoo\addons-store\mod"), PureWindowsPath(r"C:\ws\p\odoo\addons-store")),
+            (PureWindowsPath(r"C:\ws\mod"), PureWindowsPath("C:\\")),
+            (PureWindowsPath(r"\\wsl.localhost\Ubuntu\home\p\mod"), PureWindowsPath(r"\\wsl.localhost\Ubuntu\home")),
+            (PurePosixPath("/ws/p/odoo/addons-store/mod"), PurePosixPath("/ws/p/odoo/addons-store")),
+            (PurePosixPath("/ws/P/odoo/addons-store/mod"), PurePosixPath("/ws/p/odoo/addons-store")),
+            (PurePosixPath("/ws/p/odoo/addons-store2"), PurePosixPath("/ws/p/odoo/addons-store")),
+            (PurePosixPath("/ws/mod"), PurePosixPath("/")),
+            (PurePosixPath("relative/mod"), PurePosixPath("/relative")),
+        ]
+        for path, parent in cases:
+            with self.subTest(path=str(path), parent=str(parent)):
+                self.assertEqual(web.path_is_relative_to(path, parent), path.is_relative_to(parent))
 
 
 class LocalApiRequestGuardTests(unittest.TestCase):

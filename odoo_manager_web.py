@@ -4,6 +4,7 @@ import errno
 import html
 import http.client
 import json
+import ntpath
 import os
 import posixpath
 import queue
@@ -22,7 +23,7 @@ import urllib.request
 import urllib.error
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from odoo_manager_runtime import initialize_runtime_streams
 
@@ -296,11 +297,17 @@ def truthy(value):
 
 
 def path_is_relative_to(path, parent):
-    try:
-        path.relative_to(parent)
+    """Comparaison lexicale, comme PurePath.relative_to, sans en recopier les segments.
+
+    relative_to reconstruit chaque parent en Python : 55 % du temps de la liste
+    des modules (4 000 appels pour un projet Enterprise).
+    """
+    flavour = ntpath if isinstance(path, PureWindowsPath) else posixpath
+    path_text = flavour.normcase(str(path))
+    parent_text = flavour.normcase(str(parent))
+    if path_text == parent_text:
         return True
-    except ValueError:
-        return False
+    return path_text.startswith(parent_text.rstrip(flavour.sep) + flavour.sep)
 
 
 def project_imports_root(project):
