@@ -11,7 +11,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DESKTOP_ROOT = ROOT / "odoo-manager-next" / "electron"
 BINARIES = DESKTOP_ROOT / "binaries"
-WINDOWS_RUNTIME_NAME = "odoo-manager-backend-runtime"
+# Dossier du runtime Python, à côté de l'exécutable. En --onefile, le bootloader réextrait
+# l'archive (17 Mo) dans un dossier temporaire à chaque lancement : 5,3 s sur macOS contre
+# 0,13 s en --onedir, sur le chemin critique de la première fenêtre.
+RUNTIME_NAME = "odoo-manager-backend-runtime"
 
 
 
@@ -40,21 +43,25 @@ def main():
     extension = ".exe" if is_windows else ""
     base_name = "odoo-manager-backend"
     output = BINARIES / f"{base_name}{extension}"
-    windows_runtime = BINARIES / WINDOWS_RUNTIME_NAME
+    runtime = BINARIES / RUNTIME_NAME
     if output.exists():
         output.unlink()
-    if windows_runtime.exists():
-        shutil.rmtree(windows_runtime)
+    if runtime.exists():
+        shutil.rmtree(runtime)
     data_separator = os.pathsep
     pyinstaller_args = [
         str(ROOT / "odoo_manager_web.py"),
-        "--onedir" if is_windows else "--onefile",
+        "--onedir",
+        "--contents-directory",
+        RUNTIME_NAME,
         "--noconfirm",
         "--clean",
         "--name",
         base_name,
         "--distpath",
-        str(BINARIES),
+        # Hors de binaries/ : sans extension .exe, le dossier onedir porterait le nom de
+        # l'exécutable final et l'écraserait au moment de le remonter.
+        str(build_root / "dist"),
         "--workpath",
         str(build_root / "work"),
         "--specpath",
@@ -63,19 +70,20 @@ def main():
         f"{ROOT / 'odoo_manager.sh'}{data_separator}.",
     ]
     if is_windows:
-        pyinstaller_args.extend(["--noconsole", "--contents-directory", WINDOWS_RUNTIME_NAME])
+        pyinstaller_args.append("--noconsole")
 
     PyInstaller.__main__.run(pyinstaller_args)
-    if is_windows:
-        onedir_output = BINARIES / base_name
-        built_executable = onedir_output / f"{base_name}.exe"
-        built_runtime = onedir_output / WINDOWS_RUNTIME_NAME
-        if not built_executable.is_file() or not built_runtime.is_dir():
-            raise SystemExit(f"Sortie PyInstaller Windows incomplète: {onedir_output}")
-        shutil.copy2(built_executable, output)
-        shutil.copytree(built_runtime, windows_runtime)
-        shutil.rmtree(onedir_output)
-    print(f"Sidecar créé: {output}")
+    # L'exécutable et son dossier de runtime sont remontés côte à côte dans binaries/, qui devient
+    # Resources/backend/ : le chemin du sidecar reste le même pour Electron sur les trois systèmes.
+    onedir_output = build_root / "dist" / base_name
+    built_executable = onedir_output / f"{base_name}{extension}"
+    built_runtime = onedir_output / RUNTIME_NAME
+    if not built_executable.is_file() or not built_runtime.is_dir():
+        raise SystemExit(f"Sortie PyInstaller incomplète: {onedir_output}")
+    shutil.copy2(built_executable, output)
+    shutil.copytree(built_runtime, runtime, symlinks=True)
+    shutil.rmtree(onedir_output)
+    print(f"Sidecar créé: {output} (runtime: {runtime})")
 
 
 if __name__ == "__main__":

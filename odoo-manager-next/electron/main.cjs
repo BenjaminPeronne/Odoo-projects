@@ -140,19 +140,23 @@ async function start() {
       installRoot: path.join(app.getPath('userData'), 'wsl'),
       log: message => fs.appendFileSync(path.join(logDir, 'backend.log'), message + '\n'),
     });
-    const state = await wsl.status().catch(() => null);
-    // L'environnement Linux sert dès qu'il est installé ; sinon le backend Windows
-    // prend le relais, et l'interface propose de préparer le poste.
-    if (state?.distributionInstalled) {
+    // `wsl --list` suffit pour choisir le backend et ne démarre pas la distribution : lire sa
+    // version l'aurait démarrée avant même l'affichage de la fenêtre.
+    const distributions = await wsl.distributions().catch(() => []);
+    if (distributions.some(name => name.toLowerCase() === wsl.distribution.toLowerCase())) {
       options.command = (port, instance) => wsl.backendCommand(port, instance);
       options.preferredPort = 18765;
     }
+    // Sinon le backend Windows prend le relais, et l'interface propose de préparer le poste.
   }
   backend = new Backend(options);
-  try { await backend.start(); } catch (error) {
+  // L'adresse suffit pour bâtir la fenêtre ; le backend démarre en parallèle. L'interface a son
+  // écran de chargement et réessaie seule, donc rien n'attend ici la disponibilité du backend.
+  await backend.reserve();
+  const ready = backend.start().catch(error => {
     backend.log(error.stack || error.message);
     // Keep the existing frontend's diagnostics and recovery screen available.
-  }
+  });
   const csp = contentPolicy(fs.readFileSync(path.join(out, 'index.html'), 'utf8'), backend.endpoint);
   protocol.handle('app', async request => {
     try {
@@ -191,6 +195,7 @@ async function start() {
   window.webContents.on('render-process-gone', (_event, details) => backend.log(JSON.stringify(details)));
   window.once('ready-to-show', () => { if (!smokePath) window.show(); });
   await window.loadURL(APP_ORIGIN + '/');
+  await ready;
   if (smokePath) await smokeCheck();
 }
 

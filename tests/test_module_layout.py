@@ -395,5 +395,37 @@ class ModuleLayoutTests(unittest.TestCase):
         self.assertTrue(any("Archive temporaire nettoyée" in line for line in job.lines))
 
 
+
+class PathScopeTests(unittest.TestCase):
+    def test_path_scope_matches_path_is_relative_to(self):
+        # Mêmes réponses que pathlib pour les chemins du système courant, casse comprise :
+        # la CI rejoue ce test sous Windows, où pathlib ignore la casse.
+        root = Path(tempfile.gettempdir()).resolve()
+        anchor = Path(root.anchor)
+        parents = [
+            anchor,
+            root / "odoo" / "addons-store",
+            root / "odoo" / "addons-store" / "odoo_entreprise",
+            root / "odoo" / "addons",
+        ]
+        paths = [
+            anchor,
+            root,
+            root / "odoo" / "addons-store",
+            root / "odoo" / "addons-store" / "sale",
+            root / "odoo" / "addons-store" / "odoo_entreprise" / "account",
+            root / "odoo" / "addons-store-old" / "sale",
+            root / "odoo" / "addons" / "sale",
+            root / "odoo" / "addons-store" / ".." / "addons" / "sale",
+            Path(str(root / "odoo" / "ADDONS-STORE" / "sale")),
+            Path(str(root / "odoo" / "Addons-Store").upper()),
+        ]
+        for parent in parents:
+            contains = web.path_scope(parent)
+            for path in paths:
+                with self.subTest(parent=str(parent), path=str(path)):
+                    self.assertEqual(web.path_is_relative_to(path, parent), contains(path))
+
+
 if __name__ == "__main__":
     unittest.main()

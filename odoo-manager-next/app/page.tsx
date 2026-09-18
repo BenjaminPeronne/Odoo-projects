@@ -106,11 +106,15 @@ type InstallGuide = {
 };
 
 type TraefikStatus = {
-  state: "missing" | "invalid" | "stopped" | "running" | string;
+  state: "missing" | "invalid" | "stopped" | "running" | "conflict" | string;
   path: string;
   installed: boolean;
   running: boolean;
   message: string;
+  // Port HTTP réellement publié par Traefik (80 par défaut, personnalisable dans son compose).
+  http_port?: number;
+  container?: string;
+  external?: boolean;
   repo?: string;
   requires_docker: boolean;
   can_install: boolean;
@@ -190,7 +194,13 @@ type Job = {
   id: number;
   title: string;
   project?: string | null;
-  status: "running" | "done" | "error" | string;
+  status: "queued" | "running" | "cancelling" | "cancelled" | "done" | "error" | string;
+  // Arrêt : possible maintenant, ce qu'il fera, étape irréversible qui le bloque, étape qu'il attend.
+  cancellable?: boolean;
+  cancel_hint?: string;
+  cancel_blocked_step?: string;
+  cancel_pending_step?: string;
+  waiting_for?: string;
   started_at: string;
   finished_at?: string | null;
   error_message?: string;
@@ -585,7 +595,7 @@ async function requestTaskNotificationPermission() {
 
 async function sendTaskNotification(job: Job) {
   const successful = job.status === "done";
-  const title = successful ? "Tâche terminée" : "Tâche en erreur";
+  const title = jobCompletionTitle(job);
   const body = !successful && job.error_message ? `${job.title}\n${job.error_message}` : job.title;
   if (isDesktopRuntime()) {
     await window.sdkDesktop!.notify(title, body);
@@ -674,7 +684,8 @@ function formatDiagnostics(payload: ProjectDiagnostics) {
 function statusVariant(status: string): "success" | "warning" | "outline" | "destructive" | "secondary" {
   if (status === "running" || status === "healthy" || status === "done") return "success";
   if (status === "error") return "destructive";
-  if (status === "exited" || status === "created") return "warning";
+  if (status === "exited" || status === "created" || status === "cancelling") return "warning";
+  if (status === "cancelled") return "outline";
   return "secondary";
 }
 
@@ -682,7 +693,26 @@ function statusLabel(status: string) {
   if (status === "running") return "En cours";
   if (status === "done") return "Terminée";
   if (status === "error") return "Erreur";
+  if (status === "queued") return "En attente";
+  if (status === "cancelling") return "Arrêt en cours";
+  if (status === "cancelled") return "Arrêtée";
   return status;
+}
+
+// En cours d'exécution, arrêt compris : le serveur tient encore des ressources du projet.
+function isJobActive(job: Pick<Job, "status">) {
+  return job.status === "running" || job.status === "cancelling";
+}
+
+// Pas encore terminée : en attente, en cours ou en train de s'arrêter.
+function isJobUnfinished(job: Pick<Job, "status">) {
+  return job.status === "queued" || isJobActive(job);
+}
+
+function jobCompletionTitle(job: Job) {
+  if (job.status === "done") return "Tâche terminée";
+  if (job.status === "cancelled") return "Tâche arrêtée";
+  return "Tâche en erreur";
 }
 
 function statusDot(status: string) {
@@ -853,27 +883,102 @@ function RefinedRow({
   );
 }
 
-function JobProgressPanel({ label, percent }: { label: string; percent: number | null }) {
+function JobProgressPanel({ label, percent, action }: { label: string; percent: number | null; action?: ReactNode }) {
   return (
-    <div className="mb-3 rounded-md border border-emerald-400/20 bg-slate-950 px-3 py-2.5 text-emerald-100">
-      <div className="flex min-w-0 items-center gap-2 text-xs">
-        <Loader2 className="h-4 w-4 shrink-0 animate-spin text-emerald-400" />
-        <span className="min-w-0 flex-1 truncate font-medium">{label}</span>
-        {percent !== null && <span className="shrink-0 tabular-nums text-emerald-300">{percent}%</span>}
+    <div className="mb-3 flex min-w-0 flex-wrap items-center gap-2">
+      <div className="min-w-0 flex-1 rounded-md border border-emerald-400/20 bg-slate-950 px-3 py-2.5 text-emerald-100">
+        <div className="flex min-w-0 items-center gap-2 text-xs">
+          <Loader2 className="h-4 w-4 shrink-0 animate-spin text-emerald-400" />
+          <span className="min-w-0 flex-1 truncate font-medium">{label}</span>
+          {percent !== null && <span className="shrink-0 tabular-nums text-emerald-300">{percent}%</span>}
+        </div>
+        <div
+          className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-800"
+          role="progressbar"
+          aria-label={label}
+          aria-valuemin={0}
+          aria-valuemax={percent !== null ? 100 : undefined}
+          aria-valuenow={percent ?? undefined}
+        >
+          {percent !== null ? (
+            <div className="h-full rounded-full bg-emerald-400 transition-[width] duration-500 ease-out" style={{ width: `${percent}%` }} />
+          ) : (
+            <div className="h-full w-1/3 animate-pulse rounded-full bg-emerald-400" />
+          )}
+        </div>
       </div>
-      <div
-        className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-800"
-        role="progressbar"
-        aria-label={label}
-        aria-valuemin={0}
-        aria-valuemax={percent !== null ? 100 : undefined}
-        aria-valuenow={percent ?? undefined}
-      >
-        {percent !== null ? (
-          <div className="h-full rounded-full bg-emerald-400 transition-[width] duration-500 ease-out" style={{ width: `${percent}%` }} />
-        ) : (
-          <div className="h-full w-1/3 animate-pulse rounded-full bg-emerald-400" />
-        )}
+      {action}
+    </div>
+  );
+}
+
+function jobStopUnavailableReason(job: Job) {
+  if (job.status === "cancelling") return "Arrêt en cours : retour arrière des modifications de l'action.";
+  if (job.cancel_blocked_step) return `Arrêt impossible pendant une étape irréversible : ${job.cancel_blocked_step}.`;
+  if (!job.cancellable) return `Cette action ne peut pas être arrêtée : ${job.cancel_hint || "opération non interruptible."}`;
+  return "";
+}
+
+// Rouge comme les autres actions destructives ; le carré est plein, symbole « stop » des lecteurs :
+// vide et gris, il se lisait comme une case à cocher.
+const STOP_BUTTON_CLASS =
+  "border-red-300 text-red-700 hover:border-red-400 hover:bg-red-50 hover:text-red-800 active:bg-red-100 focus-visible:ring-red-500 dark:border-red-800 dark:text-red-300 dark:hover:border-red-700 dark:hover:bg-red-950/60 dark:hover:text-red-200 dark:active:bg-red-950";
+
+function JobStopButton({ job, className, onRequest }: { job: Job; className?: string; onRequest: (jobId: number) => void }) {
+  const queued = job.status === "queued";
+  const cancelling = job.status === "cancelling";
+  const unavailable = jobStopUnavailableReason(job);
+  const label = queued ? "Retirer de la file" : cancelling ? "Arrêt en cours…" : "Arrêter l'action";
+  const title = unavailable || `${queued ? "Retirer de la file d'attente" : "Arrêter"} : ${job.title}`;
+  const icon = cancelling ? (
+    <Loader2 className="h-4 w-4 animate-spin" />
+  ) : queued ? (
+    <X className="h-4 w-4" />
+  ) : (
+    <Square className="h-3.5 w-3.5 fill-current" />
+  );
+  return (
+    <Button
+      className={cn(STOP_BUTTON_CLASS, className)}
+      variant="outline"
+      size="sm"
+      title={title}
+      aria-label={title}
+      disabled={Boolean(unavailable)}
+      onClick={() => onRequest(job.id)}
+    >
+      {icon}
+      {label}
+    </Button>
+  );
+}
+
+function JobCancelState({ job, action }: { job: Job; action?: ReactNode }) {
+  if (job.status === "queued") {
+    return (
+      <div className="mb-3 flex flex-wrap items-start gap-2 rounded-md border bg-muted/40 p-3 text-sm">
+        <Loader2 className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+        <div className="min-w-0 flex-1">
+          <p className="font-medium">En attente</p>
+          <p className="mt-0.5 break-words text-muted-foreground">
+            {job.waiting_for || "Une autre action occupe ce projet"} : l'action démarrera automatiquement.
+          </p>
+        </div>
+        {action}
+      </div>
+    );
+  }
+  if (job.status !== "cancelling") return null;
+  return (
+    <div className="mb-3 flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/[0.08] p-3 text-sm">
+      <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-amber-600 dark:text-amber-400" />
+      <div className="min-w-0">
+        <p className="font-medium">Arrêt en cours</p>
+        <p className="mt-0.5 break-words text-muted-foreground">
+          {job.cancel_pending_step
+            ? `L'arrêt sera effectif à la fin de l'étape en cours : ${job.cancel_pending_step}.`
+            : job.cancel_hint}
+        </p>
       </div>
     </div>
   );
@@ -1088,6 +1193,7 @@ export default function Home() {
   const [moduleNames, setModuleNames] = useState("");
   const [deleteConfirm, setDeleteConfirm] = useState("");
   const [pendingUninstallModules, setPendingUninstallModules] = useState<string[]>([]);
+  const [jobToCancelId, setJobToCancelId] = useState<number | null>(null);
   const [pendingDeleteCodeModules, setPendingDeleteCodeModules] = useState<string[]>([]);
   const [activeTab, setActiveTab] = useState("bases");
   const [pendingCreatedProjectName, setPendingCreatedProjectName] = useState("");
@@ -1165,15 +1271,15 @@ export default function Home() {
     () => projectJobs.find((job) => job.id === selectedJobId) || projectJobs[0],
     [projectJobs, selectedJobId],
   );
-  const hasRunningJobs = useMemo(() => jobs.some((job) => job.status === "running"), [jobs]);
+  const hasRunningJobs = useMemo(() => jobs.some(isJobUnfinished), [jobs]);
   const runningJobs = useMemo(
-    () => jobs.filter((job) => job.status === "running"),
+    () => jobs.filter(isJobUnfinished),
     [jobs],
   );
   const pendingProjectCreations = useMemo(
     () => jobs.filter(
       (job) =>
-        job.status === "running" &&
+        isJobUnfinished(job) &&
         job.title.startsWith("Créer le projet ") &&
         Boolean(job.project) &&
         !(overview?.projects.some((project) => project.name === job.project)),
@@ -1187,12 +1293,12 @@ export default function Home() {
   const projectLifecycleJobs = useMemo(() => {
     const runningJobs = new Map<string, Job>();
     for (const job of jobs) {
-      if (job.status === "running") runningJobs.set(job.title, job);
+      if (isJobActive(job)) runningJobs.set(job.title, job);
     }
     return runningJobs;
   }, [jobs]);
-  const gitInstallRunning = jobs.some((job) => job.status === "running" && job.title === "Installer Git pour Windows");
-  const traefikInstallRunning = jobs.some((job) => job.status === "running" && job.title === "Installer Traefik");
+  const gitInstallRunning = jobs.some((job) => isJobUnfinished(job) && job.title === "Installer Git pour Windows");
+  const traefikInstallRunning = jobs.some((job) => isJobUnfinished(job) && job.title === "Installer Traefik");
   const selectedSshKey = useMemo(
     () => sshKeys.find((key) => key.name === selectedSshKeyName) || sshKeys[0] || null,
     [selectedSshKeyName, sshKeys],
@@ -1382,9 +1488,9 @@ export default function Home() {
 
   const notifyJobCompletion = useCallback((job: Job) => {
     const successful = job.status === "done";
-    const title = `${successful ? "Tâche terminée" : "Tâche en erreur"} : ${job.title}`;
+    const title = `${jobCompletionTitle(job)} : ${job.title}`;
     const message = !successful && job.error_message ? `${title}\n${job.error_message}` : title;
-    pushToast(successful ? "success" : "error", message);
+    pushToast(successful ? "success" : job.status === "cancelled" ? "info" : "error", message);
     void sendTaskNotification(job).catch(() => {
       // A refused system permission must not affect job polling.
     });
@@ -1396,7 +1502,7 @@ export default function Home() {
     if (notify && jobNotificationsInitialized.current) {
       for (const job of nextJobs) {
         const previousStatus = previousStatuses.get(job.id);
-        if (previousStatus === "running" && (job.status === "done" || job.status === "error")) {
+        if (previousStatus && isJobUnfinished({ status: previousStatus }) && !isJobUnfinished(job)) {
           notifyJobCompletion(job);
         }
       }
@@ -1875,7 +1981,11 @@ export default function Home() {
       jobStatuses.current.set(result.job.id, result.job.status);
       setExternalLogView(null);
       enableLogAutoFollow();
-      pushToast("success", `Action lancée : ${result.job.title}`);
+      if (result.job.status === "queued") {
+        pushToast("info", `Action en attente : ${result.job.title}${result.job.waiting_for ? ` (${result.job.waiting_for.toLowerCase()})` : ""}. Elle démarrera automatiquement.`);
+      } else {
+        pushToast("success", `Action lancée : ${result.job.title}`);
+      }
       void refreshJobs();
       return result.job;
     } catch (err) {
@@ -2437,6 +2547,23 @@ export default function Home() {
     }
   }
 
+  async function confirmCancelJob() {
+    const job = jobs.find((item) => item.id === jobToCancelId);
+    setJobToCancelId(null);
+    if (!job) return;
+    try {
+      const result = await api<{ job: Job }>(`/api/jobs/${job.id}/cancel`, { method: "POST", body: "{}" });
+      pushToast(
+        "info",
+        result.job.status === "cancelled" ? `Action retirée de la file d'attente : ${job.title}` : `Arrêt demandé : ${job.title}`,
+      );
+      await refreshJobs(job.id);
+    } catch (err) {
+      pushToast("error", err instanceof Error ? err.message : "Arrêt de l'action impossible.");
+      void refreshJobs(job.id);
+    }
+  }
+
   async function deleteJob(jobId: number) {
     try {
       await api<{ ok: boolean }>(`/api/jobs/${jobId}`, { method: "DELETE" });
@@ -2751,7 +2878,8 @@ export default function Home() {
     () =>
       jobs.find(
         (job) =>
-          job.status === "running" &&
+          // Une action en attente n'a pas commencé : l'en-tête montre celle qui s'exécute.
+          isJobActive(job) &&
           selectedProject &&
           (job.title === `Démarrer ${selectedProject.name}` || job.title === `Arrêter ${selectedProject.name}`),
       ),
@@ -2995,7 +3123,7 @@ export default function Home() {
   const outputTitle = scopedExternalLogView?.title || selectedJob?.title || "Aucune action sélectionnée";
   const outputContent = scopedExternalLogView?.content || selectedJob?.output || selectedJob?.lines?.join("\n") || "Aucune sortie.";
   const outputSource = scopedExternalLogView ? `external:${scopedExternalLogView.title}` : `job:${selectedJob?.id || "none"}`;
-  const outputProgress = !scopedExternalLogView && selectedJob?.status === "running" ? selectedJob.progress : null;
+  const outputProgress = !scopedExternalLogView && selectedJob && isJobActive(selectedJob) ? selectedJob.progress : null;
   const outputProgressPercent =
     outputProgress && typeof outputProgress.current === "number" && typeof outputProgress.total === "number" && outputProgress.total > 0
       ? Math.max(0, Math.min(100, Math.round((outputProgress.current / outputProgress.total) * 100)))
@@ -3006,7 +3134,12 @@ export default function Home() {
     : outputTitle;
   // En mode affiné, un job terminé affiche d'abord son résultat ; la sortie brute se déplie à la demande.
   const finishedJobSummary =
-    refinedInterface && !scopedExternalLogView && selectedJob && selectedJob.status !== "running" ? selectedJob : null;
+    refinedInterface && !scopedExternalLogView && selectedJob && !isJobUnfinished(selectedJob) ? selectedJob : null;
+  const jobToCancel = jobs.find((job) => job.id === jobToCancelId) || null;
+  const selectedJobStop =
+    !scopedExternalLogView && selectedJob && isJobUnfinished(selectedJob) ? (
+      <JobStopButton job={selectedJob} onRequest={setJobToCancelId} />
+    ) : null;
   const rawOutputHidden = Boolean(finishedJobSummary) && !rawOutputVisible;
 
   useEffect(() => {
@@ -3021,7 +3154,7 @@ export default function Home() {
   useEffect(() => {
     const previous = previousSelectedJobRef.current;
     const current = { id: selectedJob?.id ?? null, status: selectedJob?.status ?? null };
-    if (previous.id === current.id && previous.status === "running" && current.status && current.status !== "running") {
+    if (previous.id === current.id && previous.status && isJobUnfinished({ status: previous.status }) && current.status && !isJobUnfinished({ status: current.status })) {
       setRawOutputVisible(true);
     }
     previousSelectedJobRef.current = current;
@@ -4717,33 +4850,48 @@ export default function Home() {
                               <div
                                 key={job.id}
                                 className={cn(
-                                  "flex min-w-0 items-start gap-1 rounded-md border bg-card transition-colors",
+                                  "min-w-0 rounded-md border bg-card transition-colors",
                                   jobSelected
                                     ? "border-primary bg-primary/[0.10] ring-2 ring-primary/35 dark:bg-primary/[0.16]"
                                     : "hover:border-primary/35 hover:bg-muted/60 dark:hover:bg-muted/40",
                                 )}
                               >
-                                <button
-                                  type="button"
-                                  className={cn("min-w-0 flex-1 rounded-md p-3 text-left", REFINED_FOCUS_RING)}
-                                  aria-pressed={jobSelected}
-                                  title={job.title}
-                                  onClick={() => selectJob(job.id)}
-                                >
-                                  <Badge variant={statusVariant(job.status)}>{statusLabel(job.status)}</Badge>
-                                  <span className="mt-2 line-clamp-2 break-words text-sm font-medium leading-5">{job.title}</span>
-                                  <span className="mt-1 block text-xs tabular-nums text-muted-foreground">{job.started_at}</span>
-                                </button>
-                                <Button
-                                  className="m-1 h-8 w-8 shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                                  variant="ghost"
-                                  size="icon"
-                                  title={`Supprimer l'historique ${job.title}`}
-                                  aria-label={`Supprimer l'historique ${job.title}`}
-                                  onClick={() => deleteJob(job.id)}
-                                >
-                                  <Trash2 className="h-4 w-4" />
-                                </Button>
+                                <div className="flex min-w-0 items-start gap-1">
+                                  <button
+                                    type="button"
+                                    className={cn("min-w-0 flex-1 rounded-md p-3 text-left", REFINED_FOCUS_RING)}
+                                    aria-pressed={jobSelected}
+                                    title={job.title}
+                                    onClick={() => selectJob(job.id)}
+                                  >
+                                    <Badge variant={statusVariant(job.status)}>{statusLabel(job.status)}</Badge>
+                                    <span className="mt-2 line-clamp-2 break-words text-sm font-medium leading-5">{job.title}</span>
+                                    <span className="mt-1 block text-xs tabular-nums text-muted-foreground">{job.started_at}</span>
+                                    {job.status === "queued" && job.waiting_for && (
+                                      <span className="mt-1 block break-words text-xs text-muted-foreground">{job.waiting_for}</span>
+                                    )}
+                                  </button>
+                                  {!isJobUnfinished(job) && (
+                                    <Button
+                                      className="m-1 h-8 w-8 shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                                      variant="ghost"
+                                      size="icon"
+                                      title={`Supprimer l'historique ${job.title}`}
+                                      aria-label={`Supprimer l'historique ${job.title}`}
+                                      onClick={() => deleteJob(job.id)}
+                                    >
+                                      <Trash2 className="h-4 w-4" />
+                                    </Button>
+                                  )}
+                                </div>
+                                {isJobUnfinished(job) && (
+                                  <div className="px-3 pb-3">
+                                    <JobStopButton job={job} className="w-full" onRequest={setJobToCancelId} />
+                                    {job.status !== "cancelling" && jobStopUnavailableReason(job) && (
+                                      <p className="mt-1.5 break-words text-xs text-muted-foreground">{jobStopUnavailableReason(job)}</p>
+                                    )}
+                                  </div>
+                                )}
                               </div>
                             );
                           })}
@@ -4788,10 +4936,12 @@ export default function Home() {
                         </div>
                       </div>
                       <div className="min-w-0 p-4">
-                        {!scopedExternalLogView && selectedJob?.status === "running" && (
+                        {!scopedExternalLogView && selectedJob && <JobCancelState job={selectedJob} action={selectedJobStop} />}
+                        {!scopedExternalLogView && selectedJob && isJobActive(selectedJob) && (
                           <JobProgressPanel
                             label={outputProgress?.label || selectedJob.last_line || selectedJob.lines.at(-1) || "Traitement en cours"}
                             percent={outputProgressPercent}
+                            action={selectedJobStop}
                           />
                         )}
                         {finishedJobSummary && (
@@ -4800,16 +4950,24 @@ export default function Home() {
                               "mb-3 rounded-md border p-4",
                               finishedJobSummary.status === "error"
                                 ? "border-destructive/30 bg-destructive/[0.08]"
-                                : "border-emerald-500/25 bg-emerald-500/[0.08]",
+                                : finishedJobSummary.status === "cancelled"
+                                  ? "border-amber-500/30 bg-amber-500/[0.08]"
+                                  : "border-emerald-500/25 bg-emerald-500/[0.08]",
                             )}
                           >
                             <div className="flex items-center gap-2 text-sm font-semibold">
                               {finishedJobSummary.status === "error" ? (
                                 <AlertTriangle className="h-4 w-4 shrink-0 text-destructive" />
+                              ) : finishedJobSummary.status === "cancelled" ? (
+                                <Square className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
                               ) : (
                                 <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" />
                               )}
-                              {finishedJobSummary.status === "error" ? "Opération en erreur" : "Opération réussie"}
+                              {finishedJobSummary.status === "error"
+                                ? "Opération en erreur"
+                                : finishedJobSummary.status === "cancelled"
+                                  ? "Opération arrêtée"
+                                  : "Opération réussie"}
                             </div>
                             <p className="mt-1 break-words text-sm text-muted-foreground">
                               {finishedJobSummary.error_message || (
@@ -4871,22 +5029,28 @@ export default function Home() {
                             >
                               <span className="flex h-full min-w-0 flex-col justify-between gap-2">
                                 <span className="line-clamp-3 break-words text-sm font-semibold leading-5">{job.title}</span>
-                                <span className="block text-xs tabular-nums text-muted-foreground">{job.started_at}</span>
+                                <span className="block text-xs tabular-nums text-muted-foreground">
+                                  {job.status === "queued" && job.waiting_for ? job.waiting_for : job.started_at}
+                                </span>
                               </span>
                               <Badge className="min-w-[74px] shrink-0 justify-self-end" variant={statusVariant(job.status)}>
                                 {statusLabel(job.status)}
                               </Badge>
                             </button>
-                            <Button
-                              className="w-full border-red-300 text-red-700 hover:border-red-400 hover:bg-red-50 hover:text-red-800 active:bg-red-100 focus-visible:ring-red-500 dark:border-red-800 dark:text-red-300 dark:hover:border-red-700 dark:hover:bg-red-950/60 dark:hover:text-red-200 dark:active:bg-red-950"
-                              variant="outline"
-                              size="sm"
-                              title={`Supprimer l'historique ${job.title}`}
-                              aria-label={`Supprimer l'historique ${job.title}`}
-                              onClick={() => deleteJob(job.id)}
-                            >
-                              Supprimer
-                            </Button>
+                            {isJobUnfinished(job) ? (
+                              <JobStopButton job={job} className="w-full" onRequest={setJobToCancelId} />
+                            ) : (
+                              <Button
+                                className="w-full border-red-300 text-red-700 hover:border-red-400 hover:bg-red-50 hover:text-red-800 active:bg-red-100 focus-visible:ring-red-500 dark:border-red-800 dark:text-red-300 dark:hover:border-red-700 dark:hover:bg-red-950/60 dark:hover:text-red-200 dark:active:bg-red-950"
+                                variant="outline"
+                                size="sm"
+                                title={`Supprimer l'historique ${job.title}`}
+                                aria-label={`Supprimer l'historique ${job.title}`}
+                                onClick={() => deleteJob(job.id)}
+                              >
+                                Supprimer
+                              </Button>
+                            )}
                           </div>
                         )) : (
                           <div className="rounded-md border border-dashed p-6 text-center">
@@ -4934,10 +5098,12 @@ export default function Home() {
                         </div>
                       </CardHeader>
                       <CardContent className="min-w-0">
-                        {!scopedExternalLogView && selectedJob?.status === "running" && (
+                        {!scopedExternalLogView && selectedJob && <JobCancelState job={selectedJob} action={selectedJobStop} />}
+                        {!scopedExternalLogView && selectedJob && isJobActive(selectedJob) && (
                           <JobProgressPanel
                             label={outputProgress?.label || selectedJob.last_line || selectedJob.lines.at(-1) || "Traitement en cours"}
                             percent={outputProgressPercent}
+                            action={selectedJobStop}
                           />
                         )}
                         <OdooLogsModeBar view={scopedExternalLogView} onShowFull={() => showLogs(true)} onShowSummary={() => showLogs()} />
@@ -5715,7 +5881,11 @@ export default function Home() {
                         </div>
                         <div className="grid gap-x-4 gap-y-2 text-xs sm:grid-cols-[100px_minmax(0,1fr)]">
                           <code>{settingsDraft.api_port_actual || settingsDraft.api_port}</code><span>API locale du gestionnaire, sur <code>127.0.0.1</code> uniquement</span>
-                          <code>80 / 443</code><span>Traefik, accès HTTP/HTTPS aux projets</span>
+                          <code>{systemStatus?.traefik?.http_port ?? 80}</code>
+                          <span>
+                            Traefik, accès HTTP aux projets
+                            {systemStatus?.traefik?.external && systemStatus.traefik.container ? ` (instance existante : ${systemStatus.traefik.container})` : ""}
+                          </span>
                           <code>8069</code><span>Odoo à l’intérieur de chaque conteneur</span>
                           <code>5432</code><span>PostgreSQL à l’intérieur de chaque conteneur</span>
                           <code>10022</code><span>Connexion SSH sortante vers GitLab Sudokeys</span>
@@ -6856,6 +7026,27 @@ export default function Home() {
             <Button disabled={!canUseDb || loading || !adminPassword.trim()} onClick={confirmAdminPasswordReset}>
               <KeyRound className="h-4 w-4" />
               Réinitialiser
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(jobToCancel)} onOpenChange={(open) => { if (!open) setJobToCancelId(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{jobToCancel?.status === "queued" ? "Retirer l'action de la file d'attente" : "Arrêter l'action"}</DialogTitle>
+            <DialogDescription className="break-words">{jobToCancel?.title}</DialogDescription>
+          </DialogHeader>
+          <div className="rounded-md border bg-muted/40 p-3 text-sm">
+            {jobToCancel?.status === "queued"
+              ? "L'action n'a pas encore démarré : elle est simplement retirée, rien n'est modifié."
+              : jobToCancel?.cancel_hint}
+          </div>
+          <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+            <Button variant="outline" onClick={() => setJobToCancelId(null)}>Laisser continuer</Button>
+            <Button variant="destructive" disabled={!jobToCancel?.cancellable} onClick={confirmCancelJob}>
+              {jobToCancel?.status === "queued" ? <X className="h-4 w-4" /> : <Square className="h-3.5 w-3.5 fill-current" />}
+              {jobToCancel?.status === "queued" ? "Retirer" : "Arrêter"}
             </Button>
           </div>
         </DialogContent>

@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from unittest.mock import Mock, patch
 
 import odoo_manager_web as web
+from odoo_manager_core.traefik import reset_traefik_entrypoint_cache
 
 
 class CorsTests(unittest.TestCase):
@@ -532,6 +533,23 @@ class EventWatchCostTests(unittest.TestCase):
         self.assertEqual(["demo", "other"], web.overview_databases("DEMO", max_age=30))
         self.assertEqual(["demo", "other"], web.overview_databases("DEMO"), "sans max_age, lecture directe")
 
+    @patch("odoo_manager_web.list_databases_for")
+    def test_overview_probes_running_projects_in_parallel_and_skips_cached_ones(self, list_databases):
+        # Chaque sonde attend que toutes les autres aient démarré : en série, la barrière expirerait.
+        barrier = threading.Barrier(3, timeout=5)
+
+        def probe(project, check_container=True):
+            barrier.wait()
+            return [project.lower()]
+
+        list_databases.side_effect = probe
+        web.OVERVIEW_DATABASES_CACHE["CACHED"] = (time.monotonic(), ["cached"])
+
+        result = web.overview_databases_by_project(["A", "B", "CACHED", "C"], max_age=30)
+
+        self.assertEqual({"A": ["a"], "B": ["b"], "CACHED": ["cached"], "C": ["c"]}, result)
+        self.assertEqual({"A", "B", "C"}, {call.args[0] for call in list_databases.call_args_list})
+
     @patch("odoo_manager_web.wsl_executable_available", return_value=True)
     def test_wsl_shell_detection_is_not_relaunched_for_every_module_listing(self, detect):
         web.WSL_SHELL_AVAILABILITY.clear()
@@ -935,6 +953,290 @@ class TraefikPathTests(unittest.TestCase):
                 web.SETTINGS = previous_settings
 
 
+class TraefikDetectionStatusTests(unittest.TestCase):
+    class DockerRunner:
+        def __init__(self, containers):
+            self.containers = containers
+
+        def capture(self, command, cwd=None, timeout=10):
+            if command[1:5] == ["ps", "-a", "--no-trunc", "--format"]:
+                return 0, "\n".join(self.containers)
+            if command[1:3] == ["inspect", "-f"]:
+                return 0, '["--entrypoints.web.address=:80"]\t[]'
+            return 1, ""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.traefik = self.root / "docker-local-tools" / "traefik"
+        self.traefik.mkdir(parents=True)
+        (self.traefik / "docker-compose.yml").write_text(
+            'services:\n  traefik:\n    container_name: traefik\n    ports:\n      - "8090:80"\n', encoding="utf-8"
+        )
+        self.project = self.root / "DEMO"
+        self.project.mkdir()
+        (self.project / "docker-compose.yml").write_text("labels:\n  - rule=Host(`dev.DEMO.localhost`)\n", encoding="utf-8")
+        web.invalidate_traefik_detection()
+        reset_traefik_entrypoint_cache()
+
+    def tearDown(self):
+        web.invalidate_traefik_detection()
+        self.temporary.cleanup()
+
+    def status_with(self, containers, docker_running=True):
+        runner = self.DockerRunner(containers)
+        service = web.ProjectService(web.SETTINGS, self.root, traefik_dir=self.traefik, runner=runner)
+        with patch("odoo_manager_web.project_service", return_value=service), \
+                patch("odoo_manager_web.local_traefik_directory", return_value=self.traefik), \
+                patch("odoo_manager_web.compose_file", return_value=self.project / "docker-compose.yml"):
+            web.invalidate_traefik_detection()
+            return web.traefik_status({"running": docker_running}), web.project_url("DEMO")
+
+    @staticmethod
+    def container(name, ports, networks="traefik-local", working_dir=""):
+        return "\t".join(("id-" + name, name, "traefik:3.6", "running", ports, networks, working_dir, ""))
+
+    def test_existing_traefik_is_reported_as_running_with_its_port(self):
+        status, url = self.status_with([self.container("edge", "0.0.0.0:8000->80/tcp", working_dir="/opt/edge")])
+
+        self.assertTrue(status["running"])
+        self.assertTrue(status["external"])
+        self.assertEqual(8000, status["http_port"])
+        self.assertIn("conteneur edge (port HTTP 8000)", status["message"])
+        self.assertEqual("http://dev.DEMO.localhost:8000/", url)
+
+    def test_incompatible_existing_traefik_is_a_conflict_not_a_ready_proxy(self):
+        status, _url = self.status_with([self.container("edge", "0.0.0.0:80->80/tcp", networks="proxy")])
+
+        self.assertFalse(status["running"])
+        self.assertEqual("conflict", status["state"])
+        self.assertIn("réseau traefik-local", status["message"])
+
+    def test_configured_port_is_used_while_docker_is_stopped(self):
+        status, _url = self.status_with([], docker_running=False)
+
+        self.assertEqual(8090, status["http_port"])
+        self.assertEqual("stopped", status["state"])
+
+
+class JobQueueAndCancellationTests(unittest.TestCase):
+    def setUp(self):
+        with web.JOBS_LOCK:
+            self.previous_jobs = web.JOBS.copy()
+            self.previous_next_job_id = web.NEXT_JOB_ID
+            web.JOBS.clear()
+            web.NEXT_JOB_ID = 1
+        self.releases = []
+
+    def tearDown(self):
+        for release in self.releases:
+            release.set()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            with web.JOBS_LOCK:
+                if not any(job.status in web.JOB_UNFINISHED_STATUSES for job in web.JOBS.values()):
+                    break
+            time.sleep(0.01)
+        with web.JOBS_LOCK:
+            web.JOBS.clear()
+            web.JOBS.update(self.previous_jobs)
+            web.NEXT_JOB_ID = self.previous_next_job_id
+
+    def wait_until(self, predicate, timeout=5):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(0.01)
+        self.fail("condition non atteinte")
+
+    def blocking_target(self, started=None, fail=False):
+        release = threading.Event()
+        self.releases.append(release)
+
+        def target(job):
+            if started is not None:
+                started.append(job.id)
+            while not release.wait(0.02):
+                pass
+            if fail:
+                raise RuntimeError("échec volontaire")
+
+        return release, target
+
+    def test_second_action_on_a_project_waits_then_starts(self):
+        release, start_target = self.blocking_target()
+        ran = []
+        start = web.Job("Démarrer DEMO", start_target, project="DEMO")
+        update = web.Job("Mettre à jour sale", lambda job: ran.append(job.id), project="DEMO")
+        other_project = web.Job("Démarrer AUTRE", lambda job: ran.append(job.id), project="AUTRE")
+
+        self.assertEqual("running", start.status)
+        self.assertEqual("queued", update.status)
+        self.wait_until(lambda: other_project.status == "done")
+        with web.JOBS_LOCK:
+            self.assertEqual("Après « Démarrer DEMO »", web.job_cancel_payload(update)["waiting_for"])
+
+        release.set()
+        self.wait_until(lambda: update.status == "done")
+        self.assertEqual([other_project.id, update.id], ran)
+
+    def test_queued_actions_are_cancelled_when_the_previous_one_fails(self):
+        release, failing = self.blocking_target(fail=True)
+        ran = []
+        first = web.Job("Démarrer DEMO", failing, project="DEMO")
+        queued = web.Job("Mettre à jour sale", lambda job: ran.append(job.id), project="DEMO")
+
+        release.set()
+        self.wait_until(lambda: queued.status == "cancelled")
+
+        self.assertEqual("error", first.status)
+        self.assertEqual([], ran)
+        self.assertIn("« Démarrer DEMO » a échoué", queued.error_message)
+
+    def test_action_on_all_projects_waits_for_project_actions(self):
+        release, target = self.blocking_target()
+        web.Job("Démarrer DEMO", target, project="DEMO")
+        update_all = web.Job("MAJ tous les projets", lambda job: None, resources={"*"})
+        unrelated = web.Job("Installer Git pour Windows", lambda job: None, resources={"git"})
+
+        self.assertEqual("queued", update_all.status)
+        self.wait_until(lambda: unrelated.status == "done")
+        release.set()
+        self.wait_until(lambda: update_all.status == "done")
+
+    def test_queued_action_can_be_removed_without_running(self):
+        release, target = self.blocking_target()
+        web.Job("Démarrer DEMO", target, project="DEMO")
+        ran = []
+        queued = web.Job("Mettre à jour sale", lambda job: ran.append(job.id), project="DEMO")
+
+        web.cancel_job(queued.id)
+        release.set()
+        time.sleep(0.1)
+
+        self.assertEqual("cancelled", queued.status)
+        self.assertEqual([], ran)
+        self.assertIn("Retirée de la file d'attente", queued.error_message)
+
+    def test_running_action_stops_and_rolls_back_newest_change_first(self):
+        steps = []
+
+        def target(job):
+            web.job_control.on_cancel("retrait de la base", lambda: steps.append("base"))
+            web.job_control.on_cancel("arrêt des conteneurs", lambda: steps.append("conteneurs"))
+            job.add("Démarrage...")
+            while True:
+                job.add("Attente Odoo...")
+                web.job_control.sleep(0.05)
+
+        job = web.Job("Restaurer demo", target, project="DEMO")
+        self.wait_until(lambda: any("Attente Odoo" in line for line in job.lines))
+
+        web.cancel_job(job.id)
+        self.wait_until(lambda: job.status == "cancelled")
+
+        self.assertEqual(["conteneurs", "base"], steps)
+        self.assertEqual("Action arrêtée par l'utilisateur.", job.error_message)
+        self.assertTrue(any(line.startswith("Retour arrière : arrêt des conteneurs") for line in job.lines))
+
+    def test_cancelled_running_action_cancels_queued_followers(self):
+        def target(job):
+            while True:
+                web.job_control.sleep(0.05)
+
+        running = web.Job("Démarrer DEMO", target, project="DEMO")
+        queued = web.Job("Mettre à jour sale", lambda job: None, project="DEMO")
+
+        web.cancel_job(running.id)
+        self.wait_until(lambda: queued.status == "cancelled")
+
+        self.assertIn("a été arrêtée", queued.error_message)
+
+    def test_non_interruptible_and_irreversible_steps_refuse_cancellation(self):
+        release, target = self.blocking_target()
+        target.__name__ = "install_git_job"
+        installer = web.Job("Installer Git pour Windows", target, resources={"git"})
+        with self.assertRaisesRegex(ValueError, "ne peut pas être arrêtée : l'installeur Windows"):
+            web.cancel_job(installer.id)
+        release.set()
+
+        in_step = threading.Event()
+        leave_step = threading.Event()
+        self.releases.append(leave_step)
+
+        def dropping(job):
+            with web.job_control.protected("suppression de la base demo par Odoo", irreversible=True):
+                in_step.set()
+                leave_step.wait(5)
+
+        drop = web.Job("Supprimer base demo", dropping, project="DEMO")
+        in_step.wait(5)
+        with web.JOBS_LOCK:
+            self.assertFalse(web.job_cancel_payload(drop)["cancellable"])
+        with self.assertRaisesRegex(ValueError, "étape irréversible en cours"):
+            web.cancel_job(drop.id)
+        leave_step.set()
+        self.wait_until(lambda: drop.status == "done")
+
+    def test_cancel_request_arriving_after_the_last_step_keeps_the_action_done(self):
+        in_last_step = threading.Event()
+        finish = threading.Event()
+        self.releases.append(finish)
+
+        def target(job):
+            with web.job_control.protected("git pull du projet"):
+                in_last_step.set()
+                finish.wait(5)
+
+        job = web.Job("MAJ projet DEMO", target, project="DEMO")
+        in_last_step.wait(5)
+        web.cancel_job(job.id)
+        self.assertEqual("cancelling", job.status)
+        finish.set()
+        self.wait_until(lambda: job.status not in web.JOB_UNFINISHED_STATUSES)
+
+        # L'étape protégée se termine puis l'arrêt s'applique : aucun retour arrière n'était enregistré.
+        self.assertEqual("cancelled", job.status)
+
+    def test_finished_action_cannot_be_cancelled(self):
+        job = web.Job("Rapide", lambda current: None)
+        self.wait_until(lambda: job.status == "done")
+        with self.assertRaisesRegex(ValueError, "déjà terminée"):
+            web.cancel_job(job.id)
+
+
+class ModuleFailureHintTests(unittest.TestCase):
+    PARSE_ERROR = (
+        "La commande Odoo a échoué avec le code 255. Dernière erreur Odoo : odoo.tools.convert.ParseError: "
+        "while parsing /home/odoo/srv/server/addons/sudokeys_project_tracking/views/res_config_settings_views.xml:3 "
+        "— Le champ `payslip_generate_and_send_trigger` n'existe pas"
+    )
+
+    @patch("odoo_manager_web.ignored_missing_modules", return_value={"old_excluded"})
+    @patch("odoo_manager_web.module_dirs", return_value=[Path("/addons/base"), Path("/addons/project")])
+    @patch("odoo_manager_web.installed_modules", return_value={
+        "base": {"state": "installed"},
+        "project": {"state": "installed"},
+        "hr_payroll": {"state": "installed"},
+        "old_excluded": {"state": "installed"},
+        "studio_customization": {"state": "installed"},
+        "website": {"state": "uninstalled"},
+    })
+    def test_missing_field_error_names_installed_modules_without_code(self, _states, _dirs, _ignored):
+        hint = web.missing_code_failure_hint("sudokeys_v19", "sudokeys_17092016", self.PARSE_ERROR)
+
+        self.assertIn("(hr_payroll)", hint)
+        self.assertIn("sudokeys_17092016", hint)
+
+    @patch("odoo_manager_web.installed_modules")
+    def test_unrelated_errors_do_not_query_the_database(self, installed_modules):
+        hint = web.missing_code_failure_hint("demo", "db", "SyntaxError: invalid syntax")
+
+        self.assertEqual("", hint)
+        installed_modules.assert_not_called()
+
+
 class TraefikInstallationTests(unittest.TestCase):
     class LogJob:
         def __init__(self):
@@ -1243,6 +1545,42 @@ class DiagnosticModuleTests(unittest.TestCase):
         self.assertEqual(stats["physical_total"], 2)
         self.assertEqual(stats["missing"], 1)
         self.assertEqual(missing, ["bb/missing"])
+
+    def test_project_diagnostics_reads_databases_in_parallel_and_keeps_their_order(self):
+        # Les trois bases doivent être lues en même temps, sans quoi la barrière expire ;
+        # la première finit la dernière, et le rapport garde pourtant l'ordre de PostgreSQL.
+        barrier = threading.Barrier(3, timeout=5)
+        delays = {"db_1": 0.2, "db_2": 0.1, "db_3": 0.0}
+
+        def states(project, db_name, check_container=True):
+            self.assertFalse(check_container, "PostgreSQL vient d'être contrôlé : pas de docker inspect par base")
+            barrier.wait()
+            time.sleep(delays[db_name])
+            return {} if db_name == "db_2" else {"ghost": {"state": "installed"}}
+
+        with patch.object(web, "validate_project", side_effect=lambda project: project), \
+                patch.object(web, "docker_available", return_value=(True, "")), \
+                patch.object(web, "container_statuses", return_value={"odoo-DEMO": "running", "postgresql-DEMO": "running"}), \
+                patch.object(web, "container_status", side_effect=AssertionError("un seul docker ps suffit")), \
+                patch.object(web, "module_dirs", return_value=[]), \
+                patch.object(web, "list_databases_for", return_value=["db_1", "db_2", "postgres", "db_3"]) as list_databases, \
+                patch.object(web, "installed_modules", side_effect=states), \
+                patch.object(web, "ignored_missing_modules", return_value=set()), \
+                patch.object(web, "db_query_lines", return_value=[]), \
+                patch.object(web, "filestore_files", side_effect=lambda project, db: (set(), Path("/filestore") / db)):
+            diagnostics = web.project_diagnostics("DEMO")
+
+        list_databases.assert_called_once_with("DEMO", check_container=False)
+        self.assertEqual(["db_1", "db_2", "db_3"], [database["name"] for database in diagnostics["databases"]])
+        self.assertEqual(
+            [
+                "Modules installés absents du code dans db_1",
+                "Impossible de lire les modules de db_2",
+                "Modules installés absents du code dans db_3",
+            ],
+            [issue["title"] for issue in diagnostics["issues"]],
+        )
+        self.assertEqual([], diagnostics["databases"][1]["issues"], "l'échec de lecture reste au niveau du projet")
 
     def test_update_all_modules_uses_explicit_no_filestore_command(self):
         self.assertEqual(

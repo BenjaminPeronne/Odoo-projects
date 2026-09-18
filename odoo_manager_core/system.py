@@ -2,9 +2,11 @@ import json
 import os
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 
 from .docker_api import DockerEngineClient, EngineUnavailable, engine_endpoint
+from .jobs import mark_docker_arguments
 from .platform import (
     command_prefix,
     executable_available,
@@ -32,6 +34,10 @@ class DockerBackend:
 
 _DOCKER_BACKENDS = {}
 _DOCKER_BACKENDS_LOCK = threading.Lock()
+# Docker Desktop chargé (Odoo qui démarre, VM en manque de mémoire) peut dépasser le délai de la
+# sonde sans être arrêté : pendant ce délai de grâce, un moteur qui répondait reste considéré prêt.
+DOCKER_SLOW_GRACE_SECONDS = 120
+_DOCKER_LAST_READY = {}
 
 
 def _docker_cache_key(settings):
@@ -46,6 +52,21 @@ def _docker_cache_key(settings):
 def reset_docker_backend_cache():
     with _DOCKER_BACKENDS_LOCK:
         _DOCKER_BACKENDS.clear()
+        _DOCKER_LAST_READY.clear()
+
+
+def _remember_docker_ready(settings, backend, version):
+    with _DOCKER_BACKENDS_LOCK:
+        _DOCKER_LAST_READY[_docker_cache_key(settings)] = (time.monotonic(), backend, version)
+
+
+def _recent_docker_ready(settings, backend):
+    with _DOCKER_BACKENDS_LOCK:
+        last = _DOCKER_LAST_READY.get(_docker_cache_key(settings))
+    if not last or last[1] != backend:
+        return None
+    elapsed = time.monotonic() - last[0]
+    return (elapsed, last[2]) if elapsed <= DOCKER_SLOW_GRACE_SECONDS else None
 
 
 def _cache_docker_backend(settings, backend):
@@ -139,7 +160,7 @@ def active_engine_client(settings):
 
 def docker_command(settings, *arguments):
     backend = _default_docker_backend(settings)
-    return [*backend.command, *arguments]
+    return [*backend.command, *mark_docker_arguments(backend.command, arguments)]
 
 
 def shell_command(settings, script_path, *arguments):
@@ -261,8 +282,8 @@ def docker_status(settings, timeout=6):
             env = os.environ.copy()
             env["PATH"] = executable_search_path()
             try:
-                # `docker version` interroge le moteur comme `docker info`, sans lancer chaque
-                # plugin CLI (14 processus avec Docker Desktop) : 200 ms au lieu de 560 ms.
+                # `docker version` n'interroge que l'API du moteur : `docker info` inventorie en plus
+                # conteneurs, images et plugins, et dépasse le délai dès que Docker est chargé.
                 result = subprocess.run(
                     [*backend.command, "version", "--format", "{{json .Server.Version}}"],
                     capture_output=True,
@@ -275,7 +296,33 @@ def docker_status(settings, timeout=6):
                     **hidden_process_kwargs(),
                 )
             except subprocess.TimeoutExpired:
-                environments.append({"backend": backend.kind, "label": backend.label, "installed": True, "running": False, "message": "Délai dépassé"})
+                recent = _recent_docker_ready(settings, backend)
+                if recent:
+                    elapsed, version = recent
+                    # Un moteur lent n'est pas arrêté : ni bascule vers WSL, ni alerte « Docker indisponible ».
+                    _cache_docker_backend(settings, backend)
+                    return docker_status_payload(
+                        settings,
+                        "ready",
+                        True,
+                        True,
+                        f"Docker répond lentement via {backend.label} (plus de {timeout} s, "
+                        f"dernière réponse il y a {int(elapsed)} s).",
+                        backend=backend,
+                        version=version,
+                        can_start=False,
+                        slow=True,
+                        environments=environments,
+                    )
+                environments.append(
+                    {
+                        "backend": backend.kind,
+                        "label": backend.label,
+                        "installed": True,
+                        "running": False,
+                        "message": f"Docker ne répond pas dans le délai de {timeout} s.",
+                    }
+                )
                 continue
             except OSError as exc:
                 environments.append({"backend": backend.kind, "label": backend.label, "installed": True, "running": False, "message": str(exc)})
@@ -336,6 +383,7 @@ def docker_status(settings, timeout=6):
     _cache_docker_backend(settings, selected)
 
     version = selected_version
+    _remember_docker_ready(settings, selected, version)
     return docker_status_payload(
         settings,
         "ready",

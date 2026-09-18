@@ -4,11 +4,31 @@ from pathlib import Path
 from unittest.mock import ANY, patch
 
 from odoo_manager_core.config import ManagerSettings
-from odoo_manager_core.project_service import ODOO_STARTUP_LOG, ODOO_STARTUP_STATUS, ProjectService, add_postgres_healthcheck_start_period
+from odoo_manager_core.project_service import (
+    ODOO_STARTUP_LOG,
+    ODOO_STARTUP_STATUS,
+    ODOO_STATE_MARKER,
+    ProjectService,
+    add_postgres_healthcheck_start_period,
+)
+from odoo_manager_core.traefik import reset_traefik_entrypoint_cache
+
+
+TRAEFIK_MIDDLEWARE_LABELS = (
+    "traefik.http.middlewares.odoo-forward.headers.customrequestheaders.X-Forwarded-Proto=http,"
+    "traefik.http.middlewares.odoo-compress.compress=true,"
+    "traefik.http.middlewares.odoo-headers.headers.hostsproxyheaders=websocket,Upgrade"
+)
 
 
 def has_command_tail(commands, tail):
     return any(command[-len(tail):] == tail for command in commands)
+
+
+def traefik_container(name="traefik", state="running", ports="127.0.0.1:80->80/tcp", networks="traefik-local",
+                      working_dir="", labels=TRAEFIK_MIDDLEWARE_LABELS, container_id=None):
+    """Ligne `docker ps` d'un conteneur Traefik, telle que la lit la détection."""
+    return "\t".join((container_id or f"id-{name}", name, "traefik:3.6", state, ports, networks, working_dir, labels))
 
 
 class FakeRunner:
@@ -18,6 +38,8 @@ class FakeRunner:
         self.statuses = {}
         self.health_statuses = {}
         self.odoo_server_running = True
+        # États successifs renvoyés par la sonde du serveur Odoo, puis `odoo_server_running`.
+        self.odoo_states = []
         self.odoo_port_ready = True
         self.odoo_port_states = []
         self.odoo_init_commands = []
@@ -30,9 +52,15 @@ class FakeRunner:
         self.missing_network_outputs = {}
         self.networks_missing_after_stream = set()
         self.database_query_outputs = {}
+        self.traefik_containers = []
+        self.traefik_containers_after_up = None
+        self.traefik_arguments = {}
+        self.published_port_owners = {}
 
     def stream(self, command, cwd=None, log=None):
         self.streams.append((list(command), Path(cwd) if cwd else None))
+        if self.traefik_containers_after_up is not None and command[-2:] == ["up", "-d"]:
+            self.traefik_containers = self.traefik_containers_after_up
         if log:
             log("$ " + " ".join(command))
             if self.stream_output and any("--stop-after-init" in argument for argument in command):
@@ -84,6 +112,12 @@ class FakeRunner:
             if command[-1].startswith("odoo-"):
                 return 0, "odoo container startup log"
             return 0, "database system is starting up"
+        if len(command) >= 5 and command[1] == "exec" and ODOO_STATE_MARKER in command[-1]:
+            if self.odoo_states:
+                state = self.odoo_states.pop(0)
+            else:
+                state = "running" if self.odoo_server_running else "exited:1"
+            return (124, "") if state == "unknown" else (0, ODOO_STATE_MARKER + state)
         if len(command) >= 5 and command[1:3] == ["exec", "odoo-DEMO"] and command[3:5] == ["sh", "-lc"]:
             if "/proc/1/cmdline" in command[-1]:
                 init_command = self.odoo_init_commands.pop(0) if self.odoo_init_commands else "/bin/bash"
@@ -105,6 +139,14 @@ class FakeRunner:
             return (0, "") if ready else (1, "")
         if len(command) >= 3 and command[1:3] == ["port", "odoo-DEMO"]:
             return 1, ""
+        if command[1:5] == ["ps", "-a", "--no-trunc", "--format"]:
+            return 0, "\n".join(self.traefik_containers)
+        if command[1:5] == ["ps", "--no-trunc", "--format", "{{.Labels}}"]:
+            return 0, "\n".join(line.split("\t", 7)[-1] for line in self.traefik_containers if "\trunning\t" in line)
+        if command[1:3] == ["ps", "--filter"]:
+            return 0, self.published_port_owners.get(command[3].split("=", 1)[-1], "")
+        if len(command) >= 5 and command[1:3] == ["inspect", "-f"] and "json .Args" in command[3]:
+            return 0, self.traefik_arguments.get(command[4], '["--entrypoints.web.address=:80"]\t[]')
         return 0, ""
 
 
@@ -118,6 +160,7 @@ class ProjectServiceTests(unittest.TestCase):
         self.settings = ManagerSettings.from_dict({}, str(self.root))
         self.runner = FakeRunner()
         self.service = ProjectService(self.settings, self.root, runner=self.runner)
+        reset_traefik_entrypoint_cache()
 
     def tearDown(self):
         self.temporary.cleanup()
@@ -216,6 +259,7 @@ class ProjectServiceTests(unittest.TestCase):
         self.assertEqual((0, "timeout"), ProjectService.http_probe_result("http://dev.demo.localhost/web/login"))
 
     def test_traefik_failures_name_the_real_cause(self):
+        self.runner.traefik_containers = [traefik_container()]
         cases = (
             ((0, "refused"), ["port 80", "Odoo, lui, fonctionne"]),
             ((404, ""), ["ne connaît pas la route", "réseau traefik-local"]),
@@ -313,7 +357,7 @@ class ProjectServiceTests(unittest.TestCase):
             else original_capture(command, cwd, timeout)
         )
 
-        with self.assertRaisesRegex(RuntimeError, "arrêté pendant son chargement"):
+        with self.assertRaisesRegex(RuntimeError, r"arrêté \(code 1\) pendant son chargement\. .*missing_dependency"):
             self.service.wait_odoo_http("odoo-DEMO", log=lambda _line: None, sleep=lambda _seconds: None)
 
     def test_wait_odoo_port_allows_slow_running_process(self):
@@ -365,7 +409,7 @@ class ProjectServiceTests(unittest.TestCase):
         process_probe_index = next(
             index
             for index, (command, _cwd, _timeout) in enumerate(self.runner.captures)
-            if "grep -E '([/][o]doo-bin" in command[-1]
+            if ODOO_STATE_MARKER in command[-1]
         )
         self.assertLess(init_probe_index, process_probe_index)
 
@@ -386,6 +430,149 @@ class ProjectServiceTests(unittest.TestCase):
         self.assertIn("odoo container startup log", logs)
         self.assertIn("1", logs)
         self.assertIn("ModuleNotFoundError: No module named 'missing_dependency'", logs)
+
+    def odoo_launches(self):
+        return [
+            command for command, _cwd in self.runner.streams
+            if command[1:3] == ["exec", "-e"] and "LOG_ATTACHMENTS=False" in command
+        ]
+
+    def test_server_wrongly_seen_as_running_is_launched_instead_of_reported_stopped(self):
+        # PROTEX_V17 : « Serveur Odoo déjà démarré », puis « arrêté avant d'ouvrir le port 8069 »
+        # alors qu'aucun serveur n'avait jamais été lancé.
+        self.runner.odoo_states = ["running", "exited:1", "running"]
+        self.runner.odoo_port_states = [False, False, False, False, True]
+        logs = []
+
+        self.service.start_odoo_server("DEMO", log=logs.append, sleep=lambda _seconds: None)
+
+        self.assertIn("Serveur Odoo déjà démarré dans odoo-DEMO", logs)
+        self.assertIn("Aucun serveur Odoo actif dans odoo-DEMO : lancement du serveur...", logs)
+        self.assertEqual(1, len(self.odoo_launches()))
+
+    def test_slow_docker_does_not_turn_a_starting_server_into_a_stopped_one(self):
+        self.runner.odoo_states = ["exited:0", "unknown", "unknown", "unknown", "running"]
+        self.runner.odoo_port_states = [False, False, False, False, False, True]
+
+        self.service.start_odoo_server("DEMO", log=lambda _line: None, sleep=lambda _seconds: None)
+
+        self.assertEqual(1, len(self.odoo_launches()))
+
+    def test_unknown_state_is_retried_before_launching_a_server(self):
+        self.runner.odoo_states = ["unknown", "unknown", "running"]
+
+        self.service.start_odoo_server("DEMO", log=lambda _line: None, sleep=lambda _seconds: None)
+
+        self.assertEqual([], self.odoo_launches())
+
+    def test_launched_server_without_exit_code_gets_a_grace_period(self):
+        self.runner.odoo_port_ready = False
+        self.runner.odoo_states = ["absent"] * 20
+        port_checks = []
+        original_capture = self.runner.capture
+
+        def capture(command, cwd=None, timeout=10):
+            if command[3:5] == ["python3", "-c"]:
+                port_checks.append(command)
+            return original_capture(command, cwd, timeout)
+
+        self.runner.capture = capture
+
+        with self.assertRaisesRegex(RuntimeError, "s'est arrêté avant d'ouvrir le port 8069"):
+            self.service.wait_odoo_port("odoo-DEMO", log=lambda _line: None, sleep=lambda _seconds: None)
+
+        # Vérification à 4 s, puis 10 s de grâce par pas de 2 s.
+        self.assertEqual(8, len(port_checks))
+
+    def test_stopped_server_reports_the_error_of_the_current_run_only(self):
+        self.runner.odoo_port_ready = False
+        self.runner.odoo_states = ["exited:255"]
+        odoo_log = "\n".join((
+            "2026-09-15 19:41:21,556 379 ERROR PROTEX odoo.http: Exception during request handling.",
+            "FileNotFoundError: [Errno 2] No such file or directory: '/home/odoo/srv/data/filestore/old'",
+            "2026-09-17 14:17:31,000 90 INFO ? odoo: Odoo version 17.0",
+            "2026-09-17 14:17:33,000 90 CRITICAL PROTEX odoo.service.server: Failed to initialize database `PROTEX`.",
+            "psycopg2.OperationalError: connection to server at \"postgresql-DEMO\" failed",
+        ))
+        original_capture = self.runner.capture
+        self.runner.capture = lambda command, cwd=None, timeout=10: (
+            (0, odoo_log) if "tail -n 120" in command[-1] else original_capture(command, cwd, timeout)
+        )
+
+        with self.assertRaises(RuntimeError) as raised:
+            self.service.wait_odoo_port("odoo-DEMO", log=lambda _line: None, sleep=lambda _seconds: None)
+
+        message = str(raised.exception)
+        self.assertIn("(code 255)", message)
+        self.assertIn("psycopg2.OperationalError", message)
+        self.assertNotIn("FileNotFoundError", message)
+
+    def test_module_command_stops_server_even_when_docker_is_slow_to_answer(self):
+        self.runner.odoo_states = ["unknown", "exited:0"]
+
+        self.service.stop_odoo_server("DEMO", log=lambda _line: None, sleep=lambda _seconds: None)
+
+        self.assertTrue(any("pkill" in command[-1] for command, _cwd in self.runner.streams))
+
+    def test_view_parse_error_reason_includes_odoo_explanation(self):
+        lines = [
+            "2026-09-17 14:10:52,608 402 ERROR sudokeys_17092016 odoo.registry: Failed to load registry",
+            "Traceback (most recent call last):",
+            '  File "/home/odoo/srv/server/odoo/odoo/tools/convert.py", line 700, in _tag_root',
+            "odoo.tools.convert.ParseError: while parsing /home/odoo/srv/server/addons/demo/views/res_config_settings_views.xml:3",
+            "Erreur lors de la validation de la vue :",
+            '<form string="Settings" class="oe_form_configuration" js_class="base_settings">',
+            "Le champ `payslip_generate_and_send_trigger` n'existe pas",
+            "View error context:",
+            "{'name': 'res.config.settings.view.form.tracking'}",
+        ]
+
+        reason = ProjectService.odoo_command_failure_reason(lines)
+
+        self.assertTrue(reason.endswith("res_config_settings_views.xml:3 — Le champ `payslip_generate_and_send_trigger` n'existe pas"))
+
+    def test_cancelled_start_stops_only_containers_that_were_stopped_before(self):
+        from odoo_manager_core import jobs
+
+        for statuses, expected_stop in (({"odoo-DEMO": "exited", "postgresql-DEMO": "running"}, True),
+                                        ({"odoo-DEMO": "running", "postgresql-DEMO": "running"}, False)):
+            with self.subTest(statuses=statuses):
+                self.runner.streams.clear()
+                self.runner.statuses = dict(statuses)
+                control = jobs.JobControl()
+                with jobs.bind_control(control):
+                    self.service.register_start_revert("DEMO", self.project_path, log=lambda _line: None)
+                    control.run_reverts(lambda _line: None)
+                commands = [command for command, _cwd in self.runner.streams]
+                self.assertEqual(expected_stop, has_command_tail(commands, ["compose", "stop"]))
+
+    def test_cancelled_module_operation_resets_only_the_pending_states_it_created(self):
+        from odoo_manager_core import jobs
+
+        self.runner.statuses = {"odoo-DEMO": "running", "postgresql-DEMO": "running"}
+        self.runner.database_query_outputs = {
+            "select name from ir_module_module where state in": "old_pending",
+            "update ir_module_module": "sale -> installed",
+        }
+        queries = []
+        original_capture = self.runner.capture
+
+        def capture(command, cwd=None, timeout=10):
+            if "psql" in command and "-Atc" in command:
+                queries.append(command[command.index("-Atc") + 1])
+            return original_capture(command, cwd, timeout)
+
+        self.runner.capture = capture
+        logs = []
+        control = jobs.JobControl()
+        with jobs.bind_control(control):
+            self.service.register_module_operations_revert("DEMO", "demo", log=logs.append)
+            control.run_reverts(logs.append)
+
+        reset = next(query for query in queries if query.startswith("update ir_module_module"))
+        self.assertIn("name not in ('old_pending')", reset)
+        self.assertIn("when state = 'to install' then 'uninstalled' else 'installed'", reset)
+        self.assertIn("Modules remis dans leur état précédent : sale -> installed", logs)
 
     def test_odoo_launch_records_early_output_and_exit_status(self):
         self.runner.odoo_server_running = False
@@ -452,6 +639,134 @@ class ProjectServiceTests(unittest.TestCase):
                 (traefik / "docker-compose.yml").unlink()
                 traefik.rmdir()
                 traefik.parent.rmdir()
+
+    def test_traefik_custom_host_port_is_kept_and_used_for_project_urls(self):
+        service, traefik = self.make_traefik_service('services:\n  traefik:\n    container_name: traefik\n    ports:\n      - "8080:80"\n')
+        (self.project_path / "compose.yml").write_text("labels:\n  - rule=Host(`dev.DEMO.localhost`)\n", encoding="utf-8")
+        managed = str(traefik)
+        self.runner.traefik_containers = [traefik_container(state="exited", ports="", working_dir=managed)]
+        self.runner.traefik_containers_after_up = [traefik_container(ports="127.0.0.1:8080->80/tcp", working_dir=managed)]
+        logs = []
+
+        self.assertEqual("http://dev.DEMO.localhost:8080/", service.project_url("DEMO"))
+        with patch.object(service, "compose_version", return_value=(2, 29, 1)):
+            service.start_traefik(log=logs.append)
+
+        override = self.root / ".odoo_manager_runtime" / "traefik-loopback.compose.yml"
+        self.assertIn('ports: !override\n      - "127.0.0.1:8080:80"', override.read_text(encoding="utf-8"))
+        self.assertNotIn("127.0.0.1:80:80", override.read_text(encoding="utf-8"))
+        self.assertTrue(any("port HTTP 8080 (port personnalisé)" in line for line in logs))
+        self.assertEqual("http://dev.DEMO.localhost:8080/", service.project_url("DEMO"))
+
+    def test_existing_compatible_traefik_is_reused_instead_of_starting_a_second_one(self):
+        service, _traefik = self.make_traefik_service("services:\n  traefik:\n    container_name: traefik\n    ports:\n      - 80:80\n")
+        self.runner.traefik_containers = [
+            traefik_container(name="proxy", ports="0.0.0.0:8000->80/tcp, :::8000->80/tcp", working_dir="/home/demo/proxy"),
+        ]
+        logs = []
+
+        service.start_traefik(log=logs.append)
+
+        self.assertFalse(any("up" in command for command, _cwd in self.runner.streams))
+        self.assertTrue(any("Instance Traefik existante détectée : proxy" in line for line in logs))
+        self.assertEqual("http://dev.DEMO.localhost:8000/", service.project_url("DEMO"))
+
+    def test_incompatible_traefik_holding_the_port_stops_startup_immediately(self):
+        service, _traefik = self.make_traefik_service("services:\n  traefik:\n    container_name: traefik\n    ports:\n      - 80:80\n")
+        self.runner.traefik_containers = [
+            traefik_container(name="edge", ports="0.0.0.0:80->80/tcp", networks="proxy", labels=""),
+        ]
+        self.runner.traefik_arguments = {"id-edge": '["--entrypoints.http.address=:80"]\t[]'}
+        logs = []
+
+        with self.assertRaises(RuntimeError) as raised:
+            service.start_traefik(log=logs.append)
+
+        message = str(raised.exception)
+        self.assertIn("Le port 80 de cette machine est déjà utilisé par le conteneur Traefik edge", message)
+        self.assertIn('"8080:80"', message)
+        self.assertTrue(any("aucun entrypoint « web »" in line for line in logs))
+        self.assertFalse(any("up" in command for command, _cwd in self.runner.streams))
+
+    def test_port_used_outside_docker_names_its_owner_without_running_compose(self):
+        traefik = self.root / "docker-local-tools" / "traefik"
+        traefik.mkdir(parents=True)
+        (traefik / "docker-compose.yml").write_text("services:\n  traefik:\n    ports:\n      - 80:80\n", encoding="utf-8")
+        service = ProjectService(self.settings, self.root, traefik_dir=traefik, runner=self.runner, port_in_use=lambda port: port == 80)
+        self.runner.published_port_owners = {"80": "nginx-legacy"}
+
+        with self.assertRaises(RuntimeError) as raised:
+            service.start_traefik(log=lambda _line: None)
+
+        self.assertIn("déjà utilisé par le conteneur Docker nginx-legacy", str(raised.exception))
+        self.assertFalse(self.runner.streams)
+
+    def test_foreign_stopped_container_with_traefik_name_is_reported_before_compose(self):
+        service, traefik = self.make_traefik_service("services:\n  traefik:\n    container_name: traefik\n    ports:\n      - 80:80\n")
+        self.runner.traefik_containers = [traefik_container(state="exited", ports="", working_dir="/old/docker-local-tools/traefik")]
+
+        with self.assertRaises(RuntimeError) as raised:
+            service.start_traefik(log=lambda _line: None)
+
+        self.assertIn("Un conteneur « traefik » existe déjà", str(raised.exception))
+        self.assertIn("docker rm -f traefik", str(raised.exception))
+        self.assertFalse(self.runner.streams)
+
+    def test_project_check_follows_traefik_to_its_real_port(self):
+        self.runner.traefik_containers = [traefik_container(ports="127.0.0.1:8081->80/tcp")]
+        urls = []
+
+        def probe(url):
+            urls.append(url)
+            return (303, "") if ":8081/" in url else (0, "refused")
+
+        service = ProjectService(self.settings, self.root, runner=self.runner, http_probe=probe)
+        service.use_traefik_instance(None)
+
+        service.wait_project_http("DEMO", log=lambda _line: None, sleep=lambda _seconds: None)
+
+        self.assertEqual("http://dev.DEMO.localhost:8081/web/login", urls[-1])
+        self.assertLess(len(urls), 10)
+
+    def test_project_check_stops_when_nothing_can_serve_the_route(self):
+        cases = (
+            ((0, "refused"), [], "Rien n'écoute sur le port 80", 4),
+            ((404, ""), [], "aucun conteneur Traefik n'est démarré", 20),
+            ((404, ""), [traefik_container(networks="proxy")], "absent du réseau traefik-local", 20),
+            ((404, ""), [traefik_container(labels="")], "odoo-forward@docker", 20),
+        )
+        for probe_result, containers, expected, stop_after in cases:
+            with self.subTest(expected=expected):
+                self.runner.traefik_containers = containers
+                probes = []
+                service = ProjectService(
+                    self.settings, self.root, runner=self.runner,
+                    http_probe=lambda url, result=probe_result: probes.append(url) or result,
+                )
+
+                with self.assertRaises(RuntimeError) as raised:
+                    service.wait_project_http("DEMO", log=lambda _line: None, sleep=lambda _seconds: None)
+
+                self.assertIn(expected, str(raised.exception))
+                # Une probe toutes les 2 s jusqu'au diagnostic, plus la sonde de l'API Traefik éventuelle.
+                self.assertLessEqual(len(probes), stop_after // 2 + 2)
+
+    def test_running_traefik_with_lost_port_forwarding_keeps_waiting_after_restart(self):
+        self.runner.statuses = {"traefik": "running"}
+        self.runner.traefik_containers = [traefik_container()]
+        probes = []
+        service = ProjectService(
+            self.settings, self.root, runner=self.runner,
+            http_probe=lambda url: probes.append(url) or (0, "reset"),
+        )
+
+        with self.assertRaises(RuntimeError) as raised:
+            service.wait_project_http("DEMO", max_wait=30, log=lambda _line: None, sleep=lambda _seconds: None)
+
+        self.assertIn("Rien n'écoute sur le port 80", str(raised.exception))
+        self.assertEqual(1, sum(command[-2:] == ["restart", "traefik"] for command, _cwd in self.runner.streams))
+        # 16 vérifications de la route sur 30 s, plus 1 sonde initiale et 15 sondes après le redémarrage.
+        self.assertEqual(32, len(probes))
 
     def test_module_update_runs_explicit_odoo_command_and_restarts_server(self):
         self.runner.statuses = {

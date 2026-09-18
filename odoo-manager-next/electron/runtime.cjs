@@ -83,7 +83,11 @@ class Backend {
 
   log(message) { fs.appendFileSync(this.logPath, message + '\n'); }
 
-  async start() {
+  // Réserve le port et ouvre le journal, sans lancer le backend. La politique de sécurité de la
+  // fenêtre et le pont `backend-endpoint` n'ont besoin que de l'adresse : la fenêtre peut donc
+  // s'afficher pendant que le backend démarre, au lieu de l'attendre.
+  async reserve() {
+    if (this.endpoint) return this.endpoint;
     fs.mkdirSync(this.logDir, { recursive: true });
     if (fs.existsSync(this.logPath) && fs.statSync(this.logPath).size > 2_000_000) {
       fs.rmSync(path.join(this.logDir, 'backend.previous.log'), { force: true });
@@ -92,6 +96,11 @@ class Backend {
     this.port = await selectPort(this.preferredPort || configuredPort(this.env));
     this.endpoint = `http://127.0.0.1:${this.port}`;
     this.log(`\n=== SDK Local Manager Electron · ${new Date().toISOString()} · ${this.endpoint} ===`);
+    return this.endpoint;
+  }
+
+  async start() {
+    await this.reserve();
     const fd = fs.openSync(this.logPath, 'a');
     try {
       const target = this.command ? this.command(this.port, this.instance) : { executable: this.executable, args: this.args };
@@ -102,7 +111,10 @@ class Backend {
       });
       this.child.on('error', error => { this.error = error; this.log(error.message); });
     } finally { fs.closeSync(fd); }
-    for (let attempt = 0; attempt < 120; attempt++) {
+    // Le backend répond en ~0,1 s : un pas fixe de 250 ms doublait ce délai. Le pas s'allonge
+    // ensuite pour ne pas marteler un backend lent, à budget total inchangé.
+    const deadline = Date.now() + 30_000;
+    for (let step = 25; Date.now() < deadline; step = Math.min(step * 2, 250)) {
       if (this.error) throw this.error;
       if (this.child.exitCode !== null) throw new Error(`Le backend s’est arrêté (code ${this.child.exitCode}).`);
       try {
@@ -114,7 +126,7 @@ class Backend {
           return;
         }
       } catch { /* Backend initialization may take several seconds. */ }
-      await sleep(250);
+      await sleep(step);
     }
     throw new Error('Le backend ne répond pas après le démarrage. Consultez le journal.');
   }
