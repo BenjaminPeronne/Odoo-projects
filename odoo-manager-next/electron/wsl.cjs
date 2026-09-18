@@ -21,6 +21,8 @@ const BUILD_ID_FILE = '.build-id';
 const PROVISION_PATH = SDK_DIRECTORY + '/provision.sh';
 const RELEASE_PATH = '/etc/sdk-manager-release';
 const LINUX_WORKSPACE = '/home/sdk/Odoo-projects';
+// Clés recherchées dans %USERPROFILE%\.ssh, dans l'ordre de préférence de ssh-keygen.
+const SSH_KEY_NAMES = ['id_ed25519', 'id_ecdsa', 'id_rsa'];
 // wsl.exe écrit ses listes en UTF-16LE, y compris dans un tube.
 const WSL_ENCODING = 'utf16le';
 
@@ -244,6 +246,32 @@ class WslEnvironment {
 
   backendCommand(port, instance, legacyWorkspace = '') {
     return backendCommand({ distribution: this.distribution, port, instance, legacyWorkspace });
+  }
+
+  /**
+   * Copie la clé SSH GitLab de Windows dans l'environnement, sur demande de l'utilisateur.
+   *
+   * La clé reste sur le poste. Une clé déjà présente dans l'environnement n'est jamais
+   * écrasée ; la clé privée y est lisible par le seul utilisateur `sdk` (0600).
+   */
+  async importSshKey(windowsSshDirectory) {
+    const name = SSH_KEY_NAMES.find(candidate => (
+      fs.existsSync(path.join(windowsSshDirectory, candidate))
+      && fs.existsSync(path.join(windowsSshDirectory, candidate + '.pub'))));
+    if (!name) throw new Error(`Aucune paire de clés SSH dans ${windowsSshDirectory}.`);
+    const privateKey = this.mountPath(path.join(windowsSshDirectory, name));
+    const publicKey = this.mountPath(path.join(windowsSshDirectory, name + '.pub'));
+    if (!privateKey || !publicKey) throw new Error(`Clé SSH hors d'un disque Windows : ${windowsSshDirectory}.`);
+    const script = [
+      'set -eu',
+      'install -d -m 0700 -o sdk -g sdk /home/sdk/.ssh',
+      'if [ -e "/home/sdk/.ssh/$3" ]; then echo "Une clé $3 existe déjà dans l\'environnement." >&2; exit 3; fi',
+      'install -m 0600 -o sdk -g sdk "$1" "/home/sdk/.ssh/$3"',
+      'install -m 0644 -o sdk -g sdk "$2" "/home/sdk/.ssh/$3.pub"',
+    ].join('\n');
+    await this.runInDistribution(['sh', '-c', script, 'import-ssh-key', privateKey, publicKey, name], { asRoot: true });
+    this.log(`Clé SSH ${name} copiée dans l'environnement.`);
+    return { ok: true, key: name };
   }
 
   async openEditor(projectPath) {

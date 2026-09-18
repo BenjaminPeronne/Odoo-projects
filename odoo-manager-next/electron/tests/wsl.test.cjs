@@ -219,3 +219,37 @@ test('the legacy Windows workspace is handed to the backend for migration', () =
   const { args } = backendCommand({ port: 18765, legacyWorkspace: '/mnt/c/Users/a/Odoo-projects' });
   assert.ok(args.includes('ODOO_MANAGER_LEGACY_WORKSPACE=/mnt/c/Users/a/Odoo-projects'));
 });
+
+test('the Windows GitLab key is copied once, private to the environment user', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sdk-ssh-'));
+  try {
+    fs.writeFileSync(path.join(directory, 'id_rsa'), 'rsa');
+    fs.writeFileSync(path.join(directory, 'id_rsa.pub'), 'rsa.pub');
+    fs.writeFileSync(path.join(directory, 'id_ed25519'), 'ed');
+    fs.writeFileSync(path.join(directory, 'id_ed25519.pub'), 'ed.pub');
+    const { calls, runner } = fakeEnvironment();
+    const environment = new WslEnvironment({ runner, installRoot: 'C:\data\wsl', mountPath: file => '/mnt/c/Users/a/.ssh/' + path.basename(file) });
+
+    const result = await environment.importSshKey(directory);
+
+    assert.equal(result.key, 'id_ed25519', 'la clé préférée de ssh-keygen passe en premier');
+    const command = calls.find(call => call.includes('import-ssh-key'));
+    assert.ok(command.includes('-u root'));
+    assert.ok(command.includes('install -m 0600 -o sdk -g sdk "$1" "/home/sdk/.ssh/$3"'));
+    assert.ok(command.includes('exit 3'), 'une clé existante ne doit jamais être écrasée');
+    assert.ok(command.endsWith('/mnt/c/Users/a/.ssh/id_ed25519 /mnt/c/Users/a/.ssh/id_ed25519.pub id_ed25519'));
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a half key pair is not imported', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sdk-ssh-'));
+  try {
+    fs.writeFileSync(path.join(directory, 'id_ed25519.pub'), 'ed.pub');
+    const environment = new WslEnvironment({ runner: fakeEnvironment().runner, installRoot: 'C:\data\wsl', mountPath: file => file });
+    await assert.rejects(() => environment.importSshKey(directory), /Aucune paire de clés/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

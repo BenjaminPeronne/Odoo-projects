@@ -115,6 +115,7 @@ function installHandlers() {
   handle('wsl-legacy-workspace', () => windowsWorkspaceSeenFromWsl());
   handle('relaunch', () => { app.relaunch(); app.quit(); });
   handle('stop-legacy-traefik', stopLegacyTraefik);
+  handle('wsl-import-ssh-key', () => wsl.importSshKey(path.join(app.getPath('home'), '.ssh')));
   handle('wsl-open-editor', project => wsl.openEditor(`${LINUX_WORKSPACE}/${projectName(project)}`));
   handle('wsl-open-explorer', project => shell.openPath(wsl.explorerPath(`${LINUX_WORKSPACE}/${projectName(project)}`)));
   handle('pick-directory', async defaultPath => {

@@ -24,6 +24,7 @@ export interface DesktopBridge {
   wslLegacyWorkspace?(): Promise<string>;
   relaunch?(): Promise<void>;
   stopLegacyTraefik?(): Promise<{ ok: boolean; message: string }>;
+  wslImportSshKey?(): Promise<{ ok: boolean; key: string }>;
   wslOpenEditor?(project: string): Promise<void>;
   wslOpenExplorer?(project: string): Promise<void>;
 }

@@ -2167,6 +2167,17 @@ export default function Home() {
     }
   }
 
+  // La clé GitLab déjà déclarée reste côté Windows : sans elle, l'environnement Linux ne clone rien.
+  async function requestSshKeyImport() {
+    try {
+      const result = await desktopBridge()?.wslImportSshKey?.();
+      pushToast("success", `Clé ${result?.key || "SSH"} copiée dans l’environnement Linux.`);
+      await loadCreationPrerequisites();
+    } catch (err) {
+      pushToast("error", err instanceof Error ? err.message : "Impossible de copier la clé SSH.");
+    }
+  }
+
   // Sous WSL, le Traefik de Docker Desktop occupe le port 80 du réseau partagé de la VM.
   async function requestLegacyTraefikStop() {
     setLoading(true);
@@ -5307,10 +5318,23 @@ export default function Home() {
               }
               action={
                 creationPrerequisites?.ssh_keygen_available || creationPrerequisites?.ssh_key_present ? (
-                  <Button size="sm" variant="outline" onClick={() => openSshAssistant()}>
-                    <KeyRound className="h-4 w-4" />
-                    {creationPrerequisites.ssh_key_present ? "Voir la clé" : "Générer"}
-                  </Button>
+                  <div className="flex flex-wrap gap-2">
+                    {!creationPrerequisites.ssh_key_present && desktopBridge()?.wslImportSshKey && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        title="Copie la clé GitLab déjà déclarée de %USERPROFILE%\.ssh dans l’environnement Linux. Elle ne quitte pas ce poste."
+                        onClick={requestSshKeyImport}
+                      >
+                        <KeyRound className="h-4 w-4" />
+                        Utiliser ma clé Windows
+                      </Button>
+                    )}
+                    <Button size="sm" variant="outline" onClick={() => openSshAssistant()}>
+                      <KeyRound className="h-4 w-4" />
+                      {creationPrerequisites.ssh_key_present ? "Voir la clé" : "Générer"}
+                    </Button>
+                  </div>
                 ) : undefined
               }
             />
