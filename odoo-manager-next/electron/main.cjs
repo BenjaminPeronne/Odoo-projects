@@ -97,10 +97,13 @@ async function start() {
     executable: path.join(binaryRoot, 'odoo-manager-backend' + (process.platform === 'win32' ? '.exe' : '')),
     logDir: process.env.ODOO_MANAGER_LOG_DIR || app.getPath('logs'),
   });
-  try { await backend.start(); } catch (error) {
+  // L'adresse suffit pour bâtir la fenêtre ; le backend démarre en parallèle. L'interface a son
+  // écran de chargement et réessaie seule, donc rien n'attend ici la disponibilité du backend.
+  await backend.reserve();
+  const ready = backend.start().catch(error => {
     backend.log(error.stack || error.message);
     // Keep the existing frontend's diagnostics and recovery screen available.
-  }
+  });
   const csp = contentPolicy(fs.readFileSync(path.join(out, 'index.html'), 'utf8'), backend.endpoint);
   protocol.handle('app', async request => {
     try {
@@ -139,6 +142,7 @@ async function start() {
   window.webContents.on('render-process-gone', (_event, details) => backend.log(JSON.stringify(details)));
   window.once('ready-to-show', () => { if (!smokePath) window.show(); });
   await window.loadURL(APP_ORIGIN + '/');
+  await ready;
   if (smokePath) await smokeCheck();
 }
 
