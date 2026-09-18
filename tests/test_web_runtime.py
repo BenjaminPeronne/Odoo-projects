@@ -511,6 +511,23 @@ class EventWatchCostTests(unittest.TestCase):
         self.assertEqual(["demo", "other"], web.overview_databases("DEMO", max_age=30))
         self.assertEqual(["demo", "other"], web.overview_databases("DEMO"), "sans max_age, lecture directe")
 
+    @patch("odoo_manager_web.list_databases_for")
+    def test_overview_probes_running_projects_in_parallel_and_skips_cached_ones(self, list_databases):
+        # Chaque sonde attend que toutes les autres aient démarré : en série, la barrière expirerait.
+        barrier = threading.Barrier(3, timeout=5)
+
+        def probe(project, check_container=True):
+            barrier.wait()
+            return [project.lower()]
+
+        list_databases.side_effect = probe
+        web.OVERVIEW_DATABASES_CACHE["CACHED"] = (time.monotonic(), ["cached"])
+
+        result = web.overview_databases_by_project(["A", "B", "CACHED", "C"], max_age=30)
+
+        self.assertEqual({"A": ["a"], "B": ["b"], "CACHED": ["cached"], "C": ["c"]}, result)
+        self.assertEqual({"A", "B", "C"}, {call.args[0] for call in list_databases.call_args_list})
+
     @patch("odoo_manager_web.wsl_executable_available", return_value=True)
     def test_wsl_shell_detection_is_not_relaunched_for_every_module_listing(self, detect):
         web.WSL_SHELL_AVAILABILITY.clear()

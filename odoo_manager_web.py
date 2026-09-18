@@ -21,6 +21,7 @@ import urllib.parse
 import urllib.request
 import urllib.error
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -222,6 +223,8 @@ EVENT_WATCH_INTERVAL_SECONDS = 2
 EVENT_DATABASES_MAX_AGE_SECONDS = 30
 OVERVIEW_DATABASES_CACHE = {}
 OVERVIEW_DATABASES_CACHE_LOCK = threading.Lock()
+# Sondes `docker exec` simultanées de l'overview ; au-delà elles attendent leur tour.
+DOCKER_PROBE_WORKERS = 8
 EVENT_DOCKER_REFRESH = threading.Event()
 _EVENT_WATCH_THREAD_STARTED = False
 _EVENT_WATCH_THREAD_LOCK = threading.Lock()
@@ -2236,20 +2239,53 @@ def invalidate_overview_databases(project=None):
             OVERVIEW_DATABASES_CACHE.pop(project, None)
 
 
-def overview_databases(project, max_age=None):
+def cached_overview_databases(project, max_age):
+    """Liste des bases encore valide pour `max_age`, ou None s'il faut interroger PostgreSQL."""
     if max_age is None:
-        return list_databases_for(project, check_container=False)
-    now = time.monotonic()
+        return None
     with OVERVIEW_DATABASES_CACHE_LOCK:
         cached = OVERVIEW_DATABASES_CACHE.get(project)
-    if cached and now - cached[0] < max_age:
+    if cached and time.monotonic() - cached[0] < max_age:
         return list(cached[1])
+    return None
+
+
+def probe_overview_databases(project, max_age=None):
+    now = time.monotonic()
     databases = list_databases_for(project, check_container=False)
     # Une liste vide peut venir d'un PostgreSQL encore en démarrage : on ne la garde pas.
-    if databases:
+    if databases and max_age is not None:
         with OVERVIEW_DATABASES_CACHE_LOCK:
             OVERVIEW_DATABASES_CACHE[project] = (now, list(databases))
     return databases
+
+
+def overview_databases(project, max_age=None):
+    cached = cached_overview_databases(project, max_age)
+    return cached if cached is not None else probe_overview_databases(project, max_age)
+
+
+def overview_databases_by_project(projects, max_age=None):
+    """Bases de chaque projet démarré ; les sondes que le cache ne sert pas partent en parallèle.
+
+    Chaque sonde est un `docker exec psql` (~50 ms sous Docker Desktop). En série, l'overview
+    grandissait avec le nombre de projets démarrés : 233 ms pour 5 contre 92 ms en parallèle.
+    """
+    results = {}
+    pending = []
+    for project in projects:
+        cached = cached_overview_databases(project, max_age)
+        if cached is None:
+            pending.append(project)
+        else:
+            results[project] = cached
+    if len(pending) == 1:
+        results[pending[0]] = probe_overview_databases(pending[0], max_age)
+    elif pending:
+        workers = min(DOCKER_PROBE_WORKERS, len(pending))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="overview-databases") as executor:
+            results.update(zip(pending, executor.map(lambda project: probe_overview_databases(project, max_age), pending)))
+    return results
 
 
 def docker_poll_seconds():
@@ -2267,12 +2303,14 @@ def overview(docker=None, databases_max_age=None):
     container_names = [name for project in project_names for name in (f"odoo-{project}", f"postgresql-{project}")]
     statuses = container_statuses(container_names) if docker_ok else {}
     traefik_port = detected_traefik(docker_ok)["http_port"] if project_names else None
+    running_postgres = [project for project in project_names if statuses.get(f"postgresql-{project}") == "running"]
+    databases_by_project = overview_databases_by_project(running_postgres, databases_max_age)
     projects = []
     for project in project_names:
         odoo_status = statuses.get(f"odoo-{project}", "absent") if docker_ok else "docker off"
         pg_status = statuses.get(f"postgresql-{project}", "absent") if docker_ok else "docker off"
         if pg_status == "running":
-            databases = overview_databases(project, databases_max_age)
+            databases = databases_by_project[project]
         else:
             databases = []
             invalidate_overview_databases(project)
