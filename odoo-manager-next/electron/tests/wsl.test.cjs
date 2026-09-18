@@ -253,3 +253,38 @@ test('a half key pair is not imported', async () => {
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('importing the same key twice confirms it instead of failing', async () => {
+  // Cas rencontré en recette : l'assistant proposait encore le bouton, la clé était déjà copiée.
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sdk-ssh-'));
+  try {
+    fs.writeFileSync(path.join(directory, 'id_ed25519'), 'ed');
+    fs.writeFileSync(path.join(directory, 'id_ed25519.pub'), 'ed.pub');
+    const runner = async (_executable, args) => ({
+      stdout: Buffer.from(args.includes('import-ssh-key') ? 'already\n' : ''), stderr: Buffer.alloc(0), code: 0,
+    });
+    const environment = new WslEnvironment({ runner, installRoot: 'C:\data\wsl', mountPath: file => '/mnt/c/k/' + path.basename(file) });
+
+    const result = await environment.importSshKey(directory);
+
+    assert.deepEqual(result, { ok: true, key: 'id_ed25519', alreadyPresent: true });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a different key already in the environment is never replaced', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sdk-ssh-'));
+  try {
+    fs.writeFileSync(path.join(directory, 'id_ed25519'), 'ed');
+    fs.writeFileSync(path.join(directory, 'id_ed25519.pub'), 'ed.pub');
+    const { calls, runner } = fakeEnvironment();
+    const environment = new WslEnvironment({ runner, installRoot: 'C:\data\wsl', mountPath: file => '/mnt/c/k/' + path.basename(file) });
+    await environment.importSshKey(directory);
+    const script = calls.find(call => call.includes('import-ssh-key'));
+    assert.ok(script.includes('cmp -s "$1" "/home/sdk/.ssh/$3"'));
+    assert.ok(script.includes("n'est pas remplacée") && script.includes('exit 3'));
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

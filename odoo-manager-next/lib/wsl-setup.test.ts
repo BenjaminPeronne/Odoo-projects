@@ -52,3 +52,8 @@ test("failures are explained in terms the user can act on", () => {
   assert.match(wslSetupError(new Error("Erreur 0x80370102")), /virtualisation/i);
   assert.equal(wslSetupError(new Error("Échec inattendu")), "Échec inattendu");
 });
+
+test("Electron's technical wrapper is removed from native errors", () => {
+  const wrapped = new Error("Error invoking remote method 'sdk:wsl-prepare': Error: Échec inattendu");
+  assert.equal(wslSetupError(wrapped), "Échec inattendu");
+});

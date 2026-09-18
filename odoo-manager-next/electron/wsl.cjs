@@ -265,13 +265,18 @@ class WslEnvironment {
     const script = [
       'set -eu',
       'install -d -m 0700 -o sdk -g sdk /home/sdk/.ssh',
-      'if [ -e "/home/sdk/.ssh/$3" ]; then echo "Une clé $3 existe déjà dans l\'environnement." >&2; exit 3; fi',
+      // La même clé déjà en place n'est pas une erreur : un second clic la confirme.
+      'if [ -e "/home/sdk/.ssh/$3" ]; then',
+      '  if cmp -s "$1" "/home/sdk/.ssh/$3"; then echo already; exit 0; fi',
+      '  echo "Une autre clé $3 existe déjà dans l\'environnement : elle n\'est pas remplacée." >&2; exit 3',
+      'fi',
       'install -m 0600 -o sdk -g sdk "$1" "/home/sdk/.ssh/$3"',
       'install -m 0644 -o sdk -g sdk "$2" "/home/sdk/.ssh/$3.pub"',
     ].join('\n');
-    await this.runInDistribution(['sh', '-c', script, 'import-ssh-key', privateKey, publicKey, name], { asRoot: true });
-    this.log(`Clé SSH ${name} copiée dans l'environnement.`);
-    return { ok: true, key: name };
+    const { stdout } = await this.runInDistribution(['sh', '-c', script, 'import-ssh-key', privateKey, publicKey, name], { asRoot: true });
+    const alreadyPresent = decodeWslOutput(stdout).trim() === 'already';
+    this.log(alreadyPresent ? `Clé SSH ${name} déjà présente dans l'environnement.` : `Clé SSH ${name} copiée dans l'environnement.`);
+    return { ok: true, key: name, alreadyPresent };
   }
 
   async openEditor(projectPath) {

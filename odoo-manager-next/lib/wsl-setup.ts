@@ -88,7 +88,7 @@ export function isWslSetupPending(status: WslStatus | null, applicationVersion: 
 
 /** Message lisible pour un échec de préparation, sans jargon. */
 export function wslSetupError(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error ?? "");
+  const message = (error instanceof Error ? error.message : String(error ?? "")).replace(/^Error invoking remote method '[^']+': (Error: )?/, "");
   if (/empreinte/i.test(message)) {
     return "L'image de l'environnement ne correspond pas à son empreinte. Retélécharge l'application.";
   }

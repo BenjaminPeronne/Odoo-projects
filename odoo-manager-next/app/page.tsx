@@ -58,7 +58,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { WslSetupDialog } from "@/components/wsl-setup";
-import { desktopBridge, type WslStatus } from "@/lib/desktop";
+import { desktopBridge, desktopErrorMessage, type WslStatus } from "@/lib/desktop";
 import { isWslSetupPending } from "@/lib/wsl-setup";
 import { cn } from "@/lib/utils";
 import { mergeIncrementalJobOutput, type JobOutputCache } from "@/lib/job-output";
@@ -2171,10 +2171,17 @@ export default function Home() {
   async function requestSshKeyImport() {
     try {
       const result = await desktopBridge()?.wslImportSshKey?.();
-      pushToast("success", `Clé ${result?.key || "SSH"} copiée dans l’environnement Linux.`);
-      await loadCreationPrerequisites();
+      pushToast(
+        "success",
+        result?.alreadyPresent
+          ? `La clé ${result.key} est déjà en place dans l’environnement Linux.`
+          : `Clé ${result?.key || "SSH"} copiée dans l’environnement Linux.`,
+      );
     } catch (err) {
-      pushToast("error", err instanceof Error ? err.message : "Impossible de copier la clé SSH.");
+      pushToast("error", desktopErrorMessage(err, "Impossible de copier la clé SSH."));
+    } finally {
+      // L'assistant a pu être ouvert avant un autre changement : son état est relu dans tous les cas.
+      await loadCreationPrerequisites();
     }
   }
 
@@ -2186,7 +2193,7 @@ export default function Home() {
       pushToast("success", result?.message || "Ancien Traefik arrêté.");
       schedule(refreshSystemStatus, 1500);
     } catch (err) {
-      pushToast("error", err instanceof Error ? err.message : "Impossible d’arrêter l’ancien Traefik.");
+      pushToast("error", desktopErrorMessage(err, "Impossible d’arrêter l’ancien Traefik."));
     } finally {
       setLoading(false);
     }
@@ -3020,7 +3027,7 @@ export default function Home() {
         .catch((err) => {
           if (!cancelled) {
             setGitlabProjects([]);
-            setGitlabError(err instanceof Error ? err.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, "") : "Recherche GitLab impossible.");
+            setGitlabError(desktopErrorMessage(err, "Recherche GitLab impossible."));
           }
         });
     }, 350);
@@ -3046,7 +3053,7 @@ export default function Home() {
         .catch((err) => {
           if (!cancelled) {
             setGitlabRefs({ branches: [], tags: [] });
-            setGitlabError(err instanceof Error ? err.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, "") : "Lecture des branches impossible.");
+            setGitlabError(desktopErrorMessage(err, "Lecture des branches impossible."));
           }
         });
     }, 300);
@@ -5824,7 +5831,7 @@ export default function Home() {
                                   setGitlabTokenDraft("");
                                   pushToast("success", "GitLab connecté : la recherche de dépôts est activée.");
                                 } catch (err) {
-                                  pushToast("error", err instanceof Error ? err.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, "") : "Connexion GitLab impossible.");
+                                  pushToast("error", desktopErrorMessage(err, "Connexion GitLab impossible."));
                                 } finally {
                                   setGitlabConnecting(false);
                                 }
