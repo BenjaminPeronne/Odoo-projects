@@ -29,8 +29,9 @@ sont conservés.
 - `electron/preload.cjs` : huit capacités natives explicites, sans accès brut à IPC.
 - `electron/runtime.cjs` : configuration, choix du port, backend et règles d’URL/CSP.
 - `lib/desktop.ts` : contrat TypeScript entre frontend et preload.
-- `scripts/build_electron_sidecar.py` : backend Python embarqué, onefile sur macOS/Linux,
-  onedir avec runtime adjacent sur Windows.
+- `scripts/build_electron_sidecar.py` : backend Python embarqué, onedir avec runtime adjacent
+  (`odoo-manager-backend-runtime/`) sur les trois systèmes. Le onefile réextrayait 17 Mo à
+  chaque lancement : 5 à 6 s avant la première fenêtre sous macOS.
 - `electron-builder.yml` : installateurs et ressources hors ASAR pour le backend.
 
 Le rendu utilise `app://sdk`, `contextIsolation`, le sandbox Chromium et
