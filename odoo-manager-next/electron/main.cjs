@@ -2,7 +2,7 @@ const { app, BrowserWindow, ipcMain, dialog, shell, Notification, protocol, net,
 const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
-const { spawn } = require('node:child_process');
+const { execFile, spawn } = require('node:child_process');
 const { APP_ORIGIN, Backend, configPath, externalUrl, staticPath, contentPolicy } = require('./runtime.cjs');
 const { CredentialStore } = require('./credentials.cjs');
 const { GitLabClient } = require('./gitlab.cjs');
@@ -43,6 +43,26 @@ function windowsWorkspaceSeenFromWsl() {
   try {
     return WslEnvironment.mountedWindowsPath(JSON.parse(fs.readFileSync(configPath(), 'utf8')).workspace);
   } catch { return ''; }
+}
+
+/**
+ * Arrête le Traefik de Docker Desktop, qui tient le port 80 dans le réseau partagé de WSL.
+ *
+ * Seul un conteneur `traefik` dont l'image est Traefik est arrêté, jamais supprimé : sa
+ * politique `unless-stopped` le laisse arrêté, et `docker start traefik` le relance.
+ */
+function stopLegacyTraefik() {
+  const docker = (args, timeout = 30000) => new Promise((resolve, reject) => {
+    execFile('docker', args, { windowsHide: true, timeout }, (error, stdout, stderr) => (
+      error ? reject(new Error((stderr || error.message).trim())) : resolve(stdout.trim())));
+  });
+  return docker(['inspect', '-f', '{{.Config.Image}}', 'traefik'], 10000)
+    .catch(() => { throw new Error('Aucun conteneur Traefik de Docker Desktop à arrêter.'); })
+    .then(image => {
+      if (!/(^|\/)traefik(:|@|$)/i.test(image)) throw new Error(`Le conteneur « traefik » n'est pas une image Traefik (${image}) : il n'est pas arrêté.`);
+      return docker(['stop', 'traefik']);
+    })
+    .then(() => ({ ok: true, message: 'Ancien Traefik de Docker Desktop arrêté.' }));
 }
 
 // Même règle que PROJECT_NAME_RE côté backend : l'interface ne peut pas fabriquer un chemin.
@@ -94,6 +114,7 @@ function installHandlers() {
   handle('wsl-prepare', () => prepareWslEnvironment());
   handle('wsl-legacy-workspace', () => windowsWorkspaceSeenFromWsl());
   handle('relaunch', () => { app.relaunch(); app.quit(); });
+  handle('stop-legacy-traefik', stopLegacyTraefik);
   handle('wsl-open-editor', project => wsl.openEditor(`${LINUX_WORKSPACE}/${projectName(project)}`));
   handle('wsl-open-explorer', project => shell.openPath(wsl.explorerPath(`${LINUX_WORKSPACE}/${projectName(project)}`)));
   handle('pick-directory', async defaultPath => {

@@ -670,6 +670,33 @@ def detected_traefik(docker_running=True):
     return value
 
 
+def running_in_wsl():
+    if os.path.exists("/proc/sys/fs/binfmt_misc/WSLInterop"):
+        return True
+    return hasattr(os, "uname") and "microsoft" in os.uname().release.lower()
+
+
+def local_port_listening(port, tables=("/proc/net/tcp", "/proc/net/tcp6")):
+    """Vrai si un processus écoute déjà sur ce port TCP, lu sans droits dans /proc.
+
+    Sous WSL, toutes les distributions partagent le réseau de la VM : le Traefik de Docker
+    Desktop y occupe le port 80 et empêche celui de l'environnement Linux de démarrer.
+    """
+    wanted = f":{port:04X}"
+    for table in tables:
+        try:
+            with open(table, encoding="ascii") as handle:
+                next(handle, None)
+                for line in handle:
+                    fields = line.split()
+                    # Colonne 4 : état, 0A = LISTEN.
+                    if len(fields) > 3 and fields[1].endswith(wanted) and fields[3] == "0A":
+                        return True
+        except OSError:
+            continue
+    return False
+
+
 def traefik_status(docker=None):
     docker = docker or docker_status(SETTINGS)
     has_compose, exists, valid = traefik_compose_probe()
@@ -690,6 +717,14 @@ def traefik_status(docker=None):
     elif problems:
         state = "conflict"
         message = f"Une instance Traefik existante ({instance.describe()}) ne peut pas servir les projets : {'; '.join(problems)}."
+    elif platform_id() == "linux" and local_port_listening(http_port):
+        state = "port_busy"
+        message = (
+            f"Le port {http_port} est déjà occupé, probablement par le Traefik de Docker Desktop : "
+            "arrête-le pour que les projets de l'environnement Linux soient accessibles."
+            if running_in_wsl()
+            else f"Le port {http_port} est déjà occupé par un autre service : libère-le pour démarrer Traefik."
+        )
     elif not exists:
         state = "missing"
         message = "Traefik n'est pas installé dans le dossier attendu."

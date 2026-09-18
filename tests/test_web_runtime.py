@@ -1,4 +1,5 @@
 import http.client
+import os
 import json
 import threading
 import time
@@ -628,6 +629,34 @@ class ContainerStatusEngineApiTests(unittest.TestCase):
 
         self.assertEqual({"odoo-DEMO": "running"}, web.container_statuses(("odoo-DEMO",)))
         self.assertEqual(1, run_capture.call_count)
+
+
+class PortBusyTests(unittest.TestCase):
+    """Sous WSL, le Traefik de Docker Desktop tient le port 80 dans le réseau partagé de la VM."""
+
+    def table(self, lines):
+        handle = tempfile.NamedTemporaryFile("w", delete=False, suffix=".tcp", encoding="ascii")
+        handle.write("  sl  local_address rem_address   st\n")
+        handle.write("".join(lines))
+        handle.close()
+        self.addCleanup(os.unlink, handle.name)
+        return handle.name
+
+    def test_a_listening_socket_on_port_80_is_detected(self):
+        # 0100007F:0050 = 127.0.0.1:80, état 0A = LISTEN (relevé réel sous WSL avec Docker Desktop).
+        table = self.table(["   0: 0100007F:0050 00000000:0000 0A 00000000:00000000 00:00000000 00000000\n"])
+        self.assertTrue(web.local_port_listening(80, tables=(table,)))
+
+    def test_an_established_connection_is_not_a_listener(self):
+        table = self.table(["   0: 0100007F:0050 0100007F:D431 01 00000000:00000000 00:00000000 00000000\n"])
+        self.assertFalse(web.local_port_listening(80, tables=(table,)))
+
+    def test_another_port_does_not_count(self):
+        table = self.table(["   0: 00000000:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000\n"])
+        self.assertFalse(web.local_port_listening(80, tables=(table,)))
+
+    def test_missing_tables_mean_no_conflict(self):
+        self.assertFalse(web.local_port_listening(80, tables=("/nonexistent/tcp",)))
 
 
 class MigrationSourceTests(unittest.TestCase):

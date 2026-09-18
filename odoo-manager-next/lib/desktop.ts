@@ -23,6 +23,7 @@ export interface DesktopBridge {
   wslPrepare?(): Promise<WslStatus>;
   wslLegacyWorkspace?(): Promise<string>;
   relaunch?(): Promise<void>;
+  stopLegacyTraefik?(): Promise<{ ok: boolean; message: string }>;
   wslOpenEditor?(project: string): Promise<void>;
   wslOpenExplorer?(project: string): Promise<void>;
 }

@@ -2167,6 +2167,20 @@ export default function Home() {
     }
   }
 
+  // Sous WSL, le Traefik de Docker Desktop occupe le port 80 du réseau partagé de la VM.
+  async function requestLegacyTraefikStop() {
+    setLoading(true);
+    try {
+      const result = await desktopBridge()?.stopLegacyTraefik?.();
+      pushToast("success", result?.message || "Ancien Traefik arrêté.");
+      schedule(refreshSystemStatus, 1500);
+    } catch (err) {
+      pushToast("error", err instanceof Error ? err.message : "Impossible d’arrêter l’ancien Traefik.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   // Une création interrompue laisse son dossier de préparation : 6,8 Go relevés sur un poste.
   async function requestStagingCleanup() {
     const job = await createJob("cleanup_staging");
@@ -3887,15 +3901,28 @@ export default function Home() {
                   </div>
                 </div>
                 <div className="flex shrink-0 flex-col gap-2 sm:flex-row">
-                  <Button
-                    className="w-full sm:w-auto"
-                    size="sm"
-                    disabled={!systemStatus.docker.running || loading}
-                    onClick={requestTraefikInstall}
-                  >
-                    {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-                    {systemStatus.traefik.installed ? "Démarrer Traefik" : "Installer Traefik"}
-                  </Button>
+                  {systemStatus.traefik.state === "port_busy" && desktopBridge()?.stopLegacyTraefik ? (
+                    <Button
+                      className="w-full sm:w-auto"
+                      size="sm"
+                      disabled={loading}
+                      title="Les projets restés sous Docker Desktop ne seront plus accessibles par leur adresse tant qu’il est arrêté."
+                      onClick={requestLegacyTraefikStop}
+                    >
+                      {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Square className="h-4 w-4" />}
+                      Arrêter l’ancien Traefik
+                    </Button>
+                  ) : (
+                    <Button
+                      className="w-full sm:w-auto"
+                      size="sm"
+                      disabled={!systemStatus.docker.running || loading}
+                      onClick={requestTraefikInstall}
+                    >
+                      {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                      {systemStatus.traefik.installed ? "Démarrer Traefik" : "Installer Traefik"}
+                    </Button>
+                  )}
                   <Button className="w-full sm:w-auto" size="sm" variant="outline" onClick={openSettingsDialog}>
                     <Settings className="h-4 w-4" />
                     Paramètres
