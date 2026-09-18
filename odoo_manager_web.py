@@ -69,9 +69,12 @@ from odoo_manager_core.project_creator import (
 from odoo_manager_core.migration import (
     compare_projects,
     copy_project,
+    copy_project_privileged,
     is_project_directory,
+    list_tree,
     measure_project,
     migration_candidates,
+    privileged_prefix,
     project_is_stopped,
 )
 from odoo_manager_core import jobs as job_control
@@ -3041,8 +3044,13 @@ def migration_snapshot():
     return {
         "available": True,
         "source": str(source),
-        "projects": migration_candidates(source, WORKSPACE),
+        "projects": migration_candidates(source, WORKSPACE, migration_privileges()),
     }
+
+
+def migration_privileges():
+    """sudo sous Linux : la base du projet appartient à l'uid PostgreSQL du conteneur."""
+    return privileged_prefix() if platform_id() == "linux" else []
 
 
 def migrate_project_job(job, project):
@@ -3053,7 +3061,8 @@ def migrate_project_job(job, project):
     source = source_root / project
     if not is_project_directory(source):
         raise ValueError(f"{project} n'est pas un projet Odoo dans {source_root}.")
-    if not project_is_stopped(source):
+    prefix = migration_privileges()
+    if not project_is_stopped(source, prefix):
         raise RuntimeError(
             f"{project} tourne encore : arrête-le dans l'ancienne application avant de le migrer, "
             "sinon sa base serait copiée dans un état incohérent."
@@ -3061,7 +3070,9 @@ def migrate_project_job(job, project):
     destination = WORKSPACE / project
 
     job.add(f"Mesure de {project}...")
-    measured = measure_project(source)
+    # Lue une seule fois : elle sert à la mesure puis au contrôle de la copie.
+    source_listing = list_tree(source, prefix) if prefix else None
+    measured = measure_project(source, prefix, listing=source_listing)
     job.add(f"{measured['files']} fichiers, {measured['bytes'] / (1024 ** 3):.1f} Go à copier.")
     free = shutil.disk_usage(WORKSPACE).free
     if free < measured["bytes"] * 1.1:
@@ -3071,14 +3082,20 @@ def migrate_project_job(job, project):
         job.progress = {"current": copied, "total": total or measured["files"]}
 
     try:
-        copy_project(source, destination, log=job.add, progress=report, total_files=measured["files"])
+        if prefix:
+            copy_project_privileged(source, destination, prefix, log=job.add, progress=report, total_files=measured["files"])
+        else:
+            copy_project(source, destination, log=job.add, progress=report, total_files=measured["files"])
     except Exception:
         # Une copie interrompue ne doit pas laisser un demi-projet dans la liste.
-        shutil.rmtree(destination, ignore_errors=True)
+        if prefix:
+            subprocess.run([*prefix, "rm", "-rf", "--", str(destination)], check=False, timeout=600)
+        else:
+            shutil.rmtree(destination, ignore_errors=True)
         raise
 
     job.add("Contrôle de la copie...")
-    comparison = compare_projects(source, destination)
+    comparison = compare_projects(source, destination, prefix, source_listing=source_listing)
     if not comparison["identical"]:
         job.add(
             f"{comparison['missing_count']} fichier(s) manquant(s), "

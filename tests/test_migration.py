@@ -1,12 +1,16 @@
 import os
 import tempfile
+import subprocess
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from odoo_manager_core.migration import (
     MIGRATION_MARKER,
     compare_projects,
     copy_project,
+    copy_project_privileged,
+    list_tree,
     is_project_directory,
     measure_project,
     migration_candidates,
@@ -133,6 +137,118 @@ class ProjectMigrationTests(unittest.TestCase):
     def test_a_directory_without_compose_is_not_a_project(self):
         (self.windows / "vide").mkdir()
         self.assertFalse(is_project_directory(self.windows / "vide"))
+
+
+SUDO = ["/usr/bin/sudo", "-n"]
+
+
+def completed(stdout="", returncode=0):
+    return subprocess.CompletedProcess([], returncode, stdout, "")
+
+
+class PrivilegedMigrationTests(unittest.TestCase):
+    """Relevé réel sous WSL : postgresql_data appartient à l'uid 999 en 0700, illisible pour `sdk`."""
+
+    def test_an_unreadable_lock_is_checked_through_sudo(self):
+        calls = []
+
+        def run(command, **_kwargs):
+            calls.append(command)
+            return completed("running\n")
+
+        with mock.patch.object(Path, "exists", side_effect=PermissionError(13, "Permission denied")):
+            self.assertFalse(project_is_stopped("/mnt/c/p/SIMPAC", SUDO, run))
+        self.assertEqual(SUDO, calls[0][:2])
+        self.assertEqual(str(Path("/mnt/c/p/SIMPAC") / "postgresql_data" / "postmaster.pid"), calls[0][-1])
+
+    def test_a_stopped_project_is_recognised_through_sudo(self):
+        with mock.patch.object(Path, "exists", side_effect=PermissionError(13, "Permission denied")):
+            self.assertTrue(project_is_stopped("/mnt/c/p/DEMO", SUDO, lambda *_a, **_k: completed("stopped\n")))
+
+    def test_an_unreadable_lock_without_sudo_blocks_the_migration(self):
+        with mock.patch.object(Path, "exists", side_effect=PermissionError(13, "Permission denied")):
+            self.assertFalse(project_is_stopped("/mnt/c/p/DEMO", [], lambda *_a, **_k: completed("stopped\n")))
+
+    def test_a_failing_sudo_never_reads_as_stopped(self):
+        with mock.patch.object(Path, "exists", side_effect=PermissionError(13, "Permission denied")):
+            self.assertFalse(project_is_stopped("/mnt/c/p/DEMO", SUDO, lambda *_a, **_k: completed("", returncode=1)))
+
+    def listing(self):
+        return completed(
+            "docker-compose.yml\tf\t120\t\n"
+            "postgresql_data\td\t4096\t\n"
+            "postgresql_data/PG_VERSION\tf\t3\t\n"
+            "odoo/addons/account\tl\t30\t../addons-store/odoo/addons/account\n"
+        )
+
+    def test_tree_listing_keeps_types_sizes_and_link_targets(self):
+        entries = list_tree("/mnt/c/p/DEMO", SUDO, lambda *_a, **_k: self.listing())
+        self.assertEqual(("l", 30, "../addons-store/odoo/addons/account"), entries["odoo/addons/account"])
+        self.assertEqual(("d", 4096, ""), entries["postgresql_data"])
+
+    def test_measure_counts_files_and_links_but_not_directories(self):
+        measured = measure_project("/mnt/c/p/DEMO", SUDO, lambda *_a, **_k: self.listing())
+        self.assertEqual({"files": 3, "bytes": 123}, measured)
+
+    def test_comparison_through_sudo_sees_the_database_files(self):
+        identical = compare_projects("/src", "/dst", SUDO, lambda *_a, **_k: self.listing())
+        self.assertTrue(identical["identical"])
+
+        def run(command, **_kwargs):
+            return self.listing() if "/src" in command else completed("docker-compose.yml\tf\t120\t\n")
+
+        truncated = compare_projects("/src", "/dst", SUDO, run)
+        self.assertFalse(truncated["identical"])
+        self.assertIn("postgresql_data/PG_VERSION", truncated["missing"])
+
+    def test_the_source_is_listed_once_for_measure_and_comparison(self):
+        # À travers /mnt/c, lister un projet Enterprise prend près de deux minutes.
+        listed = []
+
+        def run(command, **_kwargs):
+            listed.append(command[3])
+            return self.listing()
+
+        listing = list_tree("/src", SUDO, run)
+        measure_project("/src", SUDO, run, listing=listing)
+        compare_projects("/src", "/dst", SUDO, run, source_listing=listing)
+        self.assertEqual(["/src", "/dst"], listed)
+
+    def test_privileged_copy_preserves_owners_and_marks_the_copy(self):
+        calls = []
+
+        class Process:
+            returncode = 0
+
+            def communicate(self, timeout=None):
+                return "", ""
+
+        def popen(command, **_kwargs):
+            calls.append(command)
+            return Process()
+
+        def run(command, **_kwargs):
+            calls.append(command)
+            return completed()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "DEMO"
+            copy_project_privileged("/mnt/c/p/DEMO", destination, SUDO, popen=popen, run=run)
+
+        self.assertEqual([*SUDO, "cp", "-a", "--", str(Path("/mnt/c/p/DEMO")), str(destination)], calls[0])
+        self.assertTrue(calls[1][-1].endswith(MIGRATION_MARKER))
+
+    def test_a_failed_privileged_copy_is_reported(self):
+        class Process:
+            returncode = 1
+
+            def communicate(self, timeout=None):
+                return "", "cp: cannot stat: No space left on device"
+
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(RuntimeError, "No space left"):
+                copy_project_privileged("/src", Path(temporary) / "DEMO", SUDO,
+                                        popen=lambda *_a, **_k: Process(), run=lambda *_a, **_k: completed())
 
 
 if __name__ == "__main__":

@@ -7,10 +7,16 @@ migration copie le projet tel quel, bases et filestore compris, et ne touche jam
 
 Le projet doit être arrêté : copier `postgresql_data` pendant que PostgreSQL écrit
 donnerait une base incohérente.
+
+`postgresql_data` appartient à l'utilisateur PostgreSQL du conteneur (uid 999, droits
+0700) : le backend, qui tourne sous l'utilisateur du poste, ne peut ni y lire le verrou
+ni le copier. Dans ce cas, les lectures et la copie passent par `sudo -n`, et `cp -a`
+conserve propriétaires et droits, faute de quoi PostgreSQL refuserait de démarrer.
 """
 
 import os
 import shutil
+import subprocess
 import time
 from pathlib import Path
 
@@ -30,12 +36,46 @@ def is_project_directory(path):
         return False
 
 
-def project_is_stopped(path):
-    """Faux tant que PostgreSQL tourne : son fichier de verrou est présent."""
-    return not (Path(path) / POSTGRES_DATA_DIRECTORY / POSTMASTER_FILE).exists()
+_PRIVILEGE_CACHE = {}
 
 
-def migration_candidates(source_root, destination_root):
+def privileged_prefix(run=subprocess.run, which=shutil.which):
+    """`sudo -n` si le backend n'est pas root et peut l'utiliser sans mot de passe, sinon []."""
+    if os.name != "posix" or os.geteuid() == 0:
+        return []
+    if "prefix" not in _PRIVILEGE_CACHE:
+        sudo = which("sudo")
+        allowed = False
+        if sudo:
+            try:
+                allowed = run([sudo, "-n", "true"], capture_output=True, timeout=10).returncode == 0
+            except (OSError, subprocess.SubprocessError):
+                allowed = False
+        _PRIVILEGE_CACHE["prefix"] = [sudo, "-n"] if allowed else []
+    return list(_PRIVILEGE_CACHE["prefix"])
+
+
+def project_is_stopped(path, prefix=None, run=subprocess.run):
+    """Faux tant que PostgreSQL tourne : son fichier de verrou est présent.
+
+    Un verrou illisible sans droits suffisants compte comme « en cours » : mieux vaut
+    refuser une migration que copier une base ouverte.
+    """
+    lock = Path(path) / POSTGRES_DATA_DIRECTORY / POSTMASTER_FILE
+    try:
+        return not lock.exists()
+    except PermissionError:
+        if not prefix:
+            return False
+    script = 'if test -e "$1"; then echo running; else echo stopped; fi'
+    try:
+        result = run([*prefix, "sh", "-c", script, "lock", str(lock)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and result.stdout.strip() == "stopped"
+
+
+def migration_candidates(source_root, destination_root, prefix=None, run=subprocess.run):
     """Projets présents côté Windows et absents de l'environnement Linux."""
     source_root = Path(source_root)
     destination_root = Path(destination_root)
@@ -51,13 +91,37 @@ def migration_candidates(source_root, destination_root):
             "name": entry.name,
             "source": str(entry),
             "already_migrated": (destination_root / entry.name).exists(),
-            "stopped": project_is_stopped(entry),
+            "stopped": project_is_stopped(entry, prefix, run),
         })
     return candidates
 
 
-def measure_project(path):
-    """Nombre de fichiers et octets à copier, liens non suivis."""
+def list_tree(root, prefix, run=subprocess.run):
+    """Entrées d'une arborescence lue avec droits : chemin relatif -> (type, taille, cible)."""
+    command = [*prefix, "find", str(root), "-mindepth", "1", "-printf", "%P\\t%y\\t%s\\t%l\\n"]
+    result = run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3600)
+    if result.returncode != 0:
+        raise RuntimeError(f"Lecture de {root} impossible : {(result.stderr or '').strip()}")
+    entries = {}
+    for line in result.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 4:
+            continue
+        relative, kind, size, target = parts
+        entries[relative] = (kind, int(size) if size.isdigit() else 0, target)
+    return entries
+
+
+def measure_project(path, prefix=None, run=subprocess.run, listing=None):
+    """Nombre de fichiers et octets à copier, liens non suivis.
+
+    `listing` réutilise une liste déjà lue avec list_tree : à travers /mnt/c, la lire coûte
+    près de deux minutes pour un projet Enterprise.
+    """
+    if prefix or listing is not None:
+        entries = listing if listing is not None else list_tree(path, prefix, run)
+        files = [entry for entry in entries.values() if entry[0] != "d"]
+        return {"files": len(files), "bytes": sum(size for kind, size, _target in files if kind == "f")}
     files = 0
     total_bytes = 0
     for directory, _subdirectories, names in os.walk(path, followlinks=False):
@@ -70,6 +134,40 @@ def measure_project(path):
             except OSError:
                 continue
     return {"files": files, "bytes": total_bytes}
+
+
+def copy_project_privileged(source, destination, prefix, log=None, progress=None, total_files=0,
+                            popen=subprocess.Popen, run=subprocess.run, poll_seconds=5):
+    """Copie avec `cp -a` sous sudo : propriétaires, droits et liens conservés.
+
+    La progression est estimée en comptant les entrées déjà copiées.
+    """
+    source = Path(source)
+    destination = Path(destination)
+    if destination.exists():
+        raise ValueError(f"Un projet nommé {destination.name} existe déjà dans l'environnement Linux.")
+    log = log or (lambda _message: None)
+    process = popen([*prefix, "cp", "-a", "--", str(source), str(destination)],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+    while True:
+        try:
+            _stdout, stderr = process.communicate(timeout=poll_seconds)
+            break
+        except subprocess.TimeoutExpired:
+            counted = run([*prefix, "sh", "-c", 'find "$1" -mindepth 1 ! -type d | wc -l', "count", str(destination)],
+                          capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+            copied = int(counted.stdout.strip() or 0) if counted.returncode == 0 else 0
+            log(f"Copie : {copied}/{total_files} entrées" if total_files else f"Copie : {copied} entrées")
+            if progress:
+                progress(copied, total_files)
+    if process.returncode != 0:
+        raise RuntimeError(f"La copie a échoué : {(stderr or '').strip()[-400:]}")
+    marker = run([*prefix, "sh", "-c", 'printf "%s\\n" "$1" > "$2"', "marker", str(source), str(destination / MIGRATION_MARKER)],
+                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
+    if marker.returncode != 0:
+        raise RuntimeError("Copie terminée mais marqueur de migration non écrit.")
+    log("Copie terminée.")
+    return {"files": total_files}
 
 
 def copy_project(source, destination, log=None, progress=None, total_files=0):
@@ -125,10 +223,15 @@ def copy_project(source, destination, log=None, progress=None, total_files=0):
     return {"files": copied}
 
 
-def compare_projects(source, destination):
+def compare_projects(source, destination, prefix=None, run=subprocess.run, source_listing=None):
     """Contrôle d'après-copie : mêmes fichiers, mêmes cibles de liens."""
-    source_entries = _relative_entries(source)
-    destination_entries = _relative_entries(destination)
+    if prefix:
+        listing = source_listing if source_listing is not None else list_tree(source, prefix, run)
+        source_entries = _listing_entries(listing)
+        destination_entries = _listing_entries(list_tree(destination, prefix, run))
+    else:
+        source_entries = _relative_entries(source)
+        destination_entries = _relative_entries(destination)
     destination_entries.pop(MIGRATION_MARKER, None)
     missing = sorted(set(source_entries) - set(destination_entries))
     different_links = sorted(
@@ -143,6 +246,15 @@ def compare_projects(source, destination):
         "different_links": different_links[:20],
         "different_links_count": len(different_links),
         "identical": not missing and not different_links,
+    }
+
+
+def _listing_entries(listing):
+    """Même forme que _relative_entries, depuis list_tree : fichiers et liens, sans les dossiers."""
+    return {
+        relative: (target.replace("\\", "/") if kind == "l" else None)
+        for relative, (kind, _size, target) in listing.items()
+        if kind != "d"
     }
 
 
