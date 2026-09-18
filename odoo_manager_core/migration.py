@@ -138,16 +138,24 @@ def measure_project(path, prefix=None, run=subprocess.run, listing=None):
 
 def copy_project_privileged(source, destination, prefix, log=None, progress=None, total_files=0,
                             popen=subprocess.Popen, run=subprocess.run, poll_seconds=5):
-    """Copie avec `cp -a` sous sudo : propriétaires, droits et liens conservés.
+    """Copie en flux `tar` sous sudo : propriétaires numériques, droits et liens conservés.
 
-    La progression est estimée en comptant les entrées déjà copiées.
+    `cp -a` relit les attributs étendus de chaque fichier à travers /mnt/c : 20,9 s pour
+    479 fichiers, contre 3,8 s en flux tar (relevé sous WSL). PostgreSQL n'a besoin que du
+    propriétaire (uid 999) et des droits (0700), que tar conserve. La progression est
+    estimée en comptant les entrées déjà copiées.
     """
     source = Path(source)
     destination = Path(destination)
     if destination.exists():
         raise ValueError(f"Un projet nommé {destination.name} existe déjà dans l'environnement Linux.")
     log = log or (lambda _message: None)
-    process = popen([*prefix, "cp", "-a", "--", str(source), str(destination)],
+    # bash pour pipefail : sans lui, un tar de lecture en échec passerait inaperçu.
+    script = (
+        'set -euo pipefail; mkdir -p "$2"; '
+        'tar -C "$1" --numeric-owner -cf - . | tar -C "$2" --numeric-owner -xpf -'
+    )
+    process = popen([*prefix, "bash", "-c", script, "copy", str(source), str(destination)],
                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
     while True:
         try:

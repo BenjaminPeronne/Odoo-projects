@@ -235,7 +235,10 @@ class PrivilegedMigrationTests(unittest.TestCase):
             destination = Path(temporary) / "DEMO"
             copy_project_privileged("/mnt/c/p/DEMO", destination, SUDO, popen=popen, run=run)
 
-        self.assertEqual([*SUDO, "cp", "-a", "--", str(Path("/mnt/c/p/DEMO")), str(destination)], calls[0])
+        self.assertEqual([*SUDO, "bash", "-c"], calls[0][:4])
+        self.assertIn("pipefail", calls[0][4])
+        self.assertIn("--numeric-owner -xpf", calls[0][4])
+        self.assertEqual([str(Path("/mnt/c/p/DEMO")), str(destination)], calls[0][-2:])
         self.assertTrue(calls[1][-1].endswith(MIGRATION_MARKER))
 
     def test_a_failed_privileged_copy_is_reported(self):
