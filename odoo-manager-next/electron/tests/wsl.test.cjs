@@ -67,19 +67,27 @@ test('the Windows projects folder is seen from the distribution under /mnt', () 
   assert.equal(WslEnvironment.mountedWindowsPath(''), '');
 });
 
-function fakeEnvironment({ distributions = [], release = '', version = '2.4.12.0' } = {}) {
+function fakeEnvironment({ distributions = [], release = '', version = '2.4.12.0', backendId = '' } = {}) {
   const calls = [];
   const runner = async (executable, args) => {
     calls.push([executable, ...args].join(' '));
     if (args.includes('--version')) return { stdout: utf16(`Version WSL : ${version}\r\n`), stderr: '', code: 0 };
     if (args.includes('--list')) return { stdout: utf16(distributions.join('\r\n') + '\r\n'), stderr: '', code: 0 };
     if (args.includes('cat')) {
-      if (!release) throw new Error('fichier absent');
-      return { stdout: Buffer.from(release + '\n'), stderr: '', code: 0 };
+      const value = args.some(arg => arg.endsWith('.build-id')) ? backendId : release;
+      if (!value) throw new Error('fichier absent');
+      return { stdout: Buffer.from(value + '\n'), stderr: '', code: 0 };
     }
     return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), code: 0 };
   };
   return { calls, runner };
+}
+
+function backendBuild(content = 'ELF backend') {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sdk-backend-'));
+  fs.writeFileSync(path.join(directory, 'odoo-manager-backend'), content);
+  fs.mkdirSync(path.join(directory, 'odoo-manager-backend-runtime'));
+  return { directory, id: createHash('sha256').update(content).digest('hex') };
 }
 
 test('status reports what the setup screen needs, without changing anything', async () => {
@@ -135,40 +143,79 @@ test('a matching image is imported once and marked sparse', async () => {
   }
 });
 
-test('an up-to-date distribution is neither reimported nor reprovisioned', async () => {
-  const { calls, runner } = fakeEnvironment({ distributions: ['SDK-Manager'], release: '0.5.0' });
-  const environment = new WslEnvironment({ runner, installRoot: 'C:\\data\\wsl' });
+test('an up-to-date distribution is neither reimported, reprovisioned nor recopied', async () => {
+  const build = backendBuild();
+  try {
+    const { calls, runner } = fakeEnvironment({ distributions: ['SDK-Manager'], release: '0.5.0', backendId: build.id });
+    const environment = new WslEnvironment({ runner, installRoot: 'C:\\data\\wsl', mountPath: () => '/mnt/c/app/backend-linux' });
 
-  await environment.prepare({ version: '0.5.0', backendSource: 'C:\\app\\backend', archive: 'C:\\img.wsl', checksum: 'C:\\img.wsl.sha256' });
+    await environment.prepare({ version: '0.5.0', backendSource: build.directory, archive: 'C:\\img.wsl', checksum: 'C:\\img.wsl.sha256' });
 
-  assert.ok(calls.every(call => !call.includes('--from-file')));
-  assert.ok(calls.every(call => !call.includes('provision.sh')));
+    assert.ok(calls.every(call => !call.includes('--from-file')));
+    assert.ok(calls.every(call => !call.includes('provision.sh')));
+    assert.ok(calls.every(call => !call.includes('install-backend')));
+  } finally {
+    fs.rmSync(build.directory, { recursive: true, force: true });
+  }
+});
+
+test('a new build of the same version still replaces the backend', async () => {
+  // Cas rencontré en recette : 0.5.0 installée, nouveau build 0.5.0 avec un autre backend.
+  const build = backendBuild('nouveau backend');
+  try {
+    const { calls, runner } = fakeEnvironment({ distributions: ['SDK-Manager'], release: '0.5.0', backendId: 'ancien' });
+    const environment = new WslEnvironment({ runner, installRoot: 'C:\\data\\wsl', mountPath: () => '/mnt/c/app/backend-linux' });
+
+    await environment.prepare({ version: '0.5.0', backendSource: build.directory, archive: 'C:\\img.wsl', checksum: 'C:\\img.wsl.sha256' });
+
+    const install = calls.find(call => call.includes('install-backend'));
+    assert.ok(install, 'le backend doit être recopié');
+    assert.ok(install.includes('/mnt/c/app/backend-linux'));
+    assert.ok(install.includes(build.id));
+    assert.ok(calls.every(call => !call.includes('provision.sh')), 'même version : pas de provisionnement');
+  } finally {
+    fs.rmSync(build.directory, { recursive: true, force: true });
+  }
 });
 
 test('a new application version reprovisions without touching the projects', async () => {
-  const { calls, runner } = fakeEnvironment({ distributions: ['SDK-Manager'], release: '0.4.0' });
-  const copied = [];
-  const spawner = () => ({
-    stdin: { on() {}, once() {}, emit() {}, write() {}, end() {} },
-    stderr: { on() {} },
-    on(event, callback) {
-      if (event === 'close') setImmediate(() => callback(0));
-      return this;
-    },
-  });
-  const environment = new WslEnvironment({ runner, spawner, installRoot: 'C:\\data\\wsl' });
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sdk-wsl-'));
+  const build = backendBuild();
   try {
-    const backendSource = path.join(directory, 'odoo-manager-backend');
-    fs.writeFileSync(backendSource, 'ELF');
-    copied.push(backendSource);
+    const { calls, runner } = fakeEnvironment({ distributions: ['SDK-Manager'], release: '0.4.0', backendId: build.id });
+    const environment = new WslEnvironment({ runner, installRoot: 'C:\\data\\wsl', mountPath: () => '/mnt/c/app/backend-linux' });
 
-    await environment.prepare({ version: '0.5.0', backendSource, archive: 'C:\\img.wsl', checksum: 'C:\\img.wsl.sha256' });
+    await environment.prepare({ version: '0.5.0', backendSource: build.directory, archive: 'C:\\img.wsl', checksum: 'C:\\img.wsl.sha256' });
 
     assert.ok(calls.every(call => !call.includes('--from-file')), 'la distribution ne doit jamais être réimportée');
     assert.ok(calls.some(call => call.includes('provision.sh') && call.includes('SDK_MANAGER_VERSION=0.5.0')));
-    assert.ok(calls.some(call => call.includes(`mv ${BACKEND_PATH}.tmp ${BACKEND_PATH}`)));
   } finally {
-    fs.rmSync(directory, { recursive: true, force: true });
+    fs.rmSync(build.directory, { recursive: true, force: true });
   }
+});
+
+test('the backend is copied as a whole folder and swapped in one step', async () => {
+  const build = backendBuild();
+  try {
+    const { calls, runner } = fakeEnvironment();
+    const environment = new WslEnvironment({ runner, installRoot: 'C:\\data\\wsl', mountPath: () => '/mnt/c/app/backend-linux' });
+
+    await environment.installBackend(build.directory);
+
+    const install = calls.find(call => call.includes('install-backend'));
+    assert.match(install, /cp -R "\$1"\/\. \/opt\/sdk-manager\/backend\.tmp\//);
+    assert.match(install, /mv \/opt\/sdk-manager\/backend\.tmp \/opt\/sdk-manager\/backend/);
+    assert.ok(install.includes('-u root'));
+  } finally {
+    fs.rmSync(build.directory, { recursive: true, force: true });
+  }
+});
+
+test('a backend outside any Windows drive is refused', async () => {
+  const environment = new WslEnvironment({ runner: fakeEnvironment().runner, installRoot: 'C:\\data\\wsl', mountPath: () => '' });
+  await assert.rejects(() => environment.installBackend('/somewhere'), /introuvable/);
+});
+
+test('the legacy Windows workspace is handed to the backend for migration', () => {
+  const { args } = backendCommand({ port: 18765, legacyWorkspace: '/mnt/c/Users/a/Odoo-projects' });
+  assert.ok(args.includes('ODOO_MANAGER_LEGACY_WORKSPACE=/mnt/c/Users/a/Odoo-projects'));
 });

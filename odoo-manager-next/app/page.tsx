@@ -5212,7 +5212,14 @@ export default function Home() {
         applicationVersion={appVersion}
         onReady={() => {
           setWslSetupOpen(false);
-          pushToast("success", "Environnement Linux prêt. Redémarre l’application pour l’utiliser.");
+          // Le backend en service est encore celui de Windows : l'application redémarre sur
+          // l'environnement Linux, sauf si une action tourne, qu'un redémarrage interromprait.
+          if (hasRunningJobs) {
+            pushToast("success", "Environnement Linux prêt. Redémarre l’application une fois les actions en cours terminées.");
+            return;
+          }
+          pushToast("success", "Environnement Linux prêt. Redémarrage de l’application…");
+          window.setTimeout(() => void desktopBridge()?.relaunch?.(), 1500);
         }}
       />
 

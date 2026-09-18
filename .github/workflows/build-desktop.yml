@@ -124,7 +124,10 @@ jobs:
           set -euxo pipefail
           mkdir -p runtime/wsl runtime/backend-linux
           cp dist/wsl/*.wsl dist/wsl/*.sha256 runtime/wsl/
-          cp odoo-manager-next/electron/binaries/odoo-manager-backend runtime/backend-linux/
+          # Exécutable et dossier de runtime PyInstaller (onedir) : l'un ne démarre pas sans l'autre.
+          cp -R odoo-manager-next/electron/binaries/odoo-manager-backend odoo-manager-next/electron/binaries/odoo-manager-backend-runtime runtime/backend-linux/
+          test -x runtime/backend-linux/odoo-manager-backend
+          test -d runtime/backend-linux/odoo-manager-backend-runtime
       - name: Upload the Linux runtime
         uses: actions/upload-artifact@v6
         with:

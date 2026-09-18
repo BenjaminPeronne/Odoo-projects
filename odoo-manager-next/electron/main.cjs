@@ -27,7 +27,7 @@ function wslResources() {
   const root = app.isPackaged ? process.resourcesPath : path.join(app.getAppPath(), 'electron/binaries');
   return {
     ...imageFiles(root, app.getVersion()),
-    backendSource: path.join(root, 'backend-linux', 'odoo-manager-backend'),
+    backendSource: path.join(root, 'backend-linux'),
   };
 }
 
@@ -36,6 +36,13 @@ async function prepareWslEnvironment() {
   const resources = wslResources();
   const state = await wsl.prepare({ version: app.getVersion(), ...resources });
   return state;
+}
+
+/** Dossier de projets du backend Windows, vu depuis la distribution : source de la migration. */
+function windowsWorkspaceSeenFromWsl() {
+  try {
+    return WslEnvironment.mountedWindowsPath(JSON.parse(fs.readFileSync(configPath(), 'utf8')).workspace);
+  } catch { return ''; }
 }
 
 // Même règle que PROJECT_NAME_RE côté backend : l'interface ne peut pas fabriquer un chemin.
@@ -85,13 +92,8 @@ function installHandlers() {
   handle('wsl-status', () => (wsl ? wsl.status() : { wslInstalled: false, distributionInstalled: false, supported: false }));
   handle('wsl-install-wsl', () => (wsl ? wsl.installWsl() : { ok: false, message: 'Windows uniquement.' }));
   handle('wsl-prepare', () => prepareWslEnvironment());
-  // Ancien dossier Windows, vu depuis la distribution : l'interface propose d'y migrer les projets.
-  handle('wsl-legacy-workspace', () => {
-    try {
-      const configured = JSON.parse(fs.readFileSync(configPath(), 'utf8')).workspace;
-      return WslEnvironment.mountedWindowsPath(configured);
-    } catch { return ''; }
-  });
+  handle('wsl-legacy-workspace', () => windowsWorkspaceSeenFromWsl());
+  handle('relaunch', () => { app.relaunch(); app.quit(); });
   handle('wsl-open-editor', project => wsl.openEditor(`${LINUX_WORKSPACE}/${projectName(project)}`));
   handle('wsl-open-explorer', project => shell.openPath(wsl.explorerPath(`${LINUX_WORKSPACE}/${projectName(project)}`)));
   handle('pick-directory', async defaultPath => {
@@ -144,8 +146,14 @@ async function start() {
     // version l'aurait démarrée avant même l'affichage de la fenêtre.
     const distributions = await wsl.distributions().catch(() => []);
     if (distributions.some(name => name.toLowerCase() === wsl.distribution.toLowerCase())) {
-      options.command = (port, instance) => wsl.backendCommand(port, instance);
+      const legacyWorkspace = windowsWorkspaceSeenFromWsl();
+      options.command = (port, instance) => wsl.backendCommand(port, instance, legacyWorkspace);
       options.preferredPort = 18765;
+      // Le backend de ce build doit être en place avant de démarrer : une mise à jour de
+      // l'application change le backend sans forcément changer le numéro de version.
+      options.beforeStart = () => prepareWslEnvironment().catch(error => {
+        fs.appendFileSync(path.join(logDir, 'backend.log'), `Préparation de l'environnement : ${error.message}\n`);
+      });
     }
     // Sinon le backend Windows prend le relais, et l'interface propose de préparer le poste.
   }

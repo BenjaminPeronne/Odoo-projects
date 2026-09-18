@@ -8,12 +8,17 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
-const { execFile, spawn } = require('node:child_process');
+const { execFile } = require('node:child_process');
 
 const DISTRIBUTION = 'SDK-Manager';
-const BACKEND_DIRECTORY = '/opt/sdk-manager';
-const BACKEND_PATH = BACKEND_DIRECTORY + '/odoo-manager-backend';
-const PROVISION_PATH = BACKEND_DIRECTORY + '/provision.sh';
+const SDK_DIRECTORY = '/opt/sdk-manager';
+// Le backend est un exécutable accompagné de son dossier de runtime (PyInstaller onedir) :
+// il vit dans son propre dossier, remplacé d'un bloc à chaque mise à jour.
+const BACKEND_DIRECTORY = SDK_DIRECTORY + '/backend';
+const BACKEND_EXECUTABLE = 'odoo-manager-backend';
+const BACKEND_PATH = BACKEND_DIRECTORY + '/' + BACKEND_EXECUTABLE;
+const BUILD_ID_FILE = '.build-id';
+const PROVISION_PATH = SDK_DIRECTORY + '/provision.sh';
 const RELEASE_PATH = '/etc/sdk-manager-release';
 const LINUX_WORKSPACE = '/home/sdk/Odoo-projects';
 // wsl.exe écrit ses listes en UTF-16LE, y compris dans un tube.
@@ -48,13 +53,15 @@ function importArguments({ archive, distribution = DISTRIBUTION, location }) {
   return ['--install', '--from-file', archive, '--name', distribution, '--location', location, '--no-launch'];
 }
 
-function backendCommand({ distribution = DISTRIBUTION, port, instance, logLevel } = {}) {
+function backendCommand({ distribution = DISTRIBUTION, port, instance, logLevel, legacyWorkspace } = {}) {
   // `wsl.exe --exec` ne transmet aucune variable d'environnement de Windows : les
   // réglages du backend passent par `env`. Tuer wsl.exe arrête le processus Linux,
   // ce qui interdit un backend orphelin.
   const variables = [`ODOO_GUI_HOST=127.0.0.1`, `ODOO_GUI_PORT=${port}`];
   if (instance) variables.push(`ODOO_MANAGER_INSTANCE_ID=${instance}`);
   if (logLevel) variables.push(`ODOO_MANAGER_LOG_LEVEL=${logLevel}`);
+  // Ancien dossier de projets Windows, vu sous /mnt : le backend y propose la migration.
+  if (legacyWorkspace) variables.push(`ODOO_MANAGER_LEGACY_WORKSPACE=${legacyWorkspace}`);
   return { executable: 'wsl.exe', args: ['-d', distribution, '--exec', 'env', ...variables, BACKEND_PATH] };
 }
 
@@ -84,14 +91,14 @@ class WslEnvironment {
     distribution = DISTRIBUTION,
     installRoot,
     runner = defaultRunner,
-    spawner = spawn,
     log = () => {},
+    mountPath = WslEnvironment.mountedWindowsPath,
   } = {}) {
     this.distribution = distribution;
     this.installRoot = installRoot;
     this.run = runner;
-    this.spawn = spawner;
     this.log = log;
+    this.mountPath = mountPath;
   }
 
   async wslVersion() {
@@ -171,25 +178,40 @@ class WslEnvironment {
     this.log(`Environnement ${this.distribution} installé dans ${this.installRoot}.`);
   }
 
-  /** Copie le backend dans la distribution par un tube : aucun chemin Windows à traduire. */
+  /**
+   * Copie le backend Linux (exécutable et dossier de runtime) dans la distribution.
+   *
+   * La copie passe par le montage /mnt des disques Windows. Elle est préparée à côté puis
+   * permutée : une mise à jour interrompue laisse l'ancien backend intact. Le chemin source
+   * est un argument, jamais interpolé dans le script.
+   */
   async installBackend(source) {
-    await this.runInDistribution(['mkdir', '-p', BACKEND_DIRECTORY], { asRoot: true });
-    await new Promise((resolve, reject) => {
-      const child = this.spawn(
-        'wsl.exe',
-        ['-d', this.distribution, '-u', 'root', '--exec', 'sh', '-c', `cat > ${BACKEND_PATH}.tmp`],
-        { windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'] },
-      );
-      let error = '';
-      child.stderr?.on('data', chunk => { error += chunk.toString(); });
-      child.on('error', reject);
-      child.on('close', code => (code === 0
-        ? resolve()
-        : reject(new Error(`Copie du backend refusée (code ${code}). ${error.trim()}`))));
-      fs.createReadStream(source).pipe(child.stdin);
-    });
-    await this.runInDistribution(['chmod', '0755', `${BACKEND_PATH}.tmp`], { asRoot: true });
-    await this.runInDistribution(['mv', `${BACKEND_PATH}.tmp`, BACKEND_PATH], { asRoot: true });
+    const mounted = this.mountPath(source);
+    if (!mounted) throw new Error(`Backend Linux introuvable : ${source}`);
+    const buildId = await sha256OfFile(path.join(source, BACKEND_EXECUTABLE));
+    const script = [
+      'set -eu',
+      `rm -rf ${BACKEND_DIRECTORY}.tmp`,
+      `mkdir -p ${BACKEND_DIRECTORY}.tmp`,
+      `cp -R "$1"/. ${BACKEND_DIRECTORY}.tmp/`,
+      `chmod 0755 ${BACKEND_DIRECTORY}.tmp/${BACKEND_EXECUTABLE}`,
+      `printf '%s\\n' "$2" > ${BACKEND_DIRECTORY}.tmp/${BUILD_ID_FILE}`,
+      `rm -rf ${BACKEND_DIRECTORY}`,
+      `mv ${BACKEND_DIRECTORY}.tmp ${BACKEND_DIRECTORY}`,
+      // Emplacement des versions précédentes : fichier unique directement dans /opt/sdk-manager.
+      `rm -f ${SDK_DIRECTORY}/${BACKEND_EXECUTABLE}`,
+    ].join('\n');
+    await this.runInDistribution(['sh', '-c', script, 'install-backend', mounted, buildId], { asRoot: true });
+    this.log(`Backend installé dans l'environnement (${buildId.slice(0, 12)}).`);
+  }
+
+  async installedBackendId() {
+    try {
+      const { stdout } = await this.runInDistribution(['cat', `${BACKEND_DIRECTORY}/${BUILD_ID_FILE}`]);
+      return decodeWslOutput(stdout).trim();
+    } catch {
+      return '';
+    }
   }
 
   /** Met la distribution au niveau de la version de l'application. Rejouable. */
@@ -198,22 +220,30 @@ class WslEnvironment {
     this.log(`Environnement provisionné en version ${version}.`);
   }
 
-  /** Prépare l'environnement pour la version courante, sans jamais réimporter la distribution. */
+  /**
+   * Prépare l'environnement pour ce build, sans jamais réimporter la distribution.
+   *
+   * Le backend est comparé par l'empreinte de son exécutable, pas par le numéro de version :
+   * deux builds d'une même version (0.5.0-build8, build9…) embarquent des backends différents.
+   */
   async prepare({ version, backendSource, archive, checksum }) {
     const state = await this.status();
     if (!state.wslInstalled) throw new Error("WSL n'est pas installé.");
     if (!state.distributionInstalled) {
       await this.importDistribution({ archive, checksum });
     }
-    if (state.release !== version) {
+    const expected = await sha256OfFile(path.join(backendSource, BACKEND_EXECUTABLE));
+    if (await this.installedBackendId() !== expected) {
       await this.installBackend(backendSource);
+    }
+    if (state.release !== version) {
       await this.provision(version);
     }
     return this.status();
   }
 
-  backendCommand(port, instance) {
-    return backendCommand({ distribution: this.distribution, port, instance });
+  backendCommand(port, instance, legacyWorkspace = '') {
+    return backendCommand({ distribution: this.distribution, port, instance, legacyWorkspace });
   }
 
   async openEditor(projectPath) {

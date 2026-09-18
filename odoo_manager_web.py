@@ -2988,8 +2988,13 @@ def restore_module_update_exclusions_job(job, project, db_name, modules):
 
 
 def legacy_workspace_path():
-    """Ancien dossier de projets Windows, vu depuis la distribution."""
+    """Ancien dossier de projets Windows, vu depuis la distribution.
+
+    L'application le transmet au lancement (ODOO_MANAGER_LEGACY_WORKSPACE) ; un réglage
+    explicite l'emporte.
+    """
     configured = str(getattr(SETTINGS, "legacy_workspace", "") or "").strip()
+    configured = configured or os.environ.get("ODOO_MANAGER_LEGACY_WORKSPACE", "").strip()
     return Path(configured) if configured else None
 
 

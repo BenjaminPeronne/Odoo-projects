@@ -630,6 +630,26 @@ class ContainerStatusEngineApiTests(unittest.TestCase):
         self.assertEqual(1, run_capture.call_count)
 
 
+class MigrationSourceTests(unittest.TestCase):
+    """L'application transmet l'ancien dossier Windows au backend lancé dans la distribution."""
+
+    def test_source_comes_from_the_application_when_not_configured(self):
+        settings = web.ManagerSettings.from_dict({}, "/tmp/workspace")
+        with patch.object(web, "SETTINGS", settings),                 patch.dict(web.os.environ, {"ODOO_MANAGER_LEGACY_WORKSPACE": "/mnt/c/Users/a/Odoo-projects"}):
+            self.assertEqual(Path("/mnt/c/Users/a/Odoo-projects"), web.legacy_workspace_path())
+
+    def test_an_explicit_setting_wins(self):
+        settings = web.ManagerSettings.from_dict({"legacy_workspace": "/mnt/d/Projets"}, "/tmp/workspace")
+        with patch.object(web, "SETTINGS", settings),                 patch.dict(web.os.environ, {"ODOO_MANAGER_LEGACY_WORKSPACE": "/mnt/c/Users/a/Odoo-projects"}):
+            self.assertEqual(Path("/mnt/d/Projets"), web.legacy_workspace_path())
+
+    def test_no_source_means_no_migration_offer(self):
+        settings = web.ManagerSettings.from_dict({}, "/tmp/workspace")
+        with patch.object(web, "SETTINGS", settings), patch.dict(web.os.environ, {}, clear=True):
+            self.assertIsNone(web.legacy_workspace_path())
+            self.assertFalse(web.migration_snapshot()["available"])
+
+
 class ProjectDiscoveryTests(unittest.TestCase):
     def test_project_dirs_ignores_inaccessible_compose_files(self):
         with tempfile.TemporaryDirectory() as temporary:
