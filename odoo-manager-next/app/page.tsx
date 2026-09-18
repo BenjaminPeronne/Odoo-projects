@@ -875,28 +875,31 @@ function RefinedRow({
   );
 }
 
-function JobProgressPanel({ label, percent }: { label: string; percent: number | null }) {
+function JobProgressPanel({ label, percent, action }: { label: string; percent: number | null; action?: ReactNode }) {
   return (
-    <div className="mb-3 rounded-md border border-emerald-400/20 bg-slate-950 px-3 py-2.5 text-emerald-100">
-      <div className="flex min-w-0 items-center gap-2 text-xs">
-        <Loader2 className="h-4 w-4 shrink-0 animate-spin text-emerald-400" />
-        <span className="min-w-0 flex-1 truncate font-medium">{label}</span>
-        {percent !== null && <span className="shrink-0 tabular-nums text-emerald-300">{percent}%</span>}
+    <div className="mb-3 flex min-w-0 flex-wrap items-center gap-2">
+      <div className="min-w-0 flex-1 rounded-md border border-emerald-400/20 bg-slate-950 px-3 py-2.5 text-emerald-100">
+        <div className="flex min-w-0 items-center gap-2 text-xs">
+          <Loader2 className="h-4 w-4 shrink-0 animate-spin text-emerald-400" />
+          <span className="min-w-0 flex-1 truncate font-medium">{label}</span>
+          {percent !== null && <span className="shrink-0 tabular-nums text-emerald-300">{percent}%</span>}
+        </div>
+        <div
+          className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-800"
+          role="progressbar"
+          aria-label={label}
+          aria-valuemin={0}
+          aria-valuemax={percent !== null ? 100 : undefined}
+          aria-valuenow={percent ?? undefined}
+        >
+          {percent !== null ? (
+            <div className="h-full rounded-full bg-emerald-400 transition-[width] duration-500 ease-out" style={{ width: `${percent}%` }} />
+          ) : (
+            <div className="h-full w-1/3 animate-pulse rounded-full bg-emerald-400" />
+          )}
+        </div>
       </div>
-      <div
-        className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-800"
-        role="progressbar"
-        aria-label={label}
-        aria-valuemin={0}
-        aria-valuemax={percent !== null ? 100 : undefined}
-        aria-valuenow={percent ?? undefined}
-      >
-        {percent !== null ? (
-          <div className="h-full rounded-full bg-emerald-400 transition-[width] duration-500 ease-out" style={{ width: `${percent}%` }} />
-        ) : (
-          <div className="h-full w-1/3 animate-pulse rounded-full bg-emerald-400" />
-        )}
-      </div>
+      {action}
     </div>
   );
 }
@@ -908,31 +911,27 @@ function jobStopUnavailableReason(job: Job) {
   return "";
 }
 
-function JobStopButton({ job, compact = false, onRequest }: { job: Job; compact?: boolean; onRequest: (jobId: number) => void }) {
+// Rouge comme les autres actions destructives ; le carré est plein, symbole « stop » des lecteurs :
+// vide et gris, il se lisait comme une case à cocher.
+const STOP_BUTTON_CLASS =
+  "border-red-300 text-red-700 hover:border-red-400 hover:bg-red-50 hover:text-red-800 active:bg-red-100 focus-visible:ring-red-500 dark:border-red-800 dark:text-red-300 dark:hover:border-red-700 dark:hover:bg-red-950/60 dark:hover:text-red-200 dark:active:bg-red-950";
+
+function JobStopButton({ job, className, onRequest }: { job: Job; className?: string; onRequest: (jobId: number) => void }) {
   const queued = job.status === "queued";
   const cancelling = job.status === "cancelling";
   const unavailable = jobStopUnavailableReason(job);
-  const label = queued ? "Retirer" : cancelling ? "Arrêt…" : "Arrêter";
+  const label = queued ? "Retirer de la file" : cancelling ? "Arrêt en cours…" : "Arrêter l'action";
   const title = unavailable || `${queued ? "Retirer de la file d'attente" : "Arrêter"} : ${job.title}`;
-  const icon = cancelling ? <Loader2 className="h-4 w-4 animate-spin" /> : <Square className="h-4 w-4" />;
-  if (compact) {
-    return (
-      <Button
-        className="m-1 h-8 w-8 shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-        variant="ghost"
-        size="icon"
-        title={title}
-        aria-label={title}
-        disabled={Boolean(unavailable)}
-        onClick={() => onRequest(job.id)}
-      >
-        {icon}
-      </Button>
-    );
-  }
+  const icon = cancelling ? (
+    <Loader2 className="h-4 w-4 animate-spin" />
+  ) : queued ? (
+    <X className="h-4 w-4" />
+  ) : (
+    <Square className="h-3.5 w-3.5 fill-current" />
+  );
   return (
     <Button
-      className="w-full"
+      className={cn(STOP_BUTTON_CLASS, className)}
       variant="outline"
       size="sm"
       title={title}
@@ -946,17 +945,18 @@ function JobStopButton({ job, compact = false, onRequest }: { job: Job; compact?
   );
 }
 
-function JobCancelState({ job }: { job: Job }) {
+function JobCancelState({ job, action }: { job: Job; action?: ReactNode }) {
   if (job.status === "queued") {
     return (
-      <div className="mb-3 flex items-start gap-2 rounded-md border bg-muted/40 p-3 text-sm">
+      <div className="mb-3 flex flex-wrap items-start gap-2 rounded-md border bg-muted/40 p-3 text-sm">
         <Loader2 className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-        <div className="min-w-0">
+        <div className="min-w-0 flex-1">
           <p className="font-medium">En attente</p>
           <p className="mt-0.5 break-words text-muted-foreground">
             {job.waiting_for || "Une autre action occupe ce projet"} : l'action démarrera automatiquement.
           </p>
         </div>
+        {action}
       </div>
     );
   }
@@ -3082,6 +3082,10 @@ export default function Home() {
   const finishedJobSummary =
     refinedInterface && !scopedExternalLogView && selectedJob && !isJobUnfinished(selectedJob) ? selectedJob : null;
   const jobToCancel = jobs.find((job) => job.id === jobToCancelId) || null;
+  const selectedJobStop =
+    !scopedExternalLogView && selectedJob && isJobUnfinished(selectedJob) ? (
+      <JobStopButton job={selectedJob} onRequest={setJobToCancelId} />
+    ) : null;
   const rawOutputHidden = Boolean(finishedJobSummary) && !rawOutputVisible;
 
   useEffect(() => {
@@ -4746,39 +4750,47 @@ export default function Home() {
                               <div
                                 key={job.id}
                                 className={cn(
-                                  "flex min-w-0 items-start gap-1 rounded-md border bg-card transition-colors",
+                                  "min-w-0 rounded-md border bg-card transition-colors",
                                   jobSelected
                                     ? "border-primary bg-primary/[0.10] ring-2 ring-primary/35 dark:bg-primary/[0.16]"
                                     : "hover:border-primary/35 hover:bg-muted/60 dark:hover:bg-muted/40",
                                 )}
                               >
-                                <button
-                                  type="button"
-                                  className={cn("min-w-0 flex-1 rounded-md p-3 text-left", REFINED_FOCUS_RING)}
-                                  aria-pressed={jobSelected}
-                                  title={job.title}
-                                  onClick={() => selectJob(job.id)}
-                                >
-                                  <Badge variant={statusVariant(job.status)}>{statusLabel(job.status)}</Badge>
-                                  <span className="mt-2 line-clamp-2 break-words text-sm font-medium leading-5">{job.title}</span>
-                                  <span className="mt-1 block text-xs tabular-nums text-muted-foreground">{job.started_at}</span>
-                                  {job.status === "queued" && job.waiting_for && (
-                                    <span className="mt-1 block break-words text-xs text-muted-foreground">{job.waiting_for}</span>
-                                  )}
-                                </button>
-                                {isJobUnfinished(job) ? (
-                                  <JobStopButton job={job} compact onRequest={setJobToCancelId} />
-                                ) : (
-                                  <Button
-                                    className="m-1 h-8 w-8 shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                                    variant="ghost"
-                                    size="icon"
-                                    title={`Supprimer l'historique ${job.title}`}
-                                    aria-label={`Supprimer l'historique ${job.title}`}
-                                    onClick={() => deleteJob(job.id)}
+                                <div className="flex min-w-0 items-start gap-1">
+                                  <button
+                                    type="button"
+                                    className={cn("min-w-0 flex-1 rounded-md p-3 text-left", REFINED_FOCUS_RING)}
+                                    aria-pressed={jobSelected}
+                                    title={job.title}
+                                    onClick={() => selectJob(job.id)}
                                   >
-                                    <Trash2 className="h-4 w-4" />
-                                  </Button>
+                                    <Badge variant={statusVariant(job.status)}>{statusLabel(job.status)}</Badge>
+                                    <span className="mt-2 line-clamp-2 break-words text-sm font-medium leading-5">{job.title}</span>
+                                    <span className="mt-1 block text-xs tabular-nums text-muted-foreground">{job.started_at}</span>
+                                    {job.status === "queued" && job.waiting_for && (
+                                      <span className="mt-1 block break-words text-xs text-muted-foreground">{job.waiting_for}</span>
+                                    )}
+                                  </button>
+                                  {!isJobUnfinished(job) && (
+                                    <Button
+                                      className="m-1 h-8 w-8 shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                                      variant="ghost"
+                                      size="icon"
+                                      title={`Supprimer l'historique ${job.title}`}
+                                      aria-label={`Supprimer l'historique ${job.title}`}
+                                      onClick={() => deleteJob(job.id)}
+                                    >
+                                      <Trash2 className="h-4 w-4" />
+                                    </Button>
+                                  )}
+                                </div>
+                                {isJobUnfinished(job) && (
+                                  <div className="px-3 pb-3">
+                                    <JobStopButton job={job} className="w-full" onRequest={setJobToCancelId} />
+                                    {job.status !== "cancelling" && jobStopUnavailableReason(job) && (
+                                      <p className="mt-1.5 break-words text-xs text-muted-foreground">{jobStopUnavailableReason(job)}</p>
+                                    )}
+                                  </div>
                                 )}
                               </div>
                             );
@@ -4824,11 +4836,12 @@ export default function Home() {
                         </div>
                       </div>
                       <div className="min-w-0 p-4">
-                        {!scopedExternalLogView && selectedJob && <JobCancelState job={selectedJob} />}
+                        {!scopedExternalLogView && selectedJob && <JobCancelState job={selectedJob} action={selectedJobStop} />}
                         {!scopedExternalLogView && selectedJob && isJobActive(selectedJob) && (
                           <JobProgressPanel
                             label={outputProgress?.label || selectedJob.last_line || selectedJob.lines.at(-1) || "Traitement en cours"}
                             percent={outputProgressPercent}
+                            action={selectedJobStop}
                           />
                         )}
                         {finishedJobSummary && (
@@ -4925,7 +4938,7 @@ export default function Home() {
                               </Badge>
                             </button>
                             {isJobUnfinished(job) ? (
-                              <JobStopButton job={job} onRequest={setJobToCancelId} />
+                              <JobStopButton job={job} className="w-full" onRequest={setJobToCancelId} />
                             ) : (
                               <Button
                                 className="w-full border-red-300 text-red-700 hover:border-red-400 hover:bg-red-50 hover:text-red-800 active:bg-red-100 focus-visible:ring-red-500 dark:border-red-800 dark:text-red-300 dark:hover:border-red-700 dark:hover:bg-red-950/60 dark:hover:text-red-200 dark:active:bg-red-950"
@@ -4985,11 +4998,12 @@ export default function Home() {
                         </div>
                       </CardHeader>
                       <CardContent className="min-w-0">
-                        {!scopedExternalLogView && selectedJob && <JobCancelState job={selectedJob} />}
+                        {!scopedExternalLogView && selectedJob && <JobCancelState job={selectedJob} action={selectedJobStop} />}
                         {!scopedExternalLogView && selectedJob && isJobActive(selectedJob) && (
                           <JobProgressPanel
                             label={outputProgress?.label || selectedJob.last_line || selectedJob.lines.at(-1) || "Traitement en cours"}
                             percent={outputProgressPercent}
+                            action={selectedJobStop}
                           />
                         )}
                         <OdooLogsModeBar view={scopedExternalLogView} onShowFull={() => showLogs(true)} onShowSummary={() => showLogs()} />
@@ -6921,7 +6935,7 @@ export default function Home() {
           <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
             <Button variant="outline" onClick={() => setJobToCancelId(null)}>Laisser continuer</Button>
             <Button variant="destructive" disabled={!jobToCancel?.cancellable} onClick={confirmCancelJob}>
-              <Square className="h-4 w-4" />
+              {jobToCancel?.status === "queued" ? <X className="h-4 w-4" /> : <Square className="h-3.5 w-3.5 fill-current" />}
               {jobToCancel?.status === "queued" ? "Retirer" : "Arrêter"}
             </Button>
           </div>
