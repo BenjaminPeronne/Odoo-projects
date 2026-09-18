@@ -22,6 +22,7 @@ import urllib.request
 import urllib.error
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -1754,14 +1755,61 @@ def safe_resolve(path):
         return path.absolute()
 
 
+def path_scope(parent):
+    """Test « `path` est dans `parent` », même règle que path_is_relative_to, par chaînes.
+
+    pathlib parcourt les parents du chemin à chaque test : ~2 000 tests par liste de modules
+    coûtaient 20 ms, contre 0,6 ms ici. La règle reste lexicale et la casse suit normcase,
+    comme pathlib (ignorée sous Windows, respectée ailleurs).
+    """
+    parent_text = os.path.normcase(os.fspath(parent))
+    prefix = parent_text if parent_text.endswith(os.sep) else parent_text + os.sep
+
+    def contains(path):
+        text = os.path.normcase(os.fspath(path))
+        return text == parent_text or text.startswith(prefix)
+
+    return contains
+
+
+@dataclass(frozen=True)
+class ModuleLayout:
+    """Dossiers résolus d'un projet, calculés une fois par liste de modules.
+
+    Partagé au sein d'une seule liste : jamais réutilisé entre requêtes ni par une opération
+    destructive, qui refait ses propres contrôles avec path_is_relative_to.
+    """
+
+    link_parent: Path
+    storage_parent: Path
+    legacy_storage_parent: Path
+    imports_roots: tuple
+    # Parent d'un module tel que module_dirs le donne (casse normalisée) -> le même, résolu.
+    known_parents: dict
+    in_storage: object
+    in_imports: tuple
+
+    def in_import_root(self, path):
+        return any(contains(path) for contains in self.in_imports)
+
+
 def module_layout_context(project):
-    # Shared only within one listing: never reuse filesystem safety checks
-    # across requests or destructive operations.
-    return (
-        safe_resolve(project_addons_link_parent(project)),
-        safe_resolve(project_addons_storage_parent(project)),
-        safe_resolve(project_legacy_addons_storage_parent(project)),
-        module_import_roots(project),
+    link_parent = safe_resolve(project_addons_link_parent(project))
+    storage_parent = safe_resolve(project_addons_storage_parent(project))
+    legacy_storage_parent = safe_resolve(project_legacy_addons_storage_parent(project))
+    imports_roots = tuple(module_import_roots(project))
+    return ModuleLayout(
+        link_parent=link_parent,
+        storage_parent=storage_parent,
+        legacy_storage_parent=legacy_storage_parent,
+        imports_roots=imports_roots,
+        known_parents={
+            os.path.normcase(os.fspath(project_addons_link_parent(project))): link_parent,
+            os.path.normcase(os.fspath(project_addons_storage_parent(project))): storage_parent,
+            os.path.normcase(os.fspath(project_legacy_addons_storage_parent(project))): legacy_storage_parent,
+        },
+        in_storage=path_scope(storage_parent),
+        in_imports=tuple(path_scope(root) for root in imports_roots),
     )
 
 
@@ -1770,14 +1818,10 @@ def module_parent_in_layout(project, path, layout):
 
     Sous Windows, chaque résolution coûte un appel système (GetFinalPathNameByHandle) :
     la refaire pour le parent commun de ~1 400 modules doublait le temps de la liste.
+    Un parent absent de la table est simplement résolu : la table n'évite qu'un coût.
     """
-    link_parent, storage_parent, legacy_storage_parent, _imports_roots = layout
-    known = {
-        project_addons_link_parent(project): link_parent,
-        project_addons_storage_parent(project): storage_parent,
-        project_legacy_addons_storage_parent(project): legacy_storage_parent,
-    }
-    return known.get(path.parent) or safe_resolve(path.parent)
+    parent = os.path.dirname(os.fspath(path))
+    return layout.known_parents.get(os.path.normcase(parent)) or safe_resolve(parent)
 
 
 def module_location_info(project, path, layout=None):
@@ -1788,7 +1832,9 @@ def module_location_info(project, path, layout=None):
             for key in ("path", "link_path", "source_path", "path_kind")
         }
     layout = layout or module_layout_context(project)
-    link_parent, storage_parent, legacy_storage_parent, imports_roots = layout
+    link_parent = layout.link_parent
+    storage_parent = layout.storage_parent
+    legacy_storage_parent = layout.legacy_storage_parent
     parent = module_parent_in_layout(project, path, layout)
     source_path = safe_resolve(path) if path.is_symlink() else path
 
@@ -1809,9 +1855,9 @@ def module_location_info(project, path, layout=None):
             kind = "lien vers addons-store"
         elif source_path.parent == legacy_storage_parent:
             kind = "lien vers ancien stockage"
-        elif any(path_is_relative_to(source_path, root) for root in imports_roots):
+        elif layout.in_import_root(source_path):
             kind = "lien vers import outil"
-        elif path_is_relative_to(source_path, storage_parent):
+        elif layout.in_storage(source_path):
             kind = "lien vers dépôt addons-store"
         else:
             kind = "lien vers source externe"
@@ -1821,7 +1867,7 @@ def module_location_info(project, path, layout=None):
         kind = "addons-store"
     elif parent == legacy_storage_parent:
         kind = "ancien stockage"
-    elif path_is_relative_to(safe_resolve(path), storage_parent):
+    elif layout.in_storage(safe_resolve(path)):
         kind = "addons-store"
     else:
         kind = "source externe"
@@ -1878,7 +1924,9 @@ def module_removal_info(project, path, layout=None):
             for key in ("removable", "removal_mode", "removal_note")
         }
     layout = layout or module_layout_context(project)
-    link_parent, storage_parent, legacy_storage_parent, imports_roots = layout
+    link_parent = layout.link_parent
+    storage_parent = layout.storage_parent
+    legacy_storage_parent = layout.legacy_storage_parent
     parent = module_parent_in_layout(project, path, layout)
 
     if parent != link_parent:
@@ -1915,13 +1963,13 @@ def module_removal_info(project, path, layout=None):
                 "removal_mode": "link_and_legacy_storage",
                 "removal_note": "Supprime le lien odoo/addons et le dossier dans l'ancien odoo/odoo/addons.",
             }
-        if any(path_is_relative_to(target, root) for root in imports_roots):
+        if layout.in_import_root(target):
             return {
                 "removable": True,
                 "removal_mode": "link_and_import",
                 "removal_note": "Supprime le lien odoo/addons et le dossier extrait géré par l'outil.",
             }
-        if path_is_relative_to(target, storage_parent):
+        if layout.in_storage(target):
             return {
                 "removable": False,
                 "removal_mode": "protected_store",
