@@ -1495,6 +1495,42 @@ class DiagnosticModuleTests(unittest.TestCase):
         self.assertEqual(stats["missing"], 1)
         self.assertEqual(missing, ["bb/missing"])
 
+    def test_project_diagnostics_reads_databases_in_parallel_and_keeps_their_order(self):
+        # Les trois bases doivent être lues en même temps, sans quoi la barrière expire ;
+        # la première finit la dernière, et le rapport garde pourtant l'ordre de PostgreSQL.
+        barrier = threading.Barrier(3, timeout=5)
+        delays = {"db_1": 0.2, "db_2": 0.1, "db_3": 0.0}
+
+        def states(project, db_name, check_container=True):
+            self.assertFalse(check_container, "PostgreSQL vient d'être contrôlé : pas de docker inspect par base")
+            barrier.wait()
+            time.sleep(delays[db_name])
+            return {} if db_name == "db_2" else {"ghost": {"state": "installed"}}
+
+        with patch.object(web, "validate_project", side_effect=lambda project: project), \
+                patch.object(web, "docker_available", return_value=(True, "")), \
+                patch.object(web, "container_statuses", return_value={"odoo-DEMO": "running", "postgresql-DEMO": "running"}), \
+                patch.object(web, "container_status", side_effect=AssertionError("un seul docker ps suffit")), \
+                patch.object(web, "module_dirs", return_value=[]), \
+                patch.object(web, "list_databases_for", return_value=["db_1", "db_2", "postgres", "db_3"]) as list_databases, \
+                patch.object(web, "installed_modules", side_effect=states), \
+                patch.object(web, "ignored_missing_modules", return_value=set()), \
+                patch.object(web, "db_query_lines", return_value=[]), \
+                patch.object(web, "filestore_files", side_effect=lambda project, db: (set(), Path("/filestore") / db)):
+            diagnostics = web.project_diagnostics("DEMO")
+
+        list_databases.assert_called_once_with("DEMO", check_container=False)
+        self.assertEqual(["db_1", "db_2", "db_3"], [database["name"] for database in diagnostics["databases"]])
+        self.assertEqual(
+            [
+                "Modules installés absents du code dans db_1",
+                "Impossible de lire les modules de db_2",
+                "Modules installés absents du code dans db_3",
+            ],
+            [issue["title"] for issue in diagnostics["issues"]],
+        )
+        self.assertEqual([], diagnostics["databases"][1]["issues"], "l'échec de lecture reste au niveau du projet")
+
     def test_update_all_modules_uses_explicit_no_filestore_command(self):
         self.assertEqual(
             web.update_all_modules_manager_args("DEMO", "demo", True),

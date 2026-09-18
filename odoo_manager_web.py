@@ -223,7 +223,7 @@ EVENT_WATCH_INTERVAL_SECONDS = 2
 EVENT_DATABASES_MAX_AGE_SECONDS = 30
 OVERVIEW_DATABASES_CACHE = {}
 OVERVIEW_DATABASES_CACHE_LOCK = threading.Lock()
-# Sondes `docker exec` simultanées de l'overview ; au-delà elles attendent leur tour.
+# Sondes `docker exec` simultanées (overview, diagnostic) ; au-delà elles attendent leur tour.
 DOCKER_PROBE_WORKERS = 8
 EVENT_DOCKER_REFRESH = threading.Event()
 _EVENT_WATCH_THREAD_STARTED = False
@@ -1940,8 +1940,8 @@ def module_removal_info(project, path, layout=None):
     }
 
 
-def installed_modules(project, db_name):
-    if not db_name or container_status(f"postgresql-{project}") != "running":
+def installed_modules(project, db_name, check_container=True):
+    if not db_name or (check_container and container_status(f"postgresql-{project}") != "running"):
         return {}
     query = "select name,state,coalesce(latest_version,'') from ir_module_module order by name;"
     code, output = run_capture(
@@ -2069,6 +2069,120 @@ def filestore_diagnostic_issue(db_name, filestore, missing):
     }
 
 
+def database_diagnostics(project, db_name, available_paths):
+    """Diagnostic d'une base : ses informations et, dans l'ordre, les problèmes à remonter au projet."""
+    db_info = {
+        "name": db_name,
+        "issues": [],
+        "pending_modules": [],
+        "pending_missing_modules": [],
+        "ignored_missing_modules": [],
+        "local_excluded_modules": [],
+    }
+    issues = []
+
+    def report(issue):
+        issues.append(issue)
+        db_info["issues"].append(issue)
+
+    # PostgreSQL vient d'être vu démarré : pas de `docker inspect` à chaque base.
+    states = installed_modules(project, db_name, check_container=False)
+    if not states:
+        issues.append(
+            {
+                "severity": "error",
+                "title": f"Impossible de lire les modules de {db_name}",
+                "details": "La table ir_module_module est inaccessible ou ne contient aucun module.",
+                "items": [],
+            }
+        )
+        return db_info, issues
+
+    pending_missing = modules_missing_from_code(states, available_paths, TRANSIENT_MODULE_STATES)
+    db_info["pending_missing_modules"] = pending_missing
+    db_info["pending_modules"] = [
+        {
+            "name": name,
+            "state": state.get("state", ""),
+            "code_available": name in available_paths or name in DATABASE_ONLY_MODULES,
+        }
+        for name, state in sorted(states.items())
+        if state.get("state") in TRANSIENT_MODULE_STATES and name not in DATABASE_ONLY_MODULES
+    ]
+    pending_missing_names = set(pending_missing)
+    pending_available = sorted(
+        f"{name} · {state.get('state', '')}"
+        for name, state in states.items()
+        if state.get("state") in TRANSIENT_MODULE_STATES
+        and name not in pending_missing_names
+        and name not in DATABASE_ONLY_MODULES
+    )
+    if pending_available:
+        issue = {
+            "severity": "warning",
+            "title": f"Opération module en attente dans {db_name}",
+            "details": "Le code de ces modules est disponible, mais Odoo doit encore terminer leur opération.",
+            "items": pending_available[:40],
+        }
+        report(issue)
+
+    configured_ignored = ignored_missing_modules(project, db_name)
+    installed_missing_all = modules_missing_from_code(states, available_paths, {"installed"})
+    ignored_installed_missing = sorted(set(installed_missing_all) & configured_ignored)
+    installed_missing = sorted(set(installed_missing_all) - configured_ignored)
+    db_info["ignored_missing_modules"] = ignored_installed_missing
+    local_excluded = sorted(
+        name for name in configured_ignored if states.get(name, {}).get("state") == "installed"
+    )
+    db_info["local_excluded_modules"] = local_excluded
+    if installed_missing:
+        issue = {
+            "severity": "error",
+            "title": f"Modules installés absents du code dans {db_name}",
+            "details": "La base les considère installés, mais aucun dossier addon correspondant n'est présent dans les chemins montés.",
+            "items": installed_missing[:60],
+        }
+        report(issue)
+
+    if local_excluded:
+        issue = {
+            "severity": "warning",
+            "title": f"Modules exclus des mises à jour sur la copie locale {db_name}",
+            "details": (
+                "Leur opération en attente a été annulée localement sans désinstallation ni suppression de données. "
+                "Les prochaines mises à jour utiliseront une liste explicite et les laisseront inchangés."
+            ),
+            "items": local_excluded[:60],
+        }
+        report(issue)
+
+    if pending_missing:
+        issue = {
+            "severity": "error",
+            "title": f"Modules en attente absents du code dans {db_name}",
+            "details": (
+                "Odoo ne peut pas terminer leur opération tant que leurs dossiers addon et leurs dépendances "
+                "ne sont pas restaurés dans les chemins montés."
+            ),
+            "items": pending_missing[:60],
+        }
+        report(issue)
+
+    stored = db_query_lines(
+        project,
+        db_name,
+        "select store_fname from ir_attachment where store_fname is not null and store_fname <> '' order by store_fname;",
+        timeout=18,
+    )
+    actual, filestore = filestore_files(project, db_name)
+    filestore_stats, missing = filestore_summary(stored, actual)
+    db_info["filestore"] = {"path": str(filestore), **filestore_stats}
+    if missing:
+        issue = filestore_diagnostic_issue(db_name, filestore, missing)
+        report(issue)
+    return db_info, issues
+
+
 def project_diagnostics(project):
     project = validate_project(project)
     docker_ok, docker_message = docker_available()
@@ -2089,8 +2203,9 @@ def project_diagnostics(project):
         )
         return diagnostics
 
-    odoo_status = container_status(f"odoo-{project}")
-    pg_status = container_status(f"postgresql-{project}")
+    statuses = container_statuses((f"odoo-{project}", f"postgresql-{project}"))
+    odoo_status = statuses[f"odoo-{project}"]
+    pg_status = statuses[f"postgresql-{project}"]
     diagnostics["odoo_status"] = odoo_status
     diagnostics["postgres_status"] = pg_status
     if pg_status != "running":
@@ -2104,119 +2219,18 @@ def project_diagnostics(project):
         )
         return diagnostics
 
-    available_paths = {path.name: path for path in module_dirs(project)}
-    databases = [db_name for db_name in list_databases_for(project) if db_name != "postgres"]
-
-    for db_name in databases:
-        db_info = {
-            "name": db_name,
-            "issues": [],
-            "pending_modules": [],
-            "pending_missing_modules": [],
-            "ignored_missing_modules": [],
-            "local_excluded_modules": [],
-        }
-        diagnostics["databases"].append(db_info)
-
-        states = installed_modules(project, db_name)
-        if not states:
-            diagnostics["issues"].append(
-                {
-                    "severity": "error",
-                    "title": f"Impossible de lire les modules de {db_name}",
-                    "details": "La table ir_module_module est inaccessible ou ne contient aucun module.",
-                    "items": [],
-                }
-            )
-            continue
-
-        pending_missing = modules_missing_from_code(states, available_paths, TRANSIENT_MODULE_STATES)
-        db_info["pending_missing_modules"] = pending_missing
-        db_info["pending_modules"] = [
-            {
-                "name": name,
-                "state": state.get("state", ""),
-                "code_available": name in available_paths or name in DATABASE_ONLY_MODULES,
-            }
-            for name, state in sorted(states.items())
-            if state.get("state") in TRANSIENT_MODULE_STATES and name not in DATABASE_ONLY_MODULES
+    with ThreadPoolExecutor(max_workers=DOCKER_PROBE_WORKERS, thread_name_prefix="project-diagnostics") as executor:
+        # Le parcours des addons (disque) avance pendant la lecture des bases (Docker).
+        module_paths = executor.submit(lambda: {path.name: path for path in module_dirs(project)})
+        databases = [
+            db_name for db_name in list_databases_for(project, check_container=False) if db_name != "postgres"
         ]
-        pending_missing_names = set(pending_missing)
-        pending_available = sorted(
-            f"{name} · {state.get('state', '')}"
-            for name, state in states.items()
-            if state.get("state") in TRANSIENT_MODULE_STATES
-            and name not in pending_missing_names
-            and name not in DATABASE_ONLY_MODULES
-        )
-        if pending_available:
-            issue = {
-                "severity": "warning",
-                "title": f"Opération module en attente dans {db_name}",
-                "details": "Le code de ces modules est disponible, mais Odoo doit encore terminer leur opération.",
-                "items": pending_available[:40],
-            }
-            diagnostics["issues"].append(issue)
-            db_info["issues"].append(issue)
-
-        configured_ignored = ignored_missing_modules(project, db_name)
-        installed_missing_all = modules_missing_from_code(states, available_paths, {"installed"})
-        ignored_installed_missing = sorted(set(installed_missing_all) & configured_ignored)
-        installed_missing = sorted(set(installed_missing_all) - configured_ignored)
-        db_info["ignored_missing_modules"] = ignored_installed_missing
-        local_excluded = sorted(
-            name for name in configured_ignored if states.get(name, {}).get("state") == "installed"
-        )
-        db_info["local_excluded_modules"] = local_excluded
-        if installed_missing:
-            issue = {
-                "severity": "error",
-                "title": f"Modules installés absents du code dans {db_name}",
-                "details": "La base les considère installés, mais aucun dossier addon correspondant n'est présent dans les chemins montés.",
-                "items": installed_missing[:60],
-            }
-            diagnostics["issues"].append(issue)
-            db_info["issues"].append(issue)
-
-        if local_excluded:
-            issue = {
-                "severity": "warning",
-                "title": f"Modules exclus des mises à jour sur la copie locale {db_name}",
-                "details": (
-                    "Leur opération en attente a été annulée localement sans désinstallation ni suppression de données. "
-                    "Les prochaines mises à jour utiliseront une liste explicite et les laisseront inchangés."
-                ),
-                "items": local_excluded[:60],
-            }
-            diagnostics["issues"].append(issue)
-            db_info["issues"].append(issue)
-
-        if pending_missing:
-            issue = {
-                "severity": "error",
-                "title": f"Modules en attente absents du code dans {db_name}",
-                "details": (
-                    "Odoo ne peut pas terminer leur opération tant que leurs dossiers addon et leurs dépendances "
-                    "ne sont pas restaurés dans les chemins montés."
-                ),
-                "items": pending_missing[:60],
-            }
-            diagnostics["issues"].append(issue)
-            db_info["issues"].append(issue)
-
-        stored = db_query_lines(
-            project,
-            db_name,
-            "select store_fname from ir_attachment where store_fname is not null and store_fname <> '' order by store_fname;",
-            timeout=18,
-        )
-        actual, filestore = filestore_files(project, db_name)
-        filestore_stats, missing = filestore_summary(stored, actual)
-        db_info["filestore"] = {"path": str(filestore), **filestore_stats}
-        if missing:
-            issue = filestore_diagnostic_issue(db_name, filestore, missing)
-            diagnostics["issues"].append(issue)
-            db_info["issues"].append(issue)
+        available_paths = module_paths.result()
+        # Chaque base coûte deux `docker exec psql` et un parcours de son filestore, indépendants d'une
+        # base à l'autre : en série, le diagnostic enchaînait 13 `docker exec` pour 3 bases (1,1 s).
+        for db_info, issues in executor.map(lambda db_name: database_diagnostics(project, db_name, available_paths), databases):
+            diagnostics["databases"].append(db_info)
+            diagnostics["issues"].extend(issues)
 
     if not diagnostics["issues"]:
         diagnostics["issues"].append(
