@@ -298,9 +298,10 @@ aussi les actualisations explicites (bouton « Actualiser », fin d'action) : un
 masqué une base créée hors de l'application. La parallélisation seule donne le gain sans ce
 risque.
 
-Mesure réelle non refaite : Docker Desktop était arrêté après le redémarrage du Mac. Mesure du
-matin sur des sondes réelles : 233 → 92 ms pour 5 projets démarrés. Un test vérifie que les
-sondes se chevauchent et que les projets servis par le cache ne sont pas sondés.
+Mesure réelle, 2 projets démarrés (Caritel_v18, DEMO_CPL), ancienne et nouvelle fonction
+appelées en alternance : route `/api/overview` 135 → 96 ms, overview du bootstrap 122 → 76 ms.
+Le gain croît avec le nombre de projets démarrés (sondes du matin : 233 → 92 ms pour 5). Un test
+vérifie que les sondes se chevauchent et que les projets servis par le cache ne sont pas sondés.
 
 ### 4. Diagnostic : bases en parallèle, contrôles redondants retirés
 
@@ -315,8 +316,13 @@ Pour 3 bases : 14 appels `docker` en série avant, 9 appels après dont 5 en sé
 
 Équivalence vérifiée en comparant l'ancienne et la nouvelle fonction sur 5 scénarios simulés
 (3 bases aux problèmes variés, base illisible, base saine, aucune base, PostgreSQL arrêté,
-Docker indisponible) : sorties JSON identiques. Un test du dépôt vérifie le parallélisme et
-l'ordre des bases dans le rapport. Mesure réelle non refaite, Docker arrêté.
+Docker indisponible), puis sur les projets réels : sorties JSON identiques. Un test du dépôt
+vérifie le parallélisme et l'ordre des bases dans le rapport.
+
+| Projet réel | Avant | Après |
+| --- | ---: | ---: |
+| Caritel_v18, 5 bases | 960 ms | 516 ms |
+| DEMO_CPL, 1 base | 278 ms | 196 ms |
 
 ### 5. Liste des modules : comparaisons en chaînes
 
@@ -344,7 +350,6 @@ Mesures sur les 14 projets, ordre alterné pour neutraliser le cache disque :
 
 ### Reste à faire
 
-- Remesurer 3 et 4 avec Docker Desktop démarré et plusieurs projets lancés.
 - Constaté pendant les corrections, hors périmètre : `modules_for` appelle `installed_modules`
   avec sa garde `docker inspect` à chaque lecture de modules (~25 ms). Un `docker exec` sur un
   conteneur arrêté échoue déjà seul ; la garde pourrait être retirée à cet endroit.
