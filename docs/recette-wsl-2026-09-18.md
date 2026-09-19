@@ -30,6 +30,20 @@
 | 16 | Création d'une base (`recette_wsl`, Odoo 19, sans démo) | ✅ **22 s**, contre 90 s le 17/09 sur l'ancien chemin (backend Windows, projet sur `C:\`) |
 | 17 | Liste des modules de `DEMO_CPL03` | ✅ 1 447 modules en 314 ms (33 s le 16/09) |
 
+### Build final (commit `23dd64f`), 19 septembre
+
+Installé en 50 s ; backend prêt en 9 s, remplacé à version égale (empreinte identique à l'installateur). Les trois autres projets ont été arrêtés proprement sous Docker Desktop puis migrés un par un avec la copie en flux `tar`.
+
+| # | Scénario | Résultat |
+|---|---|---|
+| 18 | Verrou PostgreSQL laissé par un arrêt brutal (`SIMPAC_v16`, sortie 255) | ⚠️ Migration refusée à juste titre ; PostgreSQL relancé puis arrêté sous Docker Desktop pour une récupération propre |
+| 19 | Migration de `DEMO_CPL` (92 575 fichiers, 2,2 Go) | ✅ 39 min (71 min avec `cp -a` pour `DEMO_CPL03`, de taille équivalente), contrôle identique, base en `999`/`0700` |
+| 20 | Migration de `Caritel_v18` (162 471 fichiers, 3,7 Go) | ✅ 67 min, contrôle identique, base en `999`/`0700` |
+| 21 | Migration de `SIMPAC_v16` (143 047 fichiers, 5,1 Go) | ✅ 59 min, contrôle identique, base en `999`/`0700` |
+| 22 | Démarrage de `SIMPAC_v16` migré | ✅ 74 s, téléchargement de l'image Odoo 16 dans l'environnement compris ; arrêt propre reconnu par PostgreSQL, `/web/login` répond en 0,27 s |
+
+Le flux `tar` est 1,8 fois plus rapide que `cp -a`, et non 5 fois : l'échantillon de mesure sortait du cache de Windows. La durée suit le nombre de fichiers (environ 40 par seconde), pas leur taille : l'ouverture de chaque fichier à travers `/mnt/c` domine.
+
 ## Constats et corrections
 
 ### Avant la recette, en fusionnant `main`
@@ -54,11 +68,11 @@
 
 ## État laissé sur le poste
 
-- `DEMO_CPL03` tourne dans l'environnement Linux, avec la nouvelle base `recette_wsl` ; l'original reste intact sur `C:\`.
-- L'ancien Traefik de Docker Desktop est arrêté : `SIMPAC_v16`, `Caritel_v18` et `DEMO_CPL`, encore sous Docker Desktop, ne sont plus joignables par leur adresse. `docker start traefik` (côté Windows) le relance, mais il faudra alors arrêter celui de l'environnement : les deux ne peuvent pas tenir le port 80 en même temps.
+- Les quatre projets sont dans l'environnement Linux ; `DEMO_CPL03` (base `recette_wsl`) et `SIMPAC_v16` y tournent. Les originaux restent intacts sur `C:\`, à supprimer par l'utilisateur après vérification.
+- Sous Docker Desktop, tous les conteneurs des projets et l'ancien Traefik sont arrêtés, sans suppression.
 
 ## Non couvert
 
-- Migration avec la copie en flux `tar` (corrigée après cette recette, gain mesuré sur un échantillon).
+- Copie parallèle ou exclusion de l'antivirus pour accélérer la migration (non mesurées).
 - Poste neuf sans WSL : installation de WSL, redémarrage et reprise.
 - Plusieurs projets démarrés simultanément dans l'environnement, et comportement de la VM WSL quand l'application est fermée avec des projets en cours.
