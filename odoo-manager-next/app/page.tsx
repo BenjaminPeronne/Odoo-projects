@@ -33,6 +33,7 @@ import {
   Play,
   PlusCircle,
   RefreshCcw,
+  Rocket,
   Search,
   Settings,
   ShieldCheck,
@@ -56,6 +57,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { WslSetupDialog } from "@/components/wsl-setup";
+import { desktopBridge, desktopErrorMessage, type WslStatus } from "@/lib/desktop";
+import { isWslSetupPending } from "@/lib/wsl-setup";
 import { cn } from "@/lib/utils";
 import { mergeIncrementalJobOutput, type JobOutputCache } from "@/lib/job-output";
 import appIcon from "./icon.png";
@@ -130,7 +134,11 @@ type SystemStatus = {
   traefik?: TraefikStatus;
   workspace: string;
   workspace_exists: boolean;
+  abandoned_staging?: { count: number; names: string[]; oldest_modified_at: number };
 };
+
+type MigrationCandidate = { name: string; source: string; already_migrated: boolean; stopped: boolean };
+type MigrationSnapshot = { available: boolean; source: string; projects: MigrationCandidate[] };
 
 type BootstrapSnapshot = {
   overview: Overview;
@@ -1081,6 +1089,9 @@ export default function Home() {
   const [aboutOpen, setAboutOpen] = useState(false);
   const [appVersion, setAppVersion] = useState(FALLBACK_APP_VERSION);
   const [onboardingOpen, setOnboardingOpen] = useState(false);
+  const [wslSetupOpen, setWslSetupOpen] = useState(false);
+  const [wslStatus, setWslStatus] = useState<WslStatus | null>(null);
+  const [migration, setMigration] = useState<MigrationSnapshot | null>(null);
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
   const [creationPrerequisites, setCreationPrerequisites] = useState<ProjectCreationPrerequisites | null>(null);
   const [loadingCreationPrerequisites, setLoadingCreationPrerequisites] = useState(false);
@@ -1205,6 +1216,7 @@ export default function Home() {
   const zipInspectionGeneration = useRef(0);
   const scheduledTimeouts = useRef<Set<number>>(new Set());
   const onboardingPrompted = useRef(false);
+  const wslSetupPrompted = useRef(false);
   const pendingProjectNames = useRef(new Set<string>());
   const logOutputRef = useRef<HTMLPreElement>(null);
   const previousSelectedJobRef = useRef<{ id: number | null; status: string | null }>({ id: null, status: null });
@@ -1830,6 +1842,20 @@ export default function Home() {
     void loadCreationPrerequisites();
   }, [initializing, loadCreationPrerequisites, overview, settings]);
 
+  // Sous Windows, les projets servis depuis C:\ sont 10 fois plus lents que dans
+  // l'environnement Linux : la préparation est proposée dès qu'elle manque.
+  useEffect(() => {
+    const bridge = desktopBridge();
+    if (initializing || !bridge?.wslStatus) return;
+    bridge.wslStatus().then(setWslStatus).catch(() => setWslStatus(null));
+  }, [initializing]);
+
+  useEffect(() => {
+    if (wslSetupPrompted.current || !wslStatus || !isWslSetupPending(wslStatus, appVersion)) return;
+    wslSetupPrompted.current = true;
+    setWslSetupOpen(true);
+  }, [appVersion, wslStatus]);
+
   useEffect(() => {
     if (!pendingCreatedProjectName || !overview) return;
     const created = overview.projects.find((project) => project.name === pendingCreatedProjectName);
@@ -2117,6 +2143,66 @@ export default function Home() {
       schedule(refreshSystemStatus, 2500);
       schedule(refreshOverview, 4000);
     }
+  }
+
+  // Les projets restés sur C:\ démarrent 10 fois plus lentement : la migration les copie
+  // dans l'environnement Linux et laisse l'original intact.
+  const refreshMigration = useCallback(async () => {
+    try {
+      setMigration(await api<MigrationSnapshot>("/api/system/migration"));
+    } catch {
+      setMigration(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!initializing) void refreshMigration();
+  }, [initializing, refreshMigration]);
+
+  async function requestProjectMigration(project: string) {
+    const job = await createJob("migrate_project", { project });
+    if (job) {
+      schedule(refreshMigration, 3000);
+      schedule(refreshOverview, 4000);
+    }
+  }
+
+  // La clé GitLab déjà déclarée reste côté Windows : sans elle, l'environnement Linux ne clone rien.
+  async function requestSshKeyImport() {
+    try {
+      const result = await desktopBridge()?.wslImportSshKey?.();
+      pushToast(
+        "success",
+        result?.alreadyPresent
+          ? `La clé ${result.key} est déjà en place dans l’environnement Linux.`
+          : `Clé ${result?.key || "SSH"} copiée dans l’environnement Linux.`,
+      );
+    } catch (err) {
+      pushToast("error", desktopErrorMessage(err, "Impossible de copier la clé SSH."));
+    } finally {
+      // L'assistant a pu être ouvert avant un autre changement : son état est relu dans tous les cas.
+      await loadCreationPrerequisites();
+    }
+  }
+
+  // Sous WSL, le Traefik de Docker Desktop occupe le port 80 du réseau partagé de la VM.
+  async function requestLegacyTraefikStop() {
+    setLoading(true);
+    try {
+      const result = await desktopBridge()?.stopLegacyTraefik?.();
+      pushToast("success", result?.message || "Ancien Traefik arrêté.");
+      schedule(refreshSystemStatus, 1500);
+    } catch (err) {
+      pushToast("error", desktopErrorMessage(err, "Impossible d’arrêter l’ancien Traefik."));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // Une création interrompue laisse son dossier de préparation : 6,8 Go relevés sur un poste.
+  async function requestStagingCleanup() {
+    const job = await createJob("cleanup_staging");
+    if (job) schedule(refreshSystemStatus, 2500);
   }
 
   async function requestGitInstall() {
@@ -2941,7 +3027,7 @@ export default function Home() {
         .catch((err) => {
           if (!cancelled) {
             setGitlabProjects([]);
-            setGitlabError(err instanceof Error ? err.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, "") : "Recherche GitLab impossible.");
+            setGitlabError(desktopErrorMessage(err, "Recherche GitLab impossible."));
           }
         });
     }, 350);
@@ -2967,7 +3053,7 @@ export default function Home() {
         .catch((err) => {
           if (!cancelled) {
             setGitlabRefs({ branches: [], tags: [] });
-            setGitlabError(err instanceof Error ? err.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, "") : "Lecture des branches impossible.");
+            setGitlabError(desktopErrorMessage(err, "Lecture des branches impossible."));
           }
         });
     }, 300);
@@ -3833,20 +3919,79 @@ export default function Home() {
                   </div>
                 </div>
                 <div className="flex shrink-0 flex-col gap-2 sm:flex-row">
-                  <Button
-                    className="w-full sm:w-auto"
-                    size="sm"
-                    disabled={!systemStatus.docker.running || loading}
-                    onClick={requestTraefikInstall}
-                  >
-                    {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-                    {systemStatus.traefik.installed ? "Démarrer Traefik" : "Installer Traefik"}
-                  </Button>
+                  {systemStatus.traefik.state === "port_busy" && desktopBridge()?.stopLegacyTraefik ? (
+                    <Button
+                      className="w-full sm:w-auto"
+                      size="sm"
+                      disabled={loading}
+                      title="Les projets restés sous Docker Desktop ne seront plus accessibles par leur adresse tant qu’il est arrêté."
+                      onClick={requestLegacyTraefikStop}
+                    >
+                      {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Square className="h-4 w-4" />}
+                      Arrêter l’ancien Traefik
+                    </Button>
+                  ) : (
+                    <Button
+                      className="w-full sm:w-auto"
+                      size="sm"
+                      disabled={!systemStatus.docker.running || loading}
+                      onClick={requestTraefikInstall}
+                    >
+                      {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                      {systemStatus.traefik.installed ? "Démarrer Traefik" : "Installer Traefik"}
+                    </Button>
+                  )}
                   <Button className="w-full sm:w-auto" size="sm" variant="outline" onClick={openSettingsDialog}>
                     <Settings className="h-4 w-4" />
                     Paramètres
                   </Button>
                 </div>
+              </div>
+            )}
+            {migration?.available && migration.projects.some((candidate) => !candidate.already_migrated) && (
+              <div className="mb-4 flex flex-col gap-3 border-y border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-950 dark:border-emerald-800 dark:bg-emerald-950/45 dark:text-emerald-100">
+                <div className="flex min-w-0 items-start gap-3">
+                  <Rocket className="mt-0.5 h-5 w-5 shrink-0 text-emerald-700" />
+                  <div className="min-w-0">
+                    <div className="font-semibold">Projets à migrer vers l’environnement Linux</div>
+                    <div className="mt-0.5 break-words text-emerald-800 dark:text-emerald-200">
+                      Ces projets sont encore servis depuis {migration.source}. Odoo y démarre en une minute environ, contre quelques secondes une fois migré. La copie ne modifie pas l’original.
+                    </div>
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2 sm:pl-8">
+                  {migration.projects.filter((candidate) => !candidate.already_migrated).map((candidate) => (
+                    <Button
+                      key={candidate.name}
+                      size="sm"
+                      variant="outline"
+                      disabled={!candidate.stopped || loading}
+                      title={candidate.stopped ? undefined : "Arrête ce projet avant de le migrer : sa base serait copiée dans un état incohérent."}
+                      onClick={() => requestProjectMigration(candidate.name)}
+                    >
+                      <Rocket className="h-4 w-4" />
+                      {candidate.name}
+                      {!candidate.stopped && " (en cours d’exécution)"}
+                    </Button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {(systemStatus?.abandoned_staging?.count ?? 0) > 0 && (
+              <div className="mb-4 flex flex-col gap-3 border-y border-slate-300 bg-slate-50 px-4 py-3 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-900/45 dark:text-slate-100 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex min-w-0 items-start gap-3">
+                  <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-slate-600" />
+                  <div className="min-w-0">
+                    <div className="font-semibold">Créations de projet interrompues</div>
+                    <div className="mt-0.5 break-words text-slate-700 dark:text-slate-300">
+                      {systemStatus!.abandoned_staging!.count} dossier(s) de préparation occupent de l’espace disque sans servir à aucun projet. Les supprimer ne touche à aucun projet ni à aucune base.
+                    </div>
+                  </div>
+                </div>
+                <Button className="w-full shrink-0 sm:w-auto" size="sm" variant="outline" disabled={loading} onClick={requestStagingCleanup}>
+                  {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                  Nettoyer
+                </Button>
               </div>
             )}
             {selectedProject && addonLinks?.supported && (addonLinks.wsl_links > 0 || addonLinks.interrupted) && (
@@ -5106,6 +5251,23 @@ export default function Home() {
         </section>
       </div>
 
+      <WslSetupDialog
+        open={wslSetupOpen}
+        onOpenChange={setWslSetupOpen}
+        applicationVersion={appVersion}
+        onReady={() => {
+          setWslSetupOpen(false);
+          // Le backend en service est encore celui de Windows : l'application redémarre sur
+          // l'environnement Linux, sauf si une action tourne, qu'un redémarrage interromprait.
+          if (hasRunningJobs) {
+            pushToast("success", "Environnement Linux prêt. Redémarre l’application une fois les actions en cours terminées.");
+            return;
+          }
+          pushToast("success", "Environnement Linux prêt. Redémarrage de l’application…");
+          window.setTimeout(() => void desktopBridge()?.relaunch?.(), 1500);
+        }}
+      />
+
       <Dialog open={onboardingOpen} onOpenChange={setOnboardingOpen}>
         <DialogContent className="max-h-[90vh] max-w-2xl space-y-5 overflow-y-auto">
           <DialogHeader>
@@ -5163,10 +5325,23 @@ export default function Home() {
               }
               action={
                 creationPrerequisites?.ssh_keygen_available || creationPrerequisites?.ssh_key_present ? (
-                  <Button size="sm" variant="outline" onClick={() => openSshAssistant()}>
-                    <KeyRound className="h-4 w-4" />
-                    {creationPrerequisites.ssh_key_present ? "Voir la clé" : "Générer"}
-                  </Button>
+                  <div className="flex flex-wrap gap-2">
+                    {!creationPrerequisites.ssh_key_present && desktopBridge()?.wslImportSshKey && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        title="Copie la clé GitLab déjà déclarée de %USERPROFILE%\.ssh dans l’environnement Linux. Elle ne quitte pas ce poste."
+                        onClick={requestSshKeyImport}
+                      >
+                        <KeyRound className="h-4 w-4" />
+                        Utiliser ma clé Windows
+                      </Button>
+                    )}
+                    <Button size="sm" variant="outline" onClick={() => openSshAssistant()}>
+                      <KeyRound className="h-4 w-4" />
+                      {creationPrerequisites.ssh_key_present ? "Voir la clé" : "Générer"}
+                    </Button>
+                  </div>
                 ) : undefined
               }
             />
@@ -5656,7 +5831,7 @@ export default function Home() {
                                   setGitlabTokenDraft("");
                                   pushToast("success", "GitLab connecté : la recherche de dépôts est activée.");
                                 } catch (err) {
-                                  pushToast("error", err instanceof Error ? err.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, "") : "Connexion GitLab impossible.");
+                                  pushToast("error", desktopErrorMessage(err, "Connexion GitLab impossible."));
                                 } finally {
                                   setGitlabConnecting(false);
                                 }

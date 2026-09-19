@@ -5,6 +5,7 @@ import threading
 import time
 from dataclasses import dataclass
 
+from .docker_api import DockerEngineClient, EngineUnavailable, engine_endpoint
 from .jobs import mark_docker_arguments
 from .platform import (
     command_prefix,
@@ -95,6 +96,26 @@ def _windows_docker_backends(settings):
     return [wsl, native] if context else [native, wsl]
 
 
+def engine_client(settings, backend=None):
+    """Client API du moteur quand la CLI parlerait au même Docker, sinon None."""
+    uses_wsl = bool(backend and backend.kind == "wsl")
+    if not uses_wsl and platform_id() != "windows" and getattr(settings, "execution_mode", "native") == "wsl":
+        uses_wsl = True
+    endpoint = engine_endpoint(settings, uses_wsl=uses_wsl)
+    return DockerEngineClient(endpoint) if endpoint else None
+
+
+def _engine_version_via_api(settings, backend):
+    """Version du serveur par l'API, ou None si elle n'est pas joignable ainsi."""
+    client = engine_client(settings, backend)
+    if client is None:
+        return None
+    try:
+        return client.server_version()
+    except EngineUnavailable:
+        return None
+
+
 def _wsl_docker_installed(backend, timeout):
     if not host_executable_available("wsl.exe"):
         return False
@@ -130,6 +151,11 @@ def _default_docker_backend(settings):
     if host_executable_available(settings.docker_executable):
         return native
     return backends[0]
+
+
+def active_engine_client(settings):
+    """Client API du moteur que `docker_command` utiliserait, ou None."""
+    return engine_client(settings, _default_docker_backend(settings))
 
 
 def docker_command(settings, *arguments):
@@ -231,7 +257,7 @@ def docker_status(settings, timeout=6):
 
     environments = []
     selected = None
-    selected_result = None
+    selected_version = ""
     first_installed = None
     try:
         for backend, installed in probes:
@@ -244,6 +270,15 @@ def docker_status(settings, timeout=6):
                 continue
             if first_installed is None:
                 first_installed = backend
+            api_version = _engine_version_via_api(settings, backend)
+            if api_version:
+                environments.append(
+                    {"backend": backend.kind, "label": backend.label, "installed": True, "running": True, "message": ""}
+                )
+                if selected is None:
+                    selected = backend
+                    selected_version = api_version
+                continue
             env = os.environ.copy()
             env["PATH"] = executable_search_path()
             try:
@@ -304,7 +339,11 @@ def docker_status(settings, timeout=6):
             )
             if result.returncode == 0 and selected is None:
                 selected = backend
-                selected_result = result
+                raw_version = result.stdout.strip()
+                try:
+                    selected_version = json.loads(raw_version) if raw_version else ""
+                except json.JSONDecodeError:
+                    selected_version = raw_version.strip('"')
     except Exception:
         reset_docker_backend_cache()
         raise
@@ -343,11 +382,7 @@ def docker_status(settings, timeout=6):
 
     _cache_docker_backend(settings, selected)
 
-    raw_version = selected_result.stdout.strip()
-    try:
-        version = json.loads(raw_version) if raw_version else ""
-    except json.JSONDecodeError:
-        version = raw_version.strip('"')
+    version = selected_version
     _remember_docker_ready(settings, selected, version)
     return docker_status_payload(
         settings,

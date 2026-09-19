@@ -1,11 +1,12 @@
 import http.client
+import os
 import json
 import threading
 import time
 import tempfile
 import unittest
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from unittest.mock import Mock, patch
 
 import odoo_manager_web as web
@@ -36,6 +37,28 @@ class CorsTests(unittest.TestCase):
         web.add_cors_headers(handler)
 
         handler.send_header.assert_not_called()
+
+
+class PathIsRelativeToTests(unittest.TestCase):
+    def test_matches_pathlib_for_windows_and_posix_paths(self):
+        cases = [
+            (PureWindowsPath(r"C:\ws\p\odoo\addons-store\mod"), PureWindowsPath(r"C:\ws\p\odoo\addons-store")),
+            (PureWindowsPath(r"c:\WS\p\odoo\addons-store\mod"), PureWindowsPath(r"C:\ws\p\odoo\addons-store")),
+            (PureWindowsPath(r"C:\ws\p\odoo\addons-store"), PureWindowsPath(r"C:\ws\p\odoo\addons-store")),
+            (PureWindowsPath(r"C:\ws\p\odoo\addons-store-evil\mod"), PureWindowsPath(r"C:\ws\p\odoo\addons-store")),
+            (PureWindowsPath(r"C:\ws\p\odoo"), PureWindowsPath(r"C:\ws\p\odoo\addons-store")),
+            (PureWindowsPath(r"D:\ws\p\odoo\addons-store\mod"), PureWindowsPath(r"C:\ws\p\odoo\addons-store")),
+            (PureWindowsPath(r"C:\ws\mod"), PureWindowsPath("C:\\")),
+            (PureWindowsPath(r"\\wsl.localhost\Ubuntu\home\p\mod"), PureWindowsPath(r"\\wsl.localhost\Ubuntu\home")),
+            (PurePosixPath("/ws/p/odoo/addons-store/mod"), PurePosixPath("/ws/p/odoo/addons-store")),
+            (PurePosixPath("/ws/P/odoo/addons-store/mod"), PurePosixPath("/ws/p/odoo/addons-store")),
+            (PurePosixPath("/ws/p/odoo/addons-store2"), PurePosixPath("/ws/p/odoo/addons-store")),
+            (PurePosixPath("/ws/mod"), PurePosixPath("/")),
+            (PurePosixPath("relative/mod"), PurePosixPath("/relative")),
+        ]
+        for path, parent in cases:
+            with self.subTest(path=str(path), parent=str(parent)):
+                self.assertEqual(web.path_is_relative_to(path, parent), path.is_relative_to(parent))
 
 
 class LocalApiRequestGuardTests(unittest.TestCase):
@@ -561,6 +584,12 @@ class EventWatchCostTests(unittest.TestCase):
 
 
 class ContainerStatusBatchTests(unittest.TestCase):
+    def setUp(self):
+        # Scénarios de repli CLI : l'API du moteur ne doit pas viser le Docker du poste.
+        patcher = patch("odoo_manager_web.active_engine_client", return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     @patch("odoo_manager_web.run_capture")
     def test_skips_docker_probe_when_there_are_no_projects(self, run_capture):
         self.assertEqual(web.container_statuses(()), {})
@@ -577,6 +606,77 @@ class ContainerStatusBatchTests(unittest.TestCase):
             {"odoo-DEMO": "running", "postgresql-DEMO": "exited", "odoo-MISSING": "absent"},
         )
         self.assertEqual(run_capture.call_count, 1)
+
+
+class ContainerStatusEngineApiTests(unittest.TestCase):
+    """La boucle d'événements relit ces états toutes les 2 s : 8 ms par l'API contre 150 ms par la CLI."""
+
+    @patch("odoo_manager_web.run_capture")
+    @patch("odoo_manager_web.active_engine_client")
+    def test_states_come_from_the_engine_api(self, engine_client, run_capture):
+        engine_client.return_value = Mock(container_states=Mock(return_value={"odoo-DEMO": "running"}))
+
+        statuses = web.container_statuses(("odoo-DEMO", "postgresql-DEMO"))
+
+        self.assertEqual({"odoo-DEMO": "running", "postgresql-DEMO": "absent"}, statuses)
+        run_capture.assert_not_called()
+
+    @patch("odoo_manager_web.run_capture")
+    @patch("odoo_manager_web.active_engine_client")
+    def test_unreachable_api_falls_back_to_the_cli(self, engine_client, run_capture):
+        engine_client.return_value = Mock(container_states=Mock(side_effect=web.EngineUnavailable("pipe absent")))
+        run_capture.return_value = (0, "odoo-DEMO|running\n")
+
+        self.assertEqual({"odoo-DEMO": "running"}, web.container_statuses(("odoo-DEMO",)))
+        self.assertEqual(1, run_capture.call_count)
+
+
+class PortBusyTests(unittest.TestCase):
+    """Sous WSL, le Traefik de Docker Desktop tient le port 80 dans le réseau partagé de la VM."""
+
+    def table(self, lines):
+        handle = tempfile.NamedTemporaryFile("w", delete=False, suffix=".tcp", encoding="ascii")
+        handle.write("  sl  local_address rem_address   st\n")
+        handle.write("".join(lines))
+        handle.close()
+        self.addCleanup(os.unlink, handle.name)
+        return handle.name
+
+    def test_a_listening_socket_on_port_80_is_detected(self):
+        # 0100007F:0050 = 127.0.0.1:80, état 0A = LISTEN (relevé réel sous WSL avec Docker Desktop).
+        table = self.table(["   0: 0100007F:0050 00000000:0000 0A 00000000:00000000 00:00000000 00000000\n"])
+        self.assertTrue(web.local_port_listening(80, tables=(table,)))
+
+    def test_an_established_connection_is_not_a_listener(self):
+        table = self.table(["   0: 0100007F:0050 0100007F:D431 01 00000000:00000000 00:00000000 00000000\n"])
+        self.assertFalse(web.local_port_listening(80, tables=(table,)))
+
+    def test_another_port_does_not_count(self):
+        table = self.table(["   0: 00000000:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000\n"])
+        self.assertFalse(web.local_port_listening(80, tables=(table,)))
+
+    def test_missing_tables_mean_no_conflict(self):
+        self.assertFalse(web.local_port_listening(80, tables=("/nonexistent/tcp",)))
+
+
+class MigrationSourceTests(unittest.TestCase):
+    """L'application transmet l'ancien dossier Windows au backend lancé dans la distribution."""
+
+    def test_source_comes_from_the_application_when_not_configured(self):
+        settings = web.ManagerSettings.from_dict({}, "/tmp/workspace")
+        with patch.object(web, "SETTINGS", settings),                 patch.dict(web.os.environ, {"ODOO_MANAGER_LEGACY_WORKSPACE": "/mnt/c/Users/a/Odoo-projects"}):
+            self.assertEqual(Path("/mnt/c/Users/a/Odoo-projects"), web.legacy_workspace_path())
+
+    def test_an_explicit_setting_wins(self):
+        settings = web.ManagerSettings.from_dict({"legacy_workspace": "/mnt/d/Projets"}, "/tmp/workspace")
+        with patch.object(web, "SETTINGS", settings),                 patch.dict(web.os.environ, {"ODOO_MANAGER_LEGACY_WORKSPACE": "/mnt/c/Users/a/Odoo-projects"}):
+            self.assertEqual(Path("/mnt/d/Projets"), web.legacy_workspace_path())
+
+    def test_no_source_means_no_migration_offer(self):
+        settings = web.ManagerSettings.from_dict({}, "/tmp/workspace")
+        with patch.object(web, "SETTINGS", settings), patch.dict(web.os.environ, {}, clear=True):
+            self.assertIsNone(web.legacy_workspace_path())
+            self.assertFalse(web.migration_snapshot()["available"])
 
 
 class ProjectDiscoveryTests(unittest.TestCase):

@@ -23,6 +23,19 @@ def default_bundles():
     return {"Darwin": "app,dmg", "Linux": "deb,appimage", "Windows": "nsis"}.get(platform.system(), "")
 
 
+def installer_smoke_test_allowed(system=None, environ=None, forced=False):
+    """Le test installe le même appId et ferme l'application ouverte : réservé à un runner jetable.
+
+    Sur un poste de développement, il remplaçait l'entrée de désinstallation et les
+    raccourcis de l'installation réelle, puis supprimait son dossier.
+    """
+    system = system or platform.system()
+    environ = environ if environ is not None else os.environ
+    if system != "Windows":
+        return False
+    return forced or bool(environ.get("GITHUB_ACTIONS"))
+
+
 def builder_arguments(bundles, system=None):
     system = system or platform.system()
     allowed = {"Darwin": {"app", "dmg", "zip"}, "Linux": {"deb", "appimage"}, "Windows": {"nsis"}}
@@ -39,6 +52,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bundles", help="app,dmg ou zip sur macOS ; deb,appimage sur Linux ; nsis sur Windows")
     parser.add_argument("--no-clean", action="store_true", help="Conserver le dossier de travail PyInstaller")
+    parser.add_argument(
+        "--installer-smoke-test",
+        action="store_true",
+        help="Windows : tester l'installateur. Il remplace l'installation du poste : réservé à la CI ou à une machine jetable.",
+    )
     args = parser.parse_args()
     if not shutil.which("npm"):
         raise SystemExit("npm est requis.")
@@ -46,6 +64,9 @@ def main():
         targets = builder_arguments(args.bundles or default_bundles())
     except ValueError as error:
         raise SystemExit(str(error)) from error
+    # Ressources de l'environnement WSL : présentes ou non, electron-builder doit les trouver.
+    for directory in ("wsl", "backend-linux"):
+        (FRONTEND / "electron" / "binaries" / directory).mkdir(parents=True, exist_ok=True)
     sidecar = [sys.executable, str(ROOT / "scripts/build_electron_sidecar.py")]
     if not args.no_clean:
         sidecar.append("--clean")
@@ -69,11 +90,18 @@ def main():
         for extension in ("*.dmg", "*.zip", "*.blockmap"):
             for artifact in output.glob(extension):
                 shutil.copy2(artifact, FRONTEND / "release" / artifact.name)
-    if os.name == "nt":
+    if platform.system() == "Windows":
         installers = sorted((FRONTEND / "release").glob("*.exe"), key=lambda p: p.stat().st_mtime)
         if not installers:
             raise SystemExit("Installateur NSIS introuvable.")
-        run([sys.executable, str(ROOT / "scripts/smoke_test_windows_installer.py"), "--installer", str(installers[-1])])
+        if installer_smoke_test_allowed(forced=args.installer_smoke_test):
+            run([sys.executable, str(ROOT / "scripts/smoke_test_windows_installer.py"), "--installer", str(installers[-1])])
+        else:
+            print(
+                "Test de l'installateur ignoré : il remplacerait l'installation de ce poste. "
+                "Utilise --installer-smoke-test sur une machine jetable.",
+                flush=True,
+            )
     print(f"Paquets Electron créés dans: {output}")
 
 

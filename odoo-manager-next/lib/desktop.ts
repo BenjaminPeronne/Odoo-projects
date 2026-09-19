@@ -1,3 +1,5 @@
+import type { WslStatus } from "./wsl-setup";
+
 export interface DesktopBridge {
   getVersion(): Promise<string>;
   backendEndpoint(): Promise<string>;
@@ -15,7 +17,19 @@ export interface DesktopBridge {
   gitlabDisconnect(): Promise<GitLabStatus>;
   gitlabProjects(search: string): Promise<GitLabProject[]>;
   gitlabRefs(projectId: number, search: string): Promise<GitLabRefs>;
+  // Environnement Linux sous Windows : absent des autres systèmes.
+  wslStatus?(): Promise<WslStatus>;
+  wslInstallWsl?(): Promise<{ ok: boolean; rebootRequired: boolean; message: string }>;
+  wslPrepare?(): Promise<WslStatus>;
+  wslLegacyWorkspace?(): Promise<string>;
+  relaunch?(): Promise<void>;
+  stopLegacyTraefik?(): Promise<{ ok: boolean; message: string }>;
+  wslImportSshKey?(): Promise<{ ok: boolean; key: string; alreadyPresent?: boolean }>;
+  wslOpenEditor?(project: string): Promise<void>;
+  wslOpenExplorer?(project: string): Promise<void>;
 }
+
+export type { WslStatus } from "./wsl-setup";
 
 export interface GitLabStatus {
   available: boolean;
@@ -48,6 +62,12 @@ export interface StoredRikaCredentials {
 
 declare global {
   interface Window { sdkDesktop?: DesktopBridge }
+}
+
+/** Message d'une erreur du pont natif, sans l'enveloppe technique ajoutée par Electron. */
+export function desktopErrorMessage(error: unknown, fallback: string) {
+  if (!(error instanceof Error)) return fallback;
+  return error.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, "") || fallback;
 }
 
 export function desktopBridge() {

@@ -2,6 +2,7 @@
 /*
 
 !/.gitignore
+!/.gitattributes
 !/.github/
 !/.vscode/
 !/.vscode/tasks.json
@@ -10,6 +11,7 @@
 !/odoo_manager_core/
 !/scripts/
 !/tests/
+!/wsl/
 !/archive/
 !/archive/bootstrap/
 !/archive/bootstrap/odoo_manager_bootstrap_legacy.html

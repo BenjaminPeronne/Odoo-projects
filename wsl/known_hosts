@@ -1,0 +1,14 @@
+# Clés d'hôte SSH vérifiées, distribuées avec l'environnement.
+#
+# Ce fichier est volontairement vide : personne n'a encore vérifié l'empreinte de
+# gitlab.sudokeys.com hors bande. Tant qu'il l'est, le premier clone accepte la clé
+# présentée puis la mémorise (StrictHostKeyChecking=accept-new), exactement comme
+# aujourd'hui sous Windows et macOS.
+#
+# Pour la figer, relever l'empreinte depuis GitLab (Admin > paramètres, ou une
+# machine de confiance déjà appairée), comparer les deux, puis ajouter la ligne :
+#
+#   [gitlab.sudokeys.com]:10022 ssh-ed25519 AAAA...
+#
+# La CI reconstruit alors l'image avec cette clé, et une attaque de l'homme du
+# milieu au premier clone devient impossible.

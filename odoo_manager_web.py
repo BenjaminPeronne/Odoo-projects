@@ -4,6 +4,7 @@ import errno
 import html
 import http.client
 import json
+import ntpath
 import os
 import posixpath
 import queue
@@ -24,7 +25,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from odoo_manager_runtime import initialize_runtime_streams
 
@@ -59,16 +60,34 @@ from odoo_manager_core.platform import (
 )
 from odoo_manager_core.project_creator import (
     SUPPORTED_ODOO_VERSIONS,
+    abandoned_staging_entries,
     validate_git_ref,
     validate_gitlab_repository,
     validate_new_project_name,
     validate_odoo_version,
 )
+from odoo_manager_core.migration import (
+    compare_projects,
+    copy_project,
+    copy_project_privileged,
+    is_project_directory,
+    list_tree,
+    measure_project,
+    migration_candidates,
+    privileged_prefix,
+    project_is_stopped,
+)
 from odoo_manager_core import jobs as job_control
 from odoo_manager_core.project_service import terminate_active_processes as terminate_project_processes
 from odoo_manager_core.traefik import url_with_port
 from odoo_manager_core.odoo_log_display import OdooLogDisplay, compact_odoo_log_text
-from odoo_manager_core.system import docker_command, reset_docker_backend_cache, shell_command
+from odoo_manager_core.docker_api import EngineUnavailable
+from odoo_manager_core.system import (
+    active_engine_client,
+    docker_command,
+    reset_docker_backend_cache,
+    shell_command,
+)
 from odoo_manager_core.windows_links import (
     MIGRATION_JOURNAL_NAME,
     contains_wsl_symlink,
@@ -302,11 +321,17 @@ def truthy(value):
 
 
 def path_is_relative_to(path, parent):
-    try:
-        path.relative_to(parent)
+    """Comparaison lexicale, comme PurePath.relative_to, sans en recopier les segments.
+
+    relative_to reconstruit chaque parent en Python : 55 % du temps de la liste
+    des modules (4 000 appels pour un projet Enterprise).
+    """
+    flavour = ntpath if isinstance(path, PureWindowsPath) else posixpath
+    path_text = flavour.normcase(str(path))
+    parent_text = flavour.normcase(str(parent))
+    if path_text == parent_text:
         return True
-    except ValueError:
-        return False
+    return path_text.startswith(parent_text.rstrip(flavour.sep) + flavour.sep)
 
 
 def project_imports_root(project):
@@ -648,6 +673,33 @@ def detected_traefik(docker_running=True):
     return value
 
 
+def running_in_wsl():
+    if os.path.exists("/proc/sys/fs/binfmt_misc/WSLInterop"):
+        return True
+    return hasattr(os, "uname") and "microsoft" in os.uname().release.lower()
+
+
+def local_port_listening(port, tables=("/proc/net/tcp", "/proc/net/tcp6")):
+    """Vrai si un processus écoute déjà sur ce port TCP, lu sans droits dans /proc.
+
+    Sous WSL, toutes les distributions partagent le réseau de la VM : le Traefik de Docker
+    Desktop y occupe le port 80 et empêche celui de l'environnement Linux de démarrer.
+    """
+    wanted = f":{port:04X}"
+    for table in tables:
+        try:
+            with open(table, encoding="ascii") as handle:
+                next(handle, None)
+                for line in handle:
+                    fields = line.split()
+                    # Colonne 4 : état, 0A = LISTEN.
+                    if len(fields) > 3 and fields[1].endswith(wanted) and fields[3] == "0A":
+                        return True
+        except OSError:
+            continue
+    return False
+
+
 def traefik_status(docker=None):
     docker = docker or docker_status(SETTINGS)
     has_compose, exists, valid = traefik_compose_probe()
@@ -668,6 +720,14 @@ def traefik_status(docker=None):
     elif problems:
         state = "conflict"
         message = f"Une instance Traefik existante ({instance.describe()}) ne peut pas servir les projets : {'; '.join(problems)}."
+    elif platform_id() == "linux" and local_port_listening(http_port):
+        state = "port_busy"
+        message = (
+            f"Le port {http_port} est déjà occupé, probablement par le Traefik de Docker Desktop : "
+            "arrête-le pour que les projets de l'environnement Linux soient accessibles."
+            if running_in_wsl()
+            else f"Le port {http_port} est déjà occupé par un autre service : libère-le pour démarrer Traefik."
+        )
     elif not exists:
         state = "missing"
         message = "Traefik n'est pas installé dans le dossier attendu."
@@ -694,6 +754,16 @@ def traefik_status(docker=None):
     }
 
 
+def abandoned_staging_snapshot():
+    """Dossiers de créations interrompues, proposés au nettoyage par l'interface."""
+    entries = abandoned_staging_entries(WORKSPACE)
+    return {
+        "count": len(entries),
+        "names": [entry["name"] for entry in entries[:20]],
+        "oldest_modified_at": min((entry["modified_at"] for entry in entries), default=0),
+    }
+
+
 def system_status_snapshot(docker=None):
     docker = docker or docker_status(SETTINGS)
     return {
@@ -701,6 +771,7 @@ def system_status_snapshot(docker=None):
         "traefik": traefik_status(docker),
         "workspace": str(WORKSPACE),
         "workspace_exists": safe_path_is_dir(WORKSPACE),
+        "abandoned_staging": abandoned_staging_snapshot(),
     }
 
 
@@ -1064,16 +1135,34 @@ def install_git(job):
 
 
 def container_status(name):
+    detected = container_states_via_api()
+    if detected is not None:
+        return detected.get(name, "absent")
     code, output = run_capture(docker_command(SETTINGS, "inspect", "-f", "{{.State.Status}}", name), timeout=5)
     if code != 0 or not output:
         return "absent"
     return output.splitlines()[0].strip()
 
 
+def container_states_via_api():
+    """États des conteneurs par l'API du moteur, ou None pour repasser par la CLI."""
+    client = active_engine_client(SETTINGS)
+    if client is None:
+        return None
+    try:
+        return client.container_states()
+    except EngineUnavailable:
+        return None
+
+
 def container_statuses(names):
     names = tuple(names)
     if not names:
         return {}
+    # La boucle d'événements relit ces états toutes les 2 s : 8 ms par l'API contre 150 ms par la CLI.
+    detected = container_states_via_api()
+    if detected is not None:
+        return {name: detected.get(name, "absent") for name in names}
     code, output = run_capture(
         docker_command(SETTINGS, "ps", "-a", "--format", "{{.Names}}|{{.State}}"),
         timeout=8,
@@ -2934,6 +3023,112 @@ def restore_module_update_exclusions_job(job, project, db_name, modules):
     for name in sorted(changed):
         job.add(f"- {name}: installed -> to upgrade")
     job.add("Si leur code est absent, le diagnostic les signalera de nouveau avant la mise à jour.")
+
+
+def legacy_workspace_path():
+    """Ancien dossier de projets Windows, vu depuis la distribution.
+
+    L'application le transmet au lancement (ODOO_MANAGER_LEGACY_WORKSPACE) ; un réglage
+    explicite l'emporte.
+    """
+    configured = str(getattr(SETTINGS, "legacy_workspace", "") or "").strip()
+    configured = configured or os.environ.get("ODOO_MANAGER_LEGACY_WORKSPACE", "").strip()
+    return Path(configured) if configured else None
+
+
+def migration_snapshot():
+    """Projets restés sur le disque Windows, proposés à la migration."""
+    source = legacy_workspace_path()
+    if not source or not safe_path_is_dir(source):
+        return {"available": False, "source": str(source or ""), "projects": []}
+    return {
+        "available": True,
+        "source": str(source),
+        "projects": migration_candidates(source, WORKSPACE, migration_privileges()),
+    }
+
+
+def migration_privileges():
+    """sudo sous Linux : la base du projet appartient à l'uid PostgreSQL du conteneur."""
+    return privileged_prefix() if platform_id() == "linux" else []
+
+
+def migrate_project_job(job, project):
+    """Copie un projet du disque Windows vers l'environnement Linux, sans toucher à l'original."""
+    source_root = legacy_workspace_path()
+    if not source_root:
+        raise RuntimeError("Aucun ancien dossier de projets n'est connu.")
+    source = source_root / project
+    if not is_project_directory(source):
+        raise ValueError(f"{project} n'est pas un projet Odoo dans {source_root}.")
+    prefix = migration_privileges()
+    if not project_is_stopped(source, prefix):
+        raise RuntimeError(
+            f"{project} tourne encore : arrête-le dans l'ancienne application avant de le migrer, "
+            "sinon sa base serait copiée dans un état incohérent."
+        )
+    destination = WORKSPACE / project
+
+    job.add(f"Mesure de {project}...")
+    # Lue une seule fois : elle sert à la mesure puis au contrôle de la copie.
+    source_listing = list_tree(source, prefix) if prefix else None
+    measured = measure_project(source, prefix, listing=source_listing)
+    job.add(f"{measured['files']} fichiers, {measured['bytes'] / (1024 ** 3):.1f} Go à copier.")
+    free = shutil.disk_usage(WORKSPACE).free
+    if free < measured["bytes"] * 1.1:
+        raise RuntimeError("Espace disque insuffisant dans l'environnement Linux pour cette copie.")
+
+    def report(copied, total):
+        job.progress = {"current": copied, "total": total or measured["files"]}
+
+    try:
+        if prefix:
+            copy_project_privileged(source, destination, prefix, log=job.add, progress=report, total_files=measured["files"])
+        else:
+            copy_project(source, destination, log=job.add, progress=report, total_files=measured["files"])
+    except Exception:
+        # Une copie interrompue ne doit pas laisser un demi-projet dans la liste.
+        if prefix:
+            subprocess.run([*prefix, "rm", "-rf", "--", str(destination)], check=False, timeout=600)
+        else:
+            shutil.rmtree(destination, ignore_errors=True)
+        raise
+
+    job.add("Contrôle de la copie...")
+    comparison = compare_projects(source, destination, prefix, source_listing=source_listing)
+    if not comparison["identical"]:
+        job.add(
+            f"{comparison['missing_count']} fichier(s) manquant(s), "
+            f"{comparison['different_links_count']} lien(s) différent(s)."
+        )
+        raise RuntimeError("La copie ne correspond pas à l'original : le projet migré a été conservé pour inspection.")
+    clear_project_module_cache(project)
+    invalidate_overview_databases(project)
+    job.add(f"{project} est migré. L'original reste dans {source_root} : supprime-le quand tu l'auras vérifié.")
+    return {"project": project, "files": comparison["copied_files"], "source": str(source)}
+
+
+def cleanup_staging_job(job):
+    """Supprime les dossiers de créations interrompues, jamais un projet."""
+    entries = abandoned_staging_entries(WORKSPACE)
+    if not entries:
+        job.add("Aucun dossier de préparation à nettoyer.")
+        return {"removed": 0}
+
+    creator = ProjectCreator(SETTINGS, WORKSPACE, project_service())
+    free_before = shutil.disk_usage(WORKSPACE).free
+    removed = 0
+    for entry in entries:
+        path = Path(entry["path"])
+        job.add(f"Suppression de {path.name}...")
+        creator.cleanup_staging_path(path, log=job.add)
+        if path.exists():
+            job.add(f"{path.name} n'a pas pu être supprimé.")
+            continue
+        removed += 1
+    freed = max(0, shutil.disk_usage(WORKSPACE).free - free_before)
+    job.add(f"{removed} dossier(s) supprimé(s), {freed / (1024 ** 3):.1f} Go libérés.")
+    return {"removed": removed, "freed_bytes": freed}
 
 
 def install_traefik_job(job):
@@ -5355,12 +5550,33 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         return
 
+    def discard_request_body(self):
+        """Lit le corps avant de refuser la requête.
+
+        Fermer la connexion en laissant des octets non lus fait envoyer un RST par
+        Windows : le client perd la réponse 403 et ne voit qu'une connexion coupée.
+        Au-delà de la limite JSON, la connexion est coupée sans rien lire.
+        """
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            return
+        if length <= 0 or length > MAX_JSON_BODY_BYTES:
+            return
+        remaining = length
+        while remaining > 0:
+            chunk = self.rfile.read(min(remaining, 65536))
+            if not chunk:
+                return
+            remaining -= len(chunk)
+
     def reject_untrusted_request(self):
         reason = untrusted_request_reason(self.headers)
         if not reason:
             return False
         body = json.dumps({"error": reason}, ensure_ascii=False).encode("utf-8")
         try:
+            self.discard_request_body()
             self.send_response(403)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -5431,6 +5647,8 @@ class Handler(BaseHTTPRequestHandler):
                 return json_response(self, system_status_snapshot())
             if path == "/api/system/project-creation-prerequisites":
                 return json_response(self, project_creation_prerequisites())
+            if path == "/api/system/migration":
+                return json_response(self, migration_snapshot())
             if path == "/api/system/ssh-keys":
                 return json_response(self, ssh_public_keys_snapshot())
             if path == "/api/jobs":
@@ -5968,6 +6186,11 @@ class Handler(BaseHTTPRequestHandler):
                     ),
                     project=name,
                 )
+            elif action == "migrate_project":
+                name = validate_new_project_name(payload.get("project", ""))
+                job = Job(f"Migrer {name} vers l'environnement Linux", migrate_project_job, (name,), project=name)
+            elif action == "cleanup_staging":
+                job = Job("Nettoyer les créations interrompues", cleanup_staging_job)
             elif action == "install_traefik":
                 job = Job("Installer Traefik", install_traefik_job, resources={"traefik"})
             elif action == "install_git":

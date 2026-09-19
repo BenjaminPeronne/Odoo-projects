@@ -13,6 +13,13 @@ files:
 extraResources:
   - from: electron/binaries
     to: backend
+  # Environnement Linux embarqué sous Windows : image de la distribution et backend
+  # Linux qui y tourne. Les dossiers existent toujours (build_desktop.py), même vides :
+  # l'application dit alors que l'image manque au lieu d'échouer au démarrage.
+  - from: electron/binaries/wsl
+    to: wsl
+  - from: electron/binaries/backend-linux
+    to: backend-linux
 asar: true
 npmRebuild: false
 afterPack: electron/after-pack.cjs
